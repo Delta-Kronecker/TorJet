@@ -294,6 +294,76 @@ namespace StartTor
             return ok > 0 ? 0 : 1;
         }
 
+        private static string FormatSpeed(double bytesPerSec)
+        {
+            if (bytesPerSec >= 1024 * 1024)
+                return (bytesPerSec / (1024 * 1024)).ToString("0.00") + " MB/s";
+            if (bytesPerSec >= 1024)
+                return (bytesPerSec / 1024).ToString("0.0") + " KB/s";
+            return bytesPerSec.ToString("0") + " B/s";
+        }
+
+        private static void SpeedTest()
+        {
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
+            catch { }
+
+            Console.WriteLine();
+            Console.WriteLine("Speed test: downloading 10 MB through Tor (HTTP 127.0.0.1:8118)...");
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                    "https://speed.cloudflare.com/__down?bytes=10000000");
+                req.Proxy = new WebProxy("127.0.0.1", 8118);
+                req.Method = "GET";
+                req.Timeout = 60000;
+                req.ReadWriteTimeout = 60000;
+                req.UserAgent = "start-tor-speedtest/1.0";
+
+                using (WebResponse resp = req.GetResponse())
+                using (Stream s = resp.GetResponseStream())
+                {
+                    byte[] buf = new byte[64 * 1024];
+                    long total = 0;
+                    Stopwatch sw = Stopwatch.StartNew();
+                    long lastBytes = 0;
+                    long lastTicks = sw.ElapsedTicks;
+                    double inst = 0;
+                    int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        total += n;
+                        long now = sw.ElapsedTicks;
+                        if (now - lastTicks >= Stopwatch.Frequency)
+                        {
+                            inst = (total - lastBytes) /
+                                   ((now - lastTicks) / (double)Stopwatch.Frequency);
+                            lastBytes = total;
+                            lastTicks = now;
+                            Console.WriteLine("    " + total.ToString("#,0") + " bytes  (" + FormatSpeed(inst) + ")");
+                        }
+                    }
+                    sw.Stop();
+
+                    if (total > lastBytes)
+                        inst = (total - lastBytes) /
+                               ((sw.ElapsedTicks - lastTicks) / (double)Stopwatch.Frequency);
+                    double avg = total / sw.Elapsed.TotalSeconds;
+
+                    Console.WriteLine();
+                    Console.WriteLine("Done: " + total.ToString("#,0") + " bytes in " +
+                                      sw.Elapsed.TotalSeconds.ToString("0.0") + " s");
+                    Console.WriteLine("  average speed    : " + FormatSpeed(avg));
+                    Console.WriteLine("  instantaneous    : " + FormatSpeed(inst));
+                    Console.WriteLine("  (avg MB/s = " + (avg / (1024 * 1024)).ToString("0.00") + ")");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[x] speed test failed: " + ex.Message);
+            }
+        }
+
         private static int StopTor()
         {
             Process p = FindTor();
@@ -457,6 +527,7 @@ namespace StartTor
 
             bool proxyOn = false;
             Console.WriteLine("  Ctrl+P (Ctrl+ح)  toggle the Windows system proxy on/off");
+            Console.WriteLine("  Ctrl+S            run a speed test through the Tor proxy");
             Console.WriteLine("  Ctrl+C            stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
             Console.WriteLine();
@@ -483,6 +554,10 @@ namespace StartTor
                             proxyOn = !proxyOn;
                             SetSystemProxy(proxyOn);
                             Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                        }
+                        else if ((ki.Modifiers & ConsoleModifiers.Control) != 0 && ki.Key == ConsoleKey.S)
+                        {
+                            SpeedTest();
                         }
                     }
                 }

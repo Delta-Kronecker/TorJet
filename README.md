@@ -26,7 +26,9 @@ data\
    Your choice is remembered for next time (`data\mode.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
    automatically — press **Ctrl+P** (or **Ctrl+ح** on a Persian keyboard) to
-   toggle it on/off (HTTP 127.0.0.1:8118). Press **Ctrl+C** to stop Tor.
+   toggle it on/off (HTTP 127.0.0.1:8118). Press **Ctrl+S** to run a speed test
+   (downloads 10 MB from speed.cloudflare.com through the Tor proxy and reports
+   instantaneous and average speed). Press **Ctrl+C** to stop Tor.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
 
 You can also launch with a fixed mode or command:
