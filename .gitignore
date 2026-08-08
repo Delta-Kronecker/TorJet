@@ -1,0 +1,8 @@
+# local build/test output
+/dist/
+/portable/
+/bin/
+*.log
+
+# tor runtime data (kept next to the packaged tor.exe, never in the repo)
+data/

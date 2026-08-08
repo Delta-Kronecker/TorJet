@@ -1,0 +1,137 @@
+name: Build Tor for Windows
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  transports:
+    name: pluggable-transports (Windows x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Build pluggable transports
+        run: |
+          set -e
+          mkdir -p out
+          GOPATH_BIN="$(go env GOPATH)/bin/windows_amd64"
+
+          echo "=== obfs4 ==="
+          GOOS=windows GOARCH=amd64 \
+            go install gitlab.com/yawning/obfs4.git/obfs4proxy@latest
+          cp "$GOPATH_BIN/obfs4proxy.exe" out/obfs4proxy.exe
+
+          echo "=== snowflake client ==="
+          GOOS=windows GOARCH=amd64 \
+            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@latest
+          cp "$GOPATH_BIN/client.exe" out/snowflake-client.exe
+
+          echo "=== webtunnel client ==="
+          GOOS=windows GOARCH=amd64 \
+            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@latest
+          cp "$GOPATH_BIN/client.exe" out/webtunnel.exe
+
+          ls -la out/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: transports-win64
+          path: out/
+
+  tor-win64:
+    name: tor-win64-portable (single release artifact)
+    runs-on: windows-latest
+    needs: [transports]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-binutils
+            make
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-libevent
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-gettext
+            perl
+            autoconf
+            automake
+            libtool
+            m4
+
+      - name: Configure
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          chmod +x configure
+          ./configure --host=x86_64-w64-mingw32 \
+            --disable-asciidoc --disable-man --disable-html-docs
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          make -j$(nproc) 2>&1 | tee build-win.log
+          exit ${PIPESTATUS[0]}
+
+      - name: Smoke test
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          ./src/app/tor.exe --version
+
+      - name: Stage tor + runtime DLLs + geoip
+        shell: msys2 {0}
+        run: |
+          cd "$GITHUB_WORKSPACE"
+          mkdir -p dist/scripts dist/data
+          cp src/app/tor.exe dist/
+          cp "$MINGW_PREFIX"/bin/libevent*.dll "$MINGW_PREFIX"/bin/libssl-3-x64.dll "$MINGW_PREFIX"/bin/libcrypto-3-x64.dll "$MINGW_PREFIX"/bin/zlib1.dll dist/ 2>/dev/null || true
+          cp src/config/geoip src/config/geoip6 dist/
+
+      - name: Download transports
+        uses: actions/download-artifact@v4
+        with:
+          name: transports-win64
+          path: transports/
+
+      - name: Merge transports into dist
+        shell: pwsh
+        run: |
+          Copy-Item "transports\*.exe" -Destination "dist\" -Force
+          Get-ChildItem "dist" | Select-Object Name, Length
+
+      - name: Copy portable config, scripts, README, start.bat
+        shell: pwsh
+        run: |
+          Copy-Item "configs\torrc.iran" "dist\torrc" -Force
+          Copy-Item "scripts\launcher.ps1" "dist\scripts\" -Force
+          Copy-Item "scripts\fetch-bridges.ps1" "dist\scripts\" -Force
+          if (Test-Path "README-iran.md") { Copy-Item "README-iran.md" "dist\" -Force }
+          if (Test-Path "start.bat") { Copy-Item "start.bat" "dist\" -Force }
+
+      - name: Upload single release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tor-win64-portable
+          path: dist/
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log-win
+          path: build-win.log
