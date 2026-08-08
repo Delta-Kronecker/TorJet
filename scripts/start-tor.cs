@@ -527,7 +527,7 @@ namespace StartTor
 
             bool proxyOn = false;
             Console.WriteLine("  Ctrl+P (Ctrl+ح)  toggle the Windows system proxy on/off");
-            Console.WriteLine("  Ctrl+S            run a speed test through the Tor proxy");
+            Console.WriteLine("  S                 run a speed test through the Tor proxy");
             Console.WriteLine("  Ctrl+C            stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
             Console.WriteLine();
@@ -555,7 +555,7 @@ namespace StartTor
                             SetSystemProxy(proxyOn);
                             Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
                         }
-                        else if ((ki.Modifiers & ConsoleModifiers.Control) != 0 && ki.Key == ConsoleKey.S)
+                        else if (ki.Key == ConsoleKey.S)
                         {
                             SpeedTest();
                         }
