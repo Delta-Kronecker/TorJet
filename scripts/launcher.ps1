@@ -15,7 +15,7 @@
   This launcher just starts tor, waits for 100% bootstrap and sets the system
   proxy.
 
-.PARAMETER BinDir      Folder containing tor.exe (default: the launcher's own folder)
+.PARAMETER BinDir      Folder containing tor.exe (default: parent of this script's folder)
 .PARAMETER BootstrapOnly  Exit after reaching 100% bootstrap (no proxy change, no wait)
 .PARAMETER NewCircuit   Send SIGNAL NEWNYM to a running tor and exit
 .PARAMETER Stop         Stop the running tor managed by this launcher and reset proxy
@@ -33,7 +33,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-if (-not $BinDir) { $BinDir = $PSScriptRoot }
+if (-not $BinDir) { $BinDir = Split-Path $PSScriptRoot -Parent }
 $DataDir   = Join-Path $BinDir "data"
 $RunTorrc  = Join-Path $BinDir "torrc"
 $TorLog    = Join-Path $DataDir "tor.log"
