@@ -1,6 +1,7 @@
 # Tor optimized for Iranian networks - Tor 0.4.9.11
-# This torrc must sit NEXT TO tor.exe. All paths are relative, so the whole
-# folder is fully portable: copy/move it anywhere and it still works.
+# Copied by start-tor.exe to data\torrc.template, then data\torrc is generated
+# from it per the chosen mode. All paths are relative, so the whole folder is
+# fully portable: copy/move it anywhere and it still works.
 
 # --- Local proxies (Windows system proxy uses HTTP 8118) ---
 SocksPort 127.0.0.1:9050
@@ -40,7 +41,7 @@ DisableDebuggerAttachment 1
 AvoidDiskWrites 1
 SafeLogging 1
 
-# --- Bridges (optional) ---
-# Direct connection works on most networks. If your network blocks Tor, run
-# scripts\fetch-bridges.ps1 - it refreshes bridges and adds UseBridges 1 +
-# Bridge lines to this file.
+# --- Bridges (added by start-tor.exe when needed) ---
+# start-tor.exe copies this file to torrc.template and writes data\torrc from
+# it. When you pick webtunnel/obfs4/vanilla it appends UseBridges 1 + Bridge
+# lines from data\bridges\*.txt. Direct mode leaves the file as-is.
