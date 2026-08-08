@@ -3,10 +3,16 @@ name: Build Tor for Windows
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0). Leave empty for a build-only run.'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   transports:
@@ -145,3 +151,53 @@ jobs:
         with:
           name: build-log-win
           path: tor-src/build-win.log
+
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [tor-win64]
+    if: |
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') ||
+      startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Resolve tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            TAG="${GITHUB_REF#refs/tags/}"
+          fi
+          echo "TAG=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing release tag: $TAG"
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: tor-win64-portable
+          path: release
+
+      - name: Package portable folder into zip
+        shell: bash
+        run: |
+          cd release
+          zip -r "../tor-win64-portable-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe data
+          ls -la ../
+
+      - name: Publish release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ steps.tag.outputs.TAG }}"
+          ZIP="tor-win64-portable-$TAG.zip"
+          if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$ZIP" --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$TAG" "$ZIP" \
+              --repo "${{ github.repository }}" \
+              --title "Tor Portable for Iran $TAG" \
+              --notes "Portable Tor for Iran (official tor 0.4.9.11).
+              Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla).
+              - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530"
+          fi

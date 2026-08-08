@@ -1,4 +1,4 @@
-// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
+﻿// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
 // Portable Tor launcher for Iran. Expected layout next to this exe:
 //   start-tor.exe
 //   data\
@@ -7,13 +7,15 @@
 //     bridges\       <- obfs4_tested.txt, webtunnel_tested.txt, vanilla_tested.txt
 //     data\          <- runtime state (tor.log, cached-*, keys)
 // The user picks a connection mode (direct / webtunnel / obfs4 / vanilla); the
-// program writes data\torrc and starts tor, then enables the Windows system
-// proxy (HTTP 127.0.0.1:8118). Press Enter to stop and restore the proxy.
-// Subcommands: --newcircuit, --stop, --bootstrap-only [mode].
+// program writes data\torrc and starts tor. Tor is NOT set as the system proxy
+// automatically: press Ctrl+P (Ctrl+ح on a Persian keyboard) to toggle the
+// Windows system proxy (HTTP 127.0.0.1:8118) on/off. Ctrl+C stops tor.
+// Subcommands: --newcircuit, --stop, --update-bridges, --bootstrap-only [mode].
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -44,6 +46,9 @@ namespace StartTor
 
         private static readonly string[] ModeNames = { "direct", "webtunnel", "obfs4", "vanilla" };
         private static readonly string[] BridgeFiles = { "", "webtunnel_tested.txt", "obfs4_tested.txt", "vanilla_tested.txt" };
+        private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt" };
+        private const string BridgesBaseUrl =
+            "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
 
         private static Process torProc;
         private static bool cleaned;
@@ -221,6 +226,74 @@ namespace StartTor
             return true;
         }
 
+        private static int CountBridgeLines(string path)
+        {
+            int n = 0;
+            foreach (string line in File.ReadAllLines(path))
+            {
+                string t = line.Trim();
+                if (t.Length == 0 || t.StartsWith("#")) continue;
+                if (t.Contains("2001:db8")) continue;
+                n++;
+            }
+            return n;
+        }
+
+        private static int UpdateBridges()
+        {
+            try
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+            }
+            catch { }
+
+            Directory.CreateDirectory(BridgesDir);
+            Console.WriteLine("Updating bridge files from " + BridgesBaseUrl);
+            Console.WriteLine("  -> " + BridgesDir);
+            Console.WriteLine();
+
+            int ok = 0;
+            foreach (string f in AllBridgeFiles)
+            {
+                string dest = Path.Combine(BridgesDir, f);
+                string tmp = dest + ".tmp";
+                string url = BridgesBaseUrl + "/" + f;
+                try
+                {
+                    using (WebClient wc = new WebClient())
+                    {
+                        wc.Headers[HttpRequestHeader.UserAgent] = "start-tor-updater/1.0";
+                        wc.DownloadFile(url, tmp);
+                    }
+                    int n = CountBridgeLines(tmp);
+                    if (n == 0)
+                    {
+                        Console.WriteLine("[!] " + f + ": downloaded file has no usable bridges - keeping old.");
+                        try { File.Delete(tmp); } catch { }
+                        continue;
+                    }
+                    File.Copy(tmp, dest, true);
+                    try { File.Delete(tmp); } catch { }
+                    Console.WriteLine("[i] " + f + ": " + n + " bridges - updated.");
+                    ok++;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[x] " + f + ": " + ex.Message);
+                }
+            }
+
+            Console.WriteLine();
+            if (ok == AllBridgeFiles.Length)
+            {
+                Console.WriteLine("All bridge files are up to date.");
+                return 0;
+            }
+            Console.WriteLine("Updated " + ok + " of " + AllBridgeFiles.Length +
+                              " bridge files (restart tor to use the new bridges).");
+            return ok > 0 ? 0 : 1;
+        }
+
         private static int StopTor()
         {
             Process p = FindTor();
@@ -251,6 +324,11 @@ namespace StartTor
             if (args.Length > 0 && args[0] == "--stop")
             {
                 return StopTor();
+            }
+            if (args.Length > 0 &&
+                (args[0] == "--update-bridges" || args[0] == "--update" || args[0] == "-u"))
+            {
+                return UpdateBridges();
             }
 
             int mode = -1;
@@ -368,6 +446,7 @@ namespace StartTor
 
             Console.WriteLine();
             Console.WriteLine("Bootstrapped 100% - Tor is UP.");
+            Console.WriteLine();
 
             if (bootstrapOnly)
             {
@@ -376,14 +455,40 @@ namespace StartTor
                 return 0;
             }
 
-            SetSystemProxy(true);
-            Console.WriteLine("System proxy set to 127.0.0.1:8118");
-            Console.WriteLine("  SOCKS5 127.0.0.1:9050");
-            Console.WriteLine("  HTTP   127.0.0.1:8118");
-            Console.WriteLine("  DNS    127.0.0.1:53530");
+            bool proxyOn = false;
+            Console.WriteLine("  Ctrl+P (Ctrl+ح)  toggle the Windows system proxy on/off");
+            Console.WriteLine("  Ctrl+C            stop Tor and exit");
+            Console.WriteLine("  Proxy             OFF");
             Console.WriteLine();
-            Console.WriteLine("Press Enter to stop Tor and restore the system proxy...");
-            try { Console.ReadLine(); } catch { }
+            while (true)
+            {
+                bool alive = true;
+                if (torProc != null)
+                {
+                    try { torProc.Refresh(); alive = !torProc.HasExited; }
+                    catch { alive = false; }
+                }
+                if (!alive)
+                {
+                    Console.WriteLine("[x] tor exited with code " + (torProc != null ? torProc.ExitCode : -1) + ".");
+                    break;
+                }
+                try
+                {
+                    if (Console.KeyAvailable)
+                    {
+                        ConsoleKeyInfo ki = Console.ReadKey(true);
+                        if ((ki.Modifiers & ConsoleModifiers.Control) != 0 && ki.Key == ConsoleKey.P)
+                        {
+                            proxyOn = !proxyOn;
+                            SetSystemProxy(proxyOn);
+                            Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                        }
+                    }
+                }
+                catch { }
+                Thread.Sleep(150);
+            }
 
             Cleanup();
             Console.WriteLine("Tor stopped; system proxy restored.");

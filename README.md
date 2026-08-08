@@ -24,14 +24,19 @@ data\
    - **1 Direct** — no bridges (works when Tor is not blocked)
    - **2 WebTunnel**, **3 Obfs4**, **4 Vanilla** — bridges from `data\bridges\`
    Your choice is remembered for next time (`data\mode.txt`).
-3. On 100% bootstrap the system proxy is enabled (HTTP 127.0.0.1:8118,
-   SOCKS5 127.0.0.1:9050, DNS 127.0.0.1:53530). Press Enter to stop and restore.
+3. On 100% bootstrap Tor is running. The system proxy is NOT changed
+   automatically — press **Ctrl+P** (or **Ctrl+ح** on a Persian keyboard) to
+   toggle it on/off (HTTP 127.0.0.1:8118). Press **Ctrl+C** to stop Tor.
+   SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
 
 You can also launch with a fixed mode or command:
 
 ```
 start-tor.exe obfs4            start directly in obfs4 mode
 start-tor.exe --newcircuit     request a new identity (NEWNYM)
+start-tor.exe --update-bridges re-download the bridge lists from the
+                               Tor-Bridges-Collector repo and replace them
+                               in data\bridges\
 start-tor.exe --stop           stop Tor and restore the proxy
 ```
 
