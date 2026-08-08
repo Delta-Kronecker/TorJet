@@ -145,4 +145,4 @@ if ($all.Count -gt 0) {
     Write-Host "  3. Paste them into:  $TorrcPath  (add 'Bridge ' before each)"
 }
 if ($failed.Count) { Write-Host "No bridges for: $($failed -join ', ')" }
-Write-Host "Run tor.exe (or start.bat / launcher.ps1) to connect."
+Write-Host "Run start-tor.exe (or data\scripts\launcher.ps1) to connect."

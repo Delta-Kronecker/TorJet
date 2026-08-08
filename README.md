@@ -1,73 +1,46 @@
-Tor protects your privacy on the internet by hiding the connection between
-your Internet address and the services you use. We believe Tor is reasonably
-secure, but please ensure you read the instructions and configure it properly.
+# Tor Portable for Iran
+
+Single-folder, portable Tor client for Iranian networks. Built in CI from the
+official tor 0.4.9.11 sources plus pluggable transports (obfs4, snowflake,
+webtunnel). No installation and no `%APPDATA%` — every file and all runtime
+state stays inside one folder, so you can copy or move it anywhere.
+
+## Layout
+
+```
+start-tor.exe          double-click to start Tor and set the system proxy
+data\                  everything else lives here
+  tor.exe              + DLLs, geoip, geoip6, transports (obfs4/snowflake/webtunnel)
+  torrc                portable config (relative paths; sits next to tor.exe)
+  scripts\             launcher.ps1 (new identity / stop) + fetch-bridges.ps1
+  data\                runtime state (cached consensus, keys, tor.log)
+```
+
+## Usage
+
+1. Download the `tor-win64-portable` artifact from GitHub Actions and unzip.
+2. Double-click `start-tor.exe`.
+3. Tor bootstraps (direct by default). On 100% the system proxy is enabled
+   (HTTP 127.0.0.1:8118, SOCKS5 127.0.0.1:9050, DNS 127.0.0.1:53530).
+   Press Enter to stop Tor and restore the proxy.
+
+## If Tor is blocked
+
+Run `data\scripts\fetch-bridges.ps1` to fetch fresh bridges (it rewrites
+`data\torrc`), then start again.
+
+## Advanced
+
+```
+data\scripts\launcher.ps1 -NewCircuit   request a new identity
+data\scripts\launcher.ps1 -Stop         stop Tor and restore the proxy
+```
 
 ## Build
 
-To build Tor from source:
+`.github/workflows/build.yml` builds tor + transports on every push and
+publishes the `tor-win64-portable` artifact.
 
-```
-./configure
-make
-make install
-```
-
-To build Tor from a just-cloned git repository:
-
-```
-./autogen.sh
-./configure
-make
-make install
-```
-
-## Releases
-
-The tarballs, checksums and signatures can be found here: https://dist.torproject.org
-
-- Checksum: `<tarball-name>.sha256sum`
-- Signatures: `<tarball-name>.sha256sum.asc`
-
-### Schedule
-
-You can find our release schedule here:
-
-- https://gitlab.torproject.org/tpo/core/team/-/wikis/NetworkTeam/CoreTorReleases
-
-### Keys that CAN sign a release
-
-The following keys are the maintainers of this repository. One or many of
-these keys can sign the releases, do NOT expect them all:
-
-- Alexander Færøy:
-    [514102454D0A87DB0767A1EBBE6A0531C18A9179](https://keys.openpgp.org/vks/v1/by-fingerprint/1C1BC007A9F607AA8152C040BEA7B180B1491921)
-- David Goulet:
-    [B74417EDDF22AC9F9E90F49142E86A2A11F48D36](https://keys.openpgp.org/vks/v1/by-fingerprint/B74417EDDF22AC9F9E90F49142E86A2A11F48D36)
-- Nick Mathewson:
-    [2133BC600AB133E1D826D173FE43009C4607B1FB](https://keys.openpgp.org/vks/v1/by-fingerprint/2133BC600AB133E1D826D173FE43009C4607B1FB)
-
-## Development
-
-See our hacking documentation in [doc/HACKING/](./doc/HACKING).
-
-## Resources
-
-Home page:
-
-- https://www.torproject.org/
-
-Download new versions:
-
-- https://www.torproject.org/download/tor
-
-How to verify Tor source:
-
-- https://support.torproject.org/little-t-tor/
-
-Documentation and Frequently Asked Questions:
-
-- https://support.torproject.org/
-
-How to run a Tor relay:
-
-- https://community.torproject.org/relay/ 
+- `tor-src\` — unmodified official tor 0.4.9.11 source
+- `configs\torrc.iran` — the portable config template (becomes `data\torrc`)
+- `scripts\start-tor.cs` — source of `start-tor.exe` (compiled with `build-start-tor.ps1`)

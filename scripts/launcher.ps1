@@ -4,12 +4,13 @@
   system proxy (HTTP 127.0.0.1:8118) on success.
 
 .DESCRIPTION
-  Layout (fully portable, all files together):
+  Layout (fully portable, all files together under data\):
     folder\
-      tor.exe + DLLs + webtunnel.exe + obfs4proxy.exe + snowflake-client.exe
-      torrc                 <- complete config (direct by default, or with
-                                bridges after running fetch-bridges.ps1)
-      data\                 <- created next to tor.exe: tor.log, bridges.txt
+      start-tor.exe
+      data\
+        tor.exe + DLLs + transports + torrc + geoip + geoip6
+        scripts\           <- this script + fetch-bridges.ps1
+        data\              <- runtime state: tor.log, cached-*, keys
 
   There is NO runtime config generation: torrc already sits next to tor.exe.
   This launcher just starts tor, waits for 100% bootstrap and sets the system

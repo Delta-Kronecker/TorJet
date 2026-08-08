@@ -6,3 +6,6 @@
 
 # tor runtime data (kept next to the packaged tor.exe, never in the repo)
 data/
+
+# locally compiled launcher (CI builds it into the artifact)
+/scripts/start-tor.exe

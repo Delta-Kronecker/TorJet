@@ -75,7 +75,7 @@ jobs:
       - name: Configure
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/tor-src"
           chmod +x configure
           ./configure --host=x86_64-w64-mingw32 \
             --disable-asciidoc --disable-man --disable-html-docs
@@ -83,24 +83,24 @@ jobs:
       - name: Build
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/tor-src"
           make -j$(nproc) 2>&1 | tee build-win.log
           exit ${PIPESTATUS[0]}
 
       - name: Smoke test
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE/tor-src"
           ./src/app/tor.exe --version
 
       - name: Stage tor + runtime DLLs + geoip
         shell: msys2 {0}
         run: |
-          cd "$GITHUB_WORKSPACE"
-          mkdir -p dist/scripts dist/data
-          cp src/app/tor.exe dist/
-          cp "$MINGW_PREFIX"/bin/libevent*.dll "$MINGW_PREFIX"/bin/libssl-3-x64.dll "$MINGW_PREFIX"/bin/libcrypto-3-x64.dll "$MINGW_PREFIX"/bin/zlib1.dll dist/ 2>/dev/null || true
-          cp src/config/geoip src/config/geoip6 dist/
+          cd "$GITHUB_WORKSPACE/tor-src"
+          mkdir -p ../dist/data/scripts
+          cp src/app/tor.exe ../dist/data/
+          cp "$MINGW_PREFIX"/bin/libevent*.dll "$MINGW_PREFIX"/bin/libssl-3-x64.dll "$MINGW_PREFIX"/bin/libcrypto-3-x64.dll "$MINGW_PREFIX"/bin/zlib1.dll ../dist/data/ 2>/dev/null || true
+          cp src/config/geoip src/config/geoip6 ../dist/data/
 
       - name: Download transports
         uses: actions/download-artifact@v4
@@ -108,20 +108,24 @@ jobs:
           name: transports-win64
           path: transports/
 
-      - name: Merge transports into dist
+      - name: Merge transports into dist/data
         shell: pwsh
         run: |
-          Copy-Item "transports\*.exe" -Destination "dist\" -Force
-          Get-ChildItem "dist" | Select-Object Name, Length
+          Copy-Item "transports\*.exe" -Destination "dist\data\" -Force
+          Get-ChildItem "dist" -Recurse -File | Select-Object FullName, Length
 
-      - name: Copy portable config, scripts, README, start.bat
+      - name: Copy portable config, scripts, README
         shell: pwsh
         run: |
-          Copy-Item "configs\torrc.iran" "dist\torrc" -Force
-          Copy-Item "scripts\launcher.ps1" "dist\scripts\" -Force
-          Copy-Item "scripts\fetch-bridges.ps1" "dist\scripts\" -Force
-          if (Test-Path "README-iran.md") { Copy-Item "README-iran.md" "dist\" -Force }
-          if (Test-Path "start.bat") { Copy-Item "start.bat" "dist\" -Force }
+          Copy-Item "configs\torrc.iran" "dist\data\torrc" -Force
+          Copy-Item "scripts\launcher.ps1" "dist\data\scripts\" -Force
+          Copy-Item "scripts\fetch-bridges.ps1" "dist\data\scripts\" -Force
+          Copy-Item "README.md" "dist\data\README.md" -Force
+
+      - name: Compile start-tor.exe
+        shell: pwsh
+        run: |
+          & "scripts\build-start-tor.ps1" -OutFile "dist\start-tor.exe"
 
       - name: Upload single release artifact
         uses: actions/upload-artifact@v4
@@ -134,4 +138,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-log-win
-          path: build-win.log
+          path: tor-src/build-win.log
