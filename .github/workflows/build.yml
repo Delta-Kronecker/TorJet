@@ -130,7 +130,7 @@ jobs:
       - name: Copy config template, bridges, README
         shell: pwsh
         run: |
-          Copy-Item "configs\torrc.iran" "dist\data\torrc.template" -Force
+          Copy-Item "configs\torrc.speed" "dist\data\torrc.template" -Force
           Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
 
@@ -196,8 +196,9 @@ jobs:
           else
             gh release create "$TAG" "$ZIP" \
               --repo "${{ github.repository }}" \
-              --title "Tor Portable for Iran $TAG" \
-              --notes "Portable Tor for Iran (official tor 0.4.9.11).
+              --title "Tor Speed Portable $TAG" \
+              --notes "Tor Speed Portable (official tor 0.4.9.11), tuned for maximum
+              download/upload throughput.
               Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla).
               - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530"
           fi

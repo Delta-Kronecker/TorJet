@@ -1,9 +1,10 @@
-# Tor Portable for Iran
+# Tor Speed Portable
 
-Single-folder, portable Tor client for Iranian networks. Built in CI from the
-official tor 0.4.9.11 sources plus pluggable transports (obfs4, snowflake,
-webtunnel). No installation and no `%APPDATA%` — every file and all runtime
-state stays inside one folder, so you can copy or move it anywhere.
+Single-folder, portable Tor client tuned for maximum download/upload
+throughput (padding disabled, faster bootstrap, longer circuit reuse). Built in
+CI from the official tor 0.4.9.11 sources plus pluggable transports (obfs4,
+snowflake, webtunnel). No installation and no `%APPDATA%` — every file and all
+runtime state stays inside one folder, so you can copy or move it anywhere.
 
 ## Layout
 
@@ -25,8 +26,8 @@ data\
    - **2 WebTunnel**, **3 Obfs4**, **4 Vanilla** — bridges from `data\bridges\`
    Your choice is remembered for next time (`data\mode.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
-   automatically — press **Ctrl+P** (or **Ctrl+ح** on a Persian keyboard) to
-   toggle it on/off (HTTP 127.0.0.1:8118). Press **S** to run a speed test
+   automatically — press **Ctrl+P** to toggle it on/off (HTTP 127.0.0.1:8118).
+   Press **S** to run a speed test
    (downloads 10 MB from speed.cloudflare.com through the Tor proxy and reports
    instantaneous and average speed). Press **Ctrl+C** to stop Tor.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
@@ -48,6 +49,6 @@ start-tor.exe --stop           stop Tor and restore the proxy
 `tor-win64-portable` artifact on every push.
 
 - `tor-src\` — unmodified official tor 0.4.9.11 source
-- `configs\torrc.iran` — portable config template (becomes `data\torrc.template`)
+- `configs\torrc.speed` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `start-tor.exe` (compiled with `scripts\build-start-tor.ps1`)

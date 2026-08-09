@@ -1,5 +1,5 @@
 ﻿// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
-// Portable Tor launcher for Iran. Expected layout next to this exe:
+// Portable Tor launcher, speed-optimized. Expected layout next to this exe:
 //   start-tor.exe
 //   data\
 //     tor.exe  torrc.template  geoip  geoip6  transports
@@ -8,7 +8,7 @@
 //     data\          <- runtime state (tor.log, cached-*, keys)
 // The user picks a connection mode (direct / webtunnel / obfs4 / vanilla); the
 // program writes data\torrc and starts tor. Tor is NOT set as the system proxy
-// automatically: press Ctrl+P (Ctrl+ح on a Persian keyboard) to toggle the
+// automatically: press Ctrl+P to toggle the
 // Windows system proxy (HTTP 127.0.0.1:8118) on/off. Ctrl+C stops tor.
 // Subcommands: --newcircuit, --stop, --update-bridges, --bootstrap-only [mode].
 using System;
@@ -382,7 +382,7 @@ namespace StartTor
 
         private static int Main(string[] args)
         {
-            Console.Title = "Tor Iran Portable";
+            Console.Title = "Tor Speed Portable";
 
             if (args.Length > 0 && args[0] == "--newcircuit")
             {
@@ -414,7 +414,7 @@ namespace StartTor
             if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
 
             Console.WriteLine();
-            Console.WriteLine("Tor Portable for Iran (official tor 0.4.9.11)");
+            Console.WriteLine("Tor Speed Portable (official tor 0.4.9.11)");
             Console.WriteLine("  mode    : " + ModeNames[mode]);
             Console.WriteLine("  data dir: " + DataDir);
             Console.WriteLine();
@@ -526,7 +526,7 @@ namespace StartTor
             }
 
             bool proxyOn = false;
-            Console.WriteLine("  Ctrl+P (Ctrl+ح)  toggle the Windows system proxy on/off");
+            Console.WriteLine("  Ctrl+P            toggle the Windows system proxy on/off");
             Console.WriteLine("  S                 run a speed test through the Tor proxy");
             Console.WriteLine("  Ctrl+C            stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
