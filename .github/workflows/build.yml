@@ -44,6 +44,16 @@ jobs:
             go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@latest
           cp "$GOPATH_BIN/client.exe" out/webtunnel.exe
 
+          echo "=== tun2socks (TUN mode) ==="
+          GOOS=windows GOARCH=amd64 \
+            go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
+          cp "$GOPATH_BIN/tun2socks.exe" out/tun2socks.exe
+
+          echo "=== wintun driver ==="
+          curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
+          unzip -o wintun.zip wintun/bin/amd64/wintun.dll
+          cp wintun/bin/amd64/wintun.dll out/wintun.dll
+
           ls -la out/
 
       - name: Upload artifact
@@ -125,6 +135,7 @@ jobs:
         shell: pwsh
         run: |
           Copy-Item "transports\*.exe" -Destination "dist\data\" -Force
+          Copy-Item "transports\*.dll" -Destination "dist\data\" -Force
           Get-ChildItem "dist" -Recurse -File | Select-Object FullName, Length
 
       - name: Copy config template, bridges, README
@@ -134,7 +145,7 @@ jobs:
           Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
 
-      - name: Compile start-tor.exe
+      - name: Compile start-tor.exe + tun-helper.exe
         shell: pwsh
         run: |
           & "scripts\build-start-tor.ps1" -OutFile "dist\start-tor.exe"
@@ -181,7 +192,7 @@ jobs:
         shell: bash
         run: |
           cd release
-          zip -r "../torboost-win64-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe data
+          zip -r "../torboost-win64-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe tun-helper.exe data
           ls -la ../
 
       - name: Publish release

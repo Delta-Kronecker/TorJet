@@ -9,8 +9,11 @@
 // The user picks a connection mode (direct / webtunnel / obfs4 / vanilla); the
 // program writes data\torrc and starts tor. Tor is NOT set as the system proxy
 // automatically: press P to toggle the Windows system proxy
-// (HTTP 127.0.0.1:8118) on/off. C stops tor.
-// Subcommands: --newcircuit, --stop, --update-bridges, --bootstrap-only [mode].
+// (HTTP 127.0.0.1:8118) on/off. T toggles TUN mode (routes ALL system traffic
+// through tor - needs Administrator, spawns the elevated tun-helper.exe).
+// C stops tor.
+// Subcommands: --newcircuit, --stop, --tun-off, --tun-status, --update-bridges,
+// --bootstrap-only [mode].
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -50,6 +53,11 @@ namespace StartTor
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
 
+        private static readonly string TunHelperExe = Path.Combine(AppDir, "tun-helper.exe");
+        private static readonly string TunStateFile = Path.Combine(DataDir, "tun-state.txt");
+        private static readonly string TunStopFile = Path.Combine(DataDir, "tun-stop.txt");
+        private static readonly string TunResultFile = Path.Combine(DataDir, "tun-result.txt");
+
         private static Process torProc;
         private static bool cleaned;
 
@@ -75,10 +83,111 @@ namespace StartTor
             InternetSetOption(IntPtr.Zero, InternetOptionRefresh, IntPtr.Zero, 0);
         }
 
+        private static bool IsAdmin()
+        {
+            try
+            {
+                using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
+                {
+                    var p = new System.Security.Principal.WindowsPrincipal(id);
+                    return p.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+                }
+            }
+            catch { return false; }
+        }
+
+        private static string ReadTunState()
+        {
+            try
+            {
+                if (File.Exists(TunStateFile))
+                {
+                    foreach (string line in File.ReadAllLines(TunStateFile))
+                        if (line.TrimStart().StartsWith("status="))
+                            return line.TrimStart().Substring(7).Trim();
+                }
+            }
+            catch { }
+            return "off";
+        }
+
+        private static string ReadTunResult()
+        {
+            try { if (File.Exists(TunResultFile)) return File.ReadAllText(TunResultFile).Trim(); }
+            catch { }
+            return "";
+        }
+
+        private static bool SpawnElevated(string args, bool wait)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = TunHelperExe,
+                    Arguments = args,
+                    UseShellExecute = true,
+                    Verb = "runas",
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (wait) p.WaitForExit();
+                }
+                return true;
+            }
+            catch { return false; }
+        }
+
+        private static void ToggleTun()
+        {
+            if (ReadTunState() == "on")
+            {
+                Console.WriteLine("  [i] Turning TUN OFF...");
+                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
+                for (int i = 0; i < 40 && ReadTunState() == "on"; i++) Thread.Sleep(500);
+                if (ReadTunState() != "on") { Console.WriteLine("  [i] TUN OFF"); return; }
+                Console.WriteLine("  [i] keeper did not stop; forcing teardown (UAC)...");
+                if (SpawnElevated("off", true))
+                    Console.WriteLine("  [i] " + (ReadTunState() == "on" ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
+                else
+                    Console.WriteLine("  [i] teardown cancelled - TUN still ON");
+            }
+            else
+            {
+                if (!IsAdmin()) Console.WriteLine("  [i] TUN mode needs Administrator - accept the UAC prompt.");
+                Console.WriteLine("  [i] Turning TUN ON (all traffic via Tor)...");
+                if (!SpawnElevated("on", false))
+                {
+                    Console.WriteLine("  [i] TUN enable cancelled.");
+                    return;
+                }
+                string last = "";
+                for (int i = 0; i < 20; i++)
+                {
+                    Thread.Sleep(1000);
+                    last = ReadTunResult();
+                    if (last.StartsWith("on:") || last.StartsWith("error:")) break;
+                }
+                Console.WriteLine("  [i] " + last);
+            }
+        }
+
         private static void Cleanup()
         {
             if (cleaned) return;
             cleaned = true;
+            if (ReadTunState() == "on")
+            {
+                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
+                for (int i = 0; i < 8; i++)
+                {
+                    Thread.Sleep(500);
+                    if (ReadTunState() != "on") break;
+                }
+                if (ReadTunState() == "on")
+                    try { SpawnElevated("off", true); } catch { }
+            }
             if (torProc != null)
             {
                 try { if (!torProc.HasExited) { torProc.Kill(); torProc.WaitForExit(5000); } }
@@ -400,6 +509,17 @@ namespace StartTor
             {
                 return UpdateBridges();
             }
+            if (args.Length > 0 && args[0] == "--tun-off")
+            {
+                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
+                Console.WriteLine("TUN off requested (keeper will tear down).");
+                return 0;
+            }
+            if (args.Length > 0 && args[0] == "--tun-status")
+            {
+                Console.WriteLine("TUN " + (ReadTunState() == "on" ? "ON" : "OFF"));
+                return 0;
+            }
 
             int mode = -1;
             bool bootstrapOnly = false;
@@ -527,9 +647,11 @@ namespace StartTor
 
             bool proxyOn = false;
             Console.WriteLine("  P               toggle the Windows system proxy on/off");
+            Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
             Console.WriteLine("  S               run a speed test through the Tor proxy");
             Console.WriteLine("  C               stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
+            Console.WriteLine("  TUN               " + (ReadTunState() == "on" ? "ON" : "OFF"));
             Console.WriteLine();
             while (true)
             {
@@ -558,6 +680,10 @@ namespace StartTor
                         else if (ki.Key == ConsoleKey.S)
                         {
                             SpeedTest();
+                        }
+                        else if (ki.Key == ConsoleKey.T)
+                        {
+                            ToggleTun();
                         }
                         else if (ki.Key == ConsoleKey.C)
                         {
