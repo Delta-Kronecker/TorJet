@@ -81,6 +81,7 @@ jobs:
             mingw-w64-x86_64-libevent
             mingw-w64-x86_64-openssl
             mingw-w64-x86_64-zlib
+            mingw-w64-x86_64-zstd
             mingw-w64-x86_64-gettext
             perl
             autoconf
@@ -122,8 +123,29 @@ jobs:
           cd "$GITHUB_WORKSPACE/tor-src"
           mkdir -p ../dist/data/bridges
           cp src/app/tor.exe ../dist/data/
-          cp "$MINGW_PREFIX"/bin/libevent*.dll "$MINGW_PREFIX"/bin/libssl-3-x64.dll "$MINGW_PREFIX"/bin/libcrypto-3-x64.dll "$MINGW_PREFIX"/bin/zlib1.dll ../dist/data/ 2>/dev/null || true
+
+          # Copy every DLL that tor.exe (and the DLLs it loads) imports from the
+          # MSYS2 runtime dir, transitively, so the bundle is self-contained on
+          # machines without MSYS2 installed. tor.exe imports libzstd.dll and
+          # the libevent DLLs import libwinpthread-1.dll; both used to be
+          # omitted, so clean devices failed with "libzstd.dll was not found".
+          BIN="$MINGW_PREFIX/bin"
+          NEED="src/app/tor.exe"
+          added=1
+          while [ "$added" = "1" ]; do
+            added=0
+            for f in $NEED; do
+              for d in $(objdump -p "$f" | awk '/DLL Name:/{print $3}'); do
+                if [ -f "$BIN/$d" ] && [ ! -f "../dist/data/$d" ]; then
+                  cp "$BIN/$d" ../dist/data/
+                  NEED="$NEED ../dist/data/$d"
+                  added=1
+                fi
+              done
+            done
+          done
           cp src/config/geoip src/config/geoip6 ../dist/data/
+          ls ../dist/data/
 
       - name: Download transports
         uses: actions/download-artifact@v4
