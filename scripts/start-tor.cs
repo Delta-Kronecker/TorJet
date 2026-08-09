@@ -143,6 +143,11 @@ namespace StartTor
         {
             try
             {
+                // Tell the elevated helper where the data dir is. It used to sit
+                // next to data\ and derive it from its own location; now it ships
+                // inside data\, so this keeps state/result/stop files in sync.
+                Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir,
+                                                   EnvironmentVariableTarget.Process);
                 var psi = new ProcessStartInfo
                 {
                     FileName = TunHelperExe,

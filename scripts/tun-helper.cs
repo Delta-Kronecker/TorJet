@@ -44,7 +44,7 @@ namespace TunHelper
     {
         private static readonly string AppDir =
             Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location);
-        private static readonly string DataDir = Path.Combine(AppDir, "data");
+        private static readonly string DataDir = ResolveDataDir();
         private static readonly string StateFile = Path.Combine(DataDir, "tun-state.txt");
         private static readonly string StopFile = Path.Combine(DataDir, "tun-stop.txt");
         private static readonly string ResultFile = Path.Combine(DataDir, "tun-result.txt");
@@ -55,6 +55,24 @@ namespace TunHelper
         private static readonly string Consensus2 = Path.Combine(DataDir, "data", "cached-consensus");
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
         private static readonly string ControlPassword = "newway-j7DJPvxLaS1H";
+
+        // The launcher knows the data directory for sure; prefer it when the
+        // helper is started by the launcher. Otherwise infer it: the helper used
+        // to sit NEXT TO data\ (AppDir\data = the data dir) but is now shipped
+        // INSIDE data\ (AppDir itself is the data dir). Guessing wrong made TUN
+        // look for tun2socks.exe/state files in data\data\ and fail silently.
+        private static string ResolveDataDir()
+        {
+            string env = Environment.GetEnvironmentVariable("TUN_DATA_DIR");
+            if (!string.IsNullOrWhiteSpace(env) &&
+                File.Exists(Path.Combine(env, "tun2socks.exe")) &&
+                File.Exists(Path.Combine(env, "wintun.dll")))
+                return env;
+            string d1 = Path.Combine(AppDir, "data");
+            if (File.Exists(Path.Combine(d1, "tun2socks.exe"))) return d1;
+            if (File.Exists(Path.Combine(AppDir, "tun2socks.exe"))) return AppDir;
+            return d1;
+        }
 
         private const string TunName = "TorBoostTun";
         private const string TunAddr = "10.0.0.1";
