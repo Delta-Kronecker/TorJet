@@ -1,10 +1,11 @@
-# Tor Speed Portable
+# TorBoost
 
-Single-folder, portable Tor client tuned for maximum download/upload
-throughput (padding disabled, faster bootstrap, longer circuit reuse). Built in
-CI from the official tor 0.4.9.11 sources plus pluggable transports (obfs4,
-snowflake, webtunnel). No installation and no `%APPDATA%` — every file and all
-runtime state stays inside one folder, so you can copy or move it anywhere.
+TorBoost is a single-folder, portable Tor client tuned for maximum
+download/upload throughput (padding disabled, faster bootstrap, longer circuit
+reuse). Built in CI from the official tor 0.4.9.11 sources plus pluggable
+transports (obfs4, snowflake, webtunnel). No installation and no `%APPDATA%` —
+every file and all runtime state stays inside one folder, so you can copy or
+move it anywhere.
 
 ## Layout
 
@@ -20,7 +21,7 @@ data\
 
 ## Usage
 
-1. Download the `tor-win64-portable` artifact from GitHub Actions and unzip.
+1. Download the `torboost-win64` artifact from GitHub Actions and unzip.
 2. Double-click `start-tor.exe`, pick a mode:
    - **1 Direct** — no bridges (works when Tor is not blocked)
    - **2 WebTunnel**, **3 Obfs4**, **4 Vanilla** — bridges from `data\bridges\`
@@ -46,9 +47,9 @@ start-tor.exe --stop           stop Tor and restore the proxy
 ## Building
 
 `.github/workflows/build.yml` builds tor + transports and publishes the
-`tor-win64-portable` artifact on every push.
+`torboost-win64` artifact on every push.
 
 - `tor-src\` — unmodified official tor 0.4.9.11 source
-- `configs\torrc.speed` — speed-optimized portable config template (becomes `data\torrc.template`)
+- `configs\torrc.boost` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `start-tor.exe` (compiled with `scripts\build-start-tor.ps1`)

@@ -1,5 +1,5 @@
 ﻿// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
-// Portable Tor launcher, speed-optimized. Expected layout next to this exe:
+// TorBoost launcher - portable Tor client tuned for speed. Expected layout:
 //   start-tor.exe
 //   data\
 //     tor.exe  torrc.template  geoip  geoip6  transports
@@ -382,7 +382,7 @@ namespace StartTor
 
         private static int Main(string[] args)
         {
-            Console.Title = "Tor Speed Portable";
+            Console.Title = "TorBoost";
 
             if (args.Length > 0 && args[0] == "--newcircuit")
             {
@@ -414,7 +414,7 @@ namespace StartTor
             if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
 
             Console.WriteLine();
-            Console.WriteLine("Tor Speed Portable (official tor 0.4.9.11)");
+            Console.WriteLine("TorBoost (official tor 0.4.9.11)");
             Console.WriteLine("  mode    : " + ModeNames[mode]);
             Console.WriteLine("  data dir: " + DataDir);
             Console.WriteLine();

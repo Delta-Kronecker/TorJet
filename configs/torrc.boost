@@ -1,4 +1,4 @@
-# Tor speed-optimized portable client config - Tor 0.4.9.11
+# TorBoost - speed-optimized portable Tor client config (tor 0.4.9.11)
 # Copied by start-tor.exe to data\torrc.template, then data\torrc is generated
 # from it per the chosen mode. All paths are relative, so the whole folder is
 # fully portable: copy/move it anywhere and it still works.
