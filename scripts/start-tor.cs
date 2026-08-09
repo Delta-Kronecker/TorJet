@@ -8,8 +8,8 @@
 //     data\          <- runtime state (tor.log, cached-*, keys)
 // The user picks a connection mode (direct / webtunnel / obfs4 / vanilla); the
 // program writes data\torrc and starts tor. Tor is NOT set as the system proxy
-// automatically: press Ctrl+P to toggle the
-// Windows system proxy (HTTP 127.0.0.1:8118) on/off. Ctrl+C stops tor.
+// automatically: press P to toggle the Windows system proxy
+// (HTTP 127.0.0.1:8118) on/off. C stops tor.
 // Subcommands: --newcircuit, --stop, --update-bridges, --bootstrap-only [mode].
 using System;
 using System.Collections.Generic;
@@ -526,9 +526,9 @@ namespace StartTor
             }
 
             bool proxyOn = false;
-            Console.WriteLine("  Ctrl+P            toggle the Windows system proxy on/off");
-            Console.WriteLine("  S                 run a speed test through the Tor proxy");
-            Console.WriteLine("  Ctrl+C            stop Tor and exit");
+            Console.WriteLine("  P               toggle the Windows system proxy on/off");
+            Console.WriteLine("  S               run a speed test through the Tor proxy");
+            Console.WriteLine("  C               stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
             Console.WriteLine();
             while (true)
@@ -549,7 +549,7 @@ namespace StartTor
                     if (Console.KeyAvailable)
                     {
                         ConsoleKeyInfo ki = Console.ReadKey(true);
-                        if ((ki.Modifiers & ConsoleModifiers.Control) != 0 && ki.Key == ConsoleKey.P)
+                        if (ki.Key == ConsoleKey.P)
                         {
                             proxyOn = !proxyOn;
                             SetSystemProxy(proxyOn);
@@ -558,6 +558,12 @@ namespace StartTor
                         else if (ki.Key == ConsoleKey.S)
                         {
                             SpeedTest();
+                        }
+                        else if (ki.Key == ConsoleKey.C)
+                        {
+                            Console.WriteLine("Stopping Tor...");
+                            Cleanup();
+                            Environment.Exit(0);
                         }
                     }
                 }
