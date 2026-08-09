@@ -47,8 +47,8 @@ namespace StartTor
         private const int InternetOptionSettingsChanged = 39;
         private const int InternetOptionRefresh = 37;
 
-        private static readonly string[] ModeNames = { "direct", "webtunnel", "obfs4", "vanilla" };
-        private static readonly string[] BridgeFiles = { "", "webtunnel_tested.txt", "obfs4_tested.txt", "vanilla_tested.txt" };
+        private static readonly string[] ModeNames = { "obfs4", "webtunnel", "vanilla", "direct" };
+        private static readonly string[] BridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "" };
         private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt" };
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
@@ -294,11 +294,11 @@ namespace StartTor
             {
                 Console.WriteLine();
                 Console.WriteLine("  Connection mode:");
-                Console.WriteLine("    1) Direct Tor");
+                Console.WriteLine("    1) Obfs4");
                 Console.WriteLine("    2) WebTunnel");
-                Console.WriteLine("    3) Obfs4");
-                Console.WriteLine("    4) Vanilla");
-                Console.Write("  Choose 1-4 (Enter = " + (last >= 0 ? ModeNames[last] : "direct") + "): ");
+                Console.WriteLine("    3) Vanilla");
+                Console.WriteLine("    4) Direct Tor");
+                Console.Write("  Choose 1-4 (Enter = " + ModeNames[last >= 0 ? last : 0] + "): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return -1; }
@@ -321,7 +321,7 @@ namespace StartTor
             string tmpl = File.ReadAllText(TorrcTemplate);
             int bridgeCount = 0;
             StringBuilder sb = new StringBuilder(tmpl.TrimEnd());
-            if (mode > 0)
+            if (BridgeFiles[mode].Length > 0)
             {
                 string bf = Path.Combine(BridgesDir, BridgeFiles[mode]);
                 if (!File.Exists(bf))
@@ -352,7 +352,7 @@ namespace StartTor
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
             catch { }
             Console.WriteLine("[i] torrc written (" + ModeNames[mode] +
-                              (mode > 0 ? ", " + bridgeCount + " bridges" : "") + ")");
+                              (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") + ")");
             return true;
         }
 
@@ -631,12 +631,6 @@ namespace StartTor
             if (mode < 0) mode = ShowMenu();
             if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
 
-            Console.WriteLine();
-            Console.WriteLine("TorBoost (official tor 0.4.9.11)");
-            Console.WriteLine("  mode    : " + ModeNames[mode]);
-            Console.WriteLine("  data dir: " + DataDir);
-            Console.WriteLine();
-
             if (!File.Exists(TorExe))
             {
                 Console.WriteLine("[x] tor.exe not found in " + DataDir);
@@ -743,8 +737,7 @@ namespace StartTor
             Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
             Console.WriteLine("  S               run a speed test through the Tor proxy");
             Console.WriteLine("  C               stop Tor and exit");
-            Console.WriteLine("  Proxy             OFF");
-            Console.WriteLine("  TUN               " + (TunActive() ? "ON" : "OFF"));
+            Console.WriteLine();
             Console.WriteLine();
             while (true)
             {
