@@ -53,7 +53,7 @@ namespace StartTor
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
 
-        private static readonly string TunHelperExe = Path.Combine(AppDir, "tun-helper.exe");
+        private static readonly string TunHelperExe = Path.Combine(DataDir, "tun-helper.exe");
         private static readonly string TunStateFile = Path.Combine(DataDir, "tun-state.txt");
         private static readonly string TunStopFile = Path.Combine(DataDir, "tun-stop.txt");
         private static readonly string TunResultFile = Path.Combine(DataDir, "tun-result.txt");

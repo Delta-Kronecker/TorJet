@@ -5,7 +5,7 @@
 
 .PARAMETER OutFile
   Output path for start-tor.exe (default: scripts\start-tor.exe).
-  tun-helper.exe is written next to it.
+  tun-helper.exe is written to the data\ folder next to it.
 #>
 param(
     [string]$OutFile = (Join-Path $PSScriptRoot "start-tor.exe")
@@ -23,7 +23,9 @@ $src = Join-Path $PSScriptRoot "start-tor.cs"
 if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
 Write-Host "[ok] built $OutFile"
 
-$helperOut = Join-Path (Split-Path -Parent $OutFile) "tun-helper.exe"
+$helperDir = Join-Path (Split-Path -Parent $OutFile) "data"
+New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
+$helperOut = Join-Path $helperDir "tun-helper.exe"
 $helperSrc = Join-Path $PSScriptRoot "tun-helper.cs"
 & $csc -nologo -optimize+ -target:winexe -out:$helperOut $helperSrc
 if ($LASTEXITCODE -ne 0) { Write-Host "[x] tun-helper compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }

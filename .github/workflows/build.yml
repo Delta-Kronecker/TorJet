@@ -192,7 +192,7 @@ jobs:
         shell: bash
         run: |
           cd release
-          zip -r "../torboost-win64-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe tun-helper.exe data
+          zip -r "../torboost-win64-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe data
           ls -la ../
 
       - name: Publish release
