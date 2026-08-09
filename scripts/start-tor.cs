@@ -111,6 +111,22 @@ namespace StartTor
             return "off";
         }
 
+        // TUN counts as ON when the state file says so OR a tun-helper keeper is
+        // actually running. The state file can be emptied/left stale by a failed
+        // enable; only trusting it made "T" keep re-enabling instead of turning
+        // the tunnel off.
+        private static bool TunActive()
+        {
+            if (ReadTunState() == "on") return true;
+            try
+            {
+                foreach (Process p in Process.GetProcessesByName("tun-helper"))
+                    if (!p.HasExited) return true;
+            }
+            catch { }
+            return false;
+        }
+
         private static string ReadTunResult()
         {
             try { if (File.Exists(TunResultFile)) return File.ReadAllText(TunResultFile).Trim(); }
@@ -141,15 +157,15 @@ namespace StartTor
 
         private static void ToggleTun()
         {
-            if (ReadTunState() == "on")
+            if (TunActive())
             {
                 Console.WriteLine("  [i] Turning TUN OFF...");
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                for (int i = 0; i < 40 && ReadTunState() == "on"; i++) Thread.Sleep(500);
-                if (ReadTunState() != "on") { Console.WriteLine("  [i] TUN OFF"); return; }
+                for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
+                if (!TunActive()) { Console.WriteLine("  [i] TUN OFF"); return; }
                 Console.WriteLine("  [i] keeper did not stop; forcing teardown (UAC)...");
                 if (SpawnElevated("off", true))
-                    Console.WriteLine("  [i] " + (ReadTunState() == "on" ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
+                    Console.WriteLine("  [i] " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
                 else
                     Console.WriteLine("  [i] teardown cancelled - TUN still ON");
             }
@@ -177,15 +193,15 @@ namespace StartTor
         {
             if (cleaned) return;
             cleaned = true;
-            if (ReadTunState() == "on")
+            if (TunActive())
             {
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
                 for (int i = 0; i < 8; i++)
                 {
                     Thread.Sleep(500);
-                    if (ReadTunState() != "on") break;
+                    if (!TunActive()) break;
                 }
-                if (ReadTunState() == "on")
+                if (TunActive())
                     try { SpawnElevated("off", true); } catch { }
             }
             if (torProc != null)
@@ -517,7 +533,7 @@ namespace StartTor
             }
             if (args.Length > 0 && args[0] == "--tun-status")
             {
-                Console.WriteLine("TUN " + (ReadTunState() == "on" ? "ON" : "OFF"));
+                Console.WriteLine("TUN " + (TunActive() ? "ON" : "OFF"));
                 return 0;
             }
 
@@ -651,7 +667,7 @@ namespace StartTor
             Console.WriteLine("  S               run a speed test through the Tor proxy");
             Console.WriteLine("  C               stop Tor and exit");
             Console.WriteLine("  Proxy             OFF");
-            Console.WriteLine("  TUN               " + (ReadTunState() == "on" ? "ON" : "OFF"));
+            Console.WriteLine("  TUN               " + (TunActive() ? "ON" : "OFF"));
             Console.WriteLine();
             while (true)
             {

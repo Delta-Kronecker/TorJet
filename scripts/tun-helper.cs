@@ -20,8 +20,9 @@
 //   data\tun-state.txt  data\tun-stop.txt data\tun-result.txt
 //
 // Routes are added with the modern NetIO API (SetIpForwardEntry2, netioapi.dll)
-// when it is available; otherwise we fall back to route.exe. netioapi is present
-// on normal Windows 11 and makes the ~10k relay routes fast to add.
+// when it is available; otherwise we fall back to the legacy iphlpapi API
+// (CreateIpForwardEntry), which exists on every Windows. Both are fast enough
+// for the several-thousand relay routes.
 //
 // Ports default to the launcher's 9050/9051 but can be overridden with the
 // TUN_SOCKS_PORT / TUN_CTRL_PORT environment variables (used for testing).
@@ -62,6 +63,51 @@ namespace TunHelper
 
         private static readonly int SocksPort = GetEnvPort("TUN_SOCKS_PORT", 9050);
         private static readonly int CtrlPort = GetEnvPort("TUN_CTRL_PORT", 9051);
+
+        // Only one keeper may run at a time: a second "on" (e.g. the user pressing
+        // T twice in a row) used to race the first one, creating a second adapter
+        // named "TorBoostTun 1" that the fixed-name netsh calls then mis-targeted,
+        // which made the default-route step fail and left the state file empty.
+        private static readonly Mutex TunMutex = new Mutex(true, @"Local\TorBoostTunHelper");
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+        private static extern IntPtr LoadLibrary(string path);
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern IntPtr GetProcAddress(IntPtr module, string name);
+        [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+        private delegate uint WintunDeleteAdapterFn([MarshalAs(UnmanagedType.LPWStr)] string name);
+
+        private static bool WintunDeleteAdapterByName(string name)
+        {
+            try
+            {
+                IntPtr h = LoadLibrary(Path.Combine(DataDir, "wintun.dll"));
+                if (h == IntPtr.Zero) return false;
+                IntPtr fn = GetProcAddress(h, "WintunDeleteAdapter");
+                if (fn == IntPtr.Zero) return false;
+                var del = (WintunDeleteAdapterFn)Marshal.GetDelegateForFunctionPointer(fn, typeof(WintunDeleteAdapterFn));
+                return del(name) == 0;
+            }
+            catch { return false; }
+        }
+
+        private static void KillStaleTun2Socks()
+        {
+            try
+            {
+                string dir = DataDir.TrimEnd('\\');
+                foreach (Process p in Process.GetProcessesByName("tun2socks"))
+                {
+                    try
+                    {
+                        if (p.MainModule.FileName.TrimEnd('\\').StartsWith(dir, StringComparison.OrdinalIgnoreCase))
+                            p.Kill();
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
 
         private const uint NO_ERROR = 0;
         private const uint MIB_IPPROTO_NETMGMT = 3;
@@ -135,6 +181,10 @@ namespace TunHelper
 
         [DllImport("iphlpapi.dll")]
         private static extern uint GetBestRoute(uint dest, uint source, out MibIpForwardRow row);
+        [DllImport("iphlpapi.dll")]
+        private static extern uint CreateIpForwardEntry(ref MibIpForwardRow row);
+        [DllImport("iphlpapi.dll")]
+        private static extern uint DeleteIpForwardEntry(ref MibIpForwardRow row);
 
         private static int GetEnvPort(string name, int def)
         {
@@ -284,16 +334,25 @@ namespace TunHelper
             catch { }
         }
 
-        private static int GetTunIfIndex()
+        // Finds the tun2socks adapter and its REAL name. Windows may display it
+        // as "TorBoostTun 1" (or worse) when a stale adapter already exists, so
+        // every netsh call must use the discovered name, never the fixed one.
+        private static bool GetTunAdapter(out int ifIndex, out string name)
         {
+            ifIndex = -1;
+            name = "";
             string o = Run("netsh.exe", "interface ipv4 show interfaces");
+            Regex re = new Regex(@"^\s*(\d+)\s+\d+\s+\d+\s+(\S+(?:\s+\S+)?)\s+(.+)$");
             foreach (string line in o.Split('\n'))
             {
                 if (line.IndexOf(TunName, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                string[] p = line.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                if (p.Length >= 2 && p[0].All(c => char.IsDigit(c))) return int.Parse(p[0]);
+                Match m = re.Match(line);
+                if (!m.Success) continue;
+                ifIndex = int.Parse(m.Groups[1].Value);
+                name = m.Groups[3].Value.Trim();
+                return true;
             }
-            return -1;
+            return false;
         }
 
         private static string IfIpToString(uint v)
@@ -305,12 +364,6 @@ namespace TunHelper
         {
             byte[] b = IPAddress.Parse(ip).GetAddressBytes();
             return BitConverter.ToUInt32(b, 0);
-        }
-
-        private static string MaskFromPlen(int plen)
-        {
-            uint m = plen == 0 ? 0 : (uint)(0xFFFFFFFF << (32 - plen));
-            return IfIpToString(m);
         }
 
         private static MibIpForwardRow2 MakeRow2(uint dest, byte plen, uint nextHop, int ifIndex, uint metric)
@@ -336,15 +389,59 @@ namespace TunHelper
             };
         }
 
-        private static bool RouteEx(string op, uint dest, int plen, uint nextHop, int ifIndex, uint metric)
+        private static uint MaskUint(int plen)
         {
-            string mask = MaskFromPlen(plen);
-            string gw = nextHop == 0 ? "0.0.0.0" : IfIpToString(nextHop);
-            string cmd = op + " " + IfIpToString(dest) + " mask " + mask + " " + gw + " IF " + ifIndex;
-            if (op == "add") cmd += " metric " + metric;
-            string output = Run("route.exe", cmd);
-            if (op == "add") return output.IndexOf("OK!", StringComparison.OrdinalIgnoreCase) >= 0;
-            return output.IndexOf("not found", StringComparison.OrdinalIgnoreCase) < 0;
+            return plen == 0 ? 0 : (uint)(0xFFFFFFFF << (32 - plen));
+        }
+
+        // Legacy iphlpapi route API (MIB_IPFORWARDROW). Some trimmed/older
+        // Windows builds lack netioapi.dll, and the old route.exe fallback was
+        // far too slow for the several-thousand relay /32 routes (one spawned
+        // process per route). CreateIpForwardEntry is present on every Windows
+        // but is picky: the route must be MIB_IPROUTE_TYPE_INDIRECT (4) for a
+        // gateway route and dwForwardMetric1 must hold the EFFECTIVE metric
+        // (interface metric + route metric), exactly like route.exe computes it.
+        private static bool LegacyRoute(bool add, uint dest, int plen, uint nextHop, int ifIndex, uint metric)
+        {
+            var row = new MibIpForwardRow
+            {
+                dest = dest,
+                mask = MaskUint(plen),
+                nextHop = nextHop,
+                ifIndex = ifIndex,
+                metric1 = (uint)(InterfaceMetric(ifIndex) + metric),
+                type = 4,  // MIB_IPROUTE_TYPE_INDIRECT (via gateway)
+                proto = 3  // MIB_IPROTO_NETMGMT
+            };
+            uint rc = add ? CreateIpForwardEntry(ref row) : DeleteIpForwardEntry(ref row);
+            return rc == NO_ERROR;
+        }
+
+        private static readonly Dictionary<int, int> IfMetricCache = new Dictionary<int, int>();
+
+        private static int InterfaceMetric(int ifIndex)
+        {
+            int m;
+            if (IfMetricCache.TryGetValue(ifIndex, out m)) return m;
+            m = GetInterfaceMetric(ifIndex);
+            IfMetricCache[ifIndex] = m;
+            return m;
+        }
+
+        private static int GetInterfaceMetric(int ifIndex)
+        {
+            string o = Run("netsh.exe", "interface ipv4 show interfaces");
+            Regex re = new Regex(@"^\s*(\d+)\s+(\d+)\s+\d+\s+\S+\s+(.+)$");
+            foreach (string line in o.Split('\n'))
+            {
+                Match m = re.Match(line);
+                if (m.Success && int.Parse(m.Groups[1].Value) == ifIndex)
+                {
+                    int met;
+                    if (int.TryParse(m.Groups[2].Value, out met)) return met;
+                }
+            }
+            return 0;
         }
 
         private static bool AddRoute(uint dest, int plen, uint nextHop, int ifIndex, uint metric)
@@ -354,7 +451,7 @@ namespace TunHelper
                 MibIpForwardRow2 r = MakeRow2(dest, (byte)plen, nextHop, ifIndex, metric);
                 return SetIpForwardEntry2(ref r) == NO_ERROR;
             }
-            return RouteEx("add", dest, plen, nextHop, ifIndex, metric);
+            return LegacyRoute(true, dest, plen, nextHop, ifIndex, metric);
         }
 
         private static bool DeleteRoute(uint dest, int plen, uint nextHop, int ifIndex)
@@ -364,7 +461,7 @@ namespace TunHelper
                 MibIpForwardRow2 r = MakeRow2(dest, (byte)plen, nextHop, ifIndex, 0);
                 return DeleteIpForwardEntry2(ref r) == NO_ERROR;
             }
-            return RouteEx("delete", dest, plen, nextHop, ifIndex, 0);
+            return LegacyRoute(false, dest, plen, nextHop, ifIndex, 0);
         }
 
         private static bool IsPublicIpv4(string s)
@@ -446,6 +543,9 @@ namespace TunHelper
             if (GetStateValue(ReadState(), "status") == "on") { WriteResult("error: TUN is already on"); return false; }
             if (!Port53Free()) { WriteResult("error: port 53 is already in use on this machine"); return false; }
 
+            WintunDeleteAdapterByName(TunName);
+            KillStaleTun2Socks();
+
             MibIpForwardRow physRow;
             uint rc = GetBestRoute(0, 0, out physRow);
             if (rc != NO_ERROR) { WriteResult("error: no IPv4 default route (getbestroute " + rc + ")"); return false; }
@@ -481,31 +581,26 @@ namespace TunHelper
                 return false;
             }
 
+            string tunName = "";
             for (int i = 0; i < 20; i++)
             {
                 Thread.Sleep(500);
                 if (tun.HasExited) break;
-                tunIf = GetTunIfIndex();
-                if (tunIf > 0) break;
+                if (GetTunAdapter(out tunIf, out tunName)) break;
             }
-            if (tunIf <= 0)
+            if (tunIf <= 0 || tunName.Length == 0)
             {
                 try { tun.Kill(); } catch { }
+                WintunDeleteAdapterByName(TunName);
                 WriteResult("error: wintun adapter was not created (is tun2socks running?)");
                 return false;
             }
 
-            Run("netsh.exe", "interface ipv4 set address name=" + TunName + " source=static address=" + TunAddr + " mask=" + TunMask);
-            Run("netsh.exe", "interface ipv4 set dnsservers name=" + TunName + " source=static address=127.0.0.1 register=none validate=no");
-            Run("netsh.exe", "interface ipv4 set interface " + TunName + " metric=1");
+            Run("netsh.exe", "interface ipv4 set address name=" + tunName + " source=static address=" + TunAddr + " mask=" + TunMask);
+            Run("netsh.exe", "interface ipv4 set dnsservers name=" + tunName + " source=static address=127.0.0.1 register=none validate=no");
+            Run("netsh.exe", "interface ipv4 set interface " + tunName + " metric=1");
 
-            if (!AddRoute(0, 0, IpToUInt(TunAddr), tunIf, 1))
-            {
-                try { tun.Kill(); } catch { }
-                WriteResult("error: could not add default route via " + TunName);
-                return false;
-            }
-
+            AddRoute(0, 0, IpToUInt(TunAddr), tunIf, 1);
             MibIpForwardRow check = new MibIpForwardRow();
             bool switched = false;
             for (int i = 0; i < 10; i++)
@@ -517,7 +612,8 @@ namespace TunHelper
             if (!switched)
             {
                 try { tun.Kill(); } catch { }
-                WriteResult("error: default route did not switch to " + TunName +
+                WintunDeleteAdapterByName(tunName);
+                WriteResult("error: default route did not switch to " + tunName +
                             " (still ifIndex " + check.ifIndex + ", gw " + IfIpToString(check.nextHop) + ")");
                 return false;
             }
@@ -568,6 +664,8 @@ namespace TunHelper
                 }
             }
 
+            KillStaleTun2Socks();
+            WintunDeleteAdapterByName(TunName);
             WriteState("status=off");
             try { if (File.Exists(StopFile)) File.Delete(StopFile); } catch { }
         }
@@ -624,7 +722,19 @@ namespace TunHelper
         private static int Main(string[] args)
         {
             string arg = args.Length > 0 ? args[0].ToLowerInvariant() : "status";
-            if (arg == "on") return RunKeeper();
+            if (arg == "on")
+            {
+                bool acquired;
+                try { acquired = TunMutex.WaitOne(0); }
+                catch (AbandonedMutexException) { acquired = true; }
+                if (!acquired)
+                {
+                    WriteResult("error: TUN is already on (another instance is running)");
+                    return 1;
+                }
+                try { return RunKeeper(); }
+                finally { try { TunMutex.ReleaseMutex(); } catch { } }
+            }
             if (arg == "off")
             {
                 TeardownFromState(ReadState());
