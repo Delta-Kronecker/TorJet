@@ -8,7 +8,7 @@ SocksPort 127.0.0.1:9050
 HTTPTunnelPort 127.0.0.1:8118
 DNSPort 127.0.0.1:53530
 ControlPort 127.0.0.1:9051
-HashedControlPassword 16:AA4A310F3B7F257A600E2B2959FEF3C5168E32655ED2919426B7D82CA5
+CookieAuthentication 1
 SocksPolicy accept 127.0.0.1
 SocksPolicy reject *
 
@@ -52,7 +52,6 @@ PathsNeededToBuildCircuits 0.25
 # --- Pluggable transports (same folder as tor.exe; used only when bridges are configured) ---
 ClientTransportPlugin webtunnel exec webtunnel.exe
 ClientTransportPlugin obfs4 exec obfs4proxy.exe
-ClientTransportPlugin snowflake exec snowflake-client.exe
 
 # --- Operational (data\ folder is created next to tor.exe automatically) ---
 DataDirectory data

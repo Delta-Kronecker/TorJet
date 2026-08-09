@@ -40,7 +40,7 @@ namespace StartTor
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
         private static readonly string ModeFile = Path.Combine(DataDir, "mode.txt");
         private static readonly string TorLog = Path.Combine(DataDir, "data", "tor.log");
-        private static readonly string ControlPassword = "newway-j7DJPvxLaS1H";
+        private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
         private static readonly string ProxyKey =
             @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
@@ -69,8 +69,27 @@ namespace StartTor
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
 
+        private static bool ProxyIsOurs()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(ProxyKey))
+                {
+                    if (k == null) return false;
+                    object en = k.GetValue("ProxyEnable");
+                    object ps = k.GetValue("ProxyServer");
+                    return en is int && (int)en == 1 &&
+                           ps is string &&
+                           ((string)ps).IndexOf("127.0.0.1:8118",
+                                                StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+            catch { return false; }
+        }
+
         private static void SetSystemProxy(bool on)
         {
+            if (!on && !ProxyIsOurs()) return;
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.CreateSubKey(ProxyKey))
@@ -126,7 +145,9 @@ namespace StartTor
             try
             {
                 foreach (Process p in Process.GetProcessesByName("tun-helper"))
-                    if (!p.HasExited) return true;
+                    if (!p.HasExited &&
+                        p.MainModule.FileName.Equals(TunHelperExe, StringComparison.OrdinalIgnoreCase))
+                        return true;
             }
             catch { }
             return false;
@@ -169,15 +190,7 @@ namespace StartTor
         {
             if (TunActive())
             {
-                Console.WriteLine("  [i] Turning TUN OFF...");
-                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
-                if (!TunActive()) { Console.WriteLine("  [i] TUN OFF"); return; }
-                Console.WriteLine("  [i] keeper did not stop; forcing teardown (UAC)...");
-                if (SpawnElevated("off", true))
-                    Console.WriteLine("  [i] " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
-                else
-                    Console.WriteLine("  [i] teardown cancelled - TUN still ON");
+                TurnTunOff();
             }
             else
             {
@@ -197,6 +210,19 @@ namespace StartTor
                 }
                 Console.WriteLine("  [i] " + last);
             }
+        }
+
+        private static void TurnTunOff()
+        {
+            Console.WriteLine("  [i] Turning TUN OFF...");
+            try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
+            for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
+            if (!TunActive()) { Console.WriteLine("  [i] TUN OFF"); return; }
+            Console.WriteLine("  [i] keeper did not stop; forcing teardown (UAC)...");
+            if (SpawnElevated("off", true))
+                Console.WriteLine("  [i] " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
+            else
+                Console.WriteLine("  [i] teardown cancelled - TUN still ON");
         }
 
         private static void Cleanup()
@@ -258,16 +284,31 @@ namespace StartTor
             return null;
         }
 
+        private static string CookieHex()
+        {
+            try
+            {
+                if (!File.Exists(ControlCookie)) return null;
+                byte[] cookie = File.ReadAllBytes(ControlCookie);
+                var sb = new StringBuilder(cookie.Length * 2);
+                foreach (byte b in cookie) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+            catch { return null; }
+        }
+
         private static bool ControlSend(string cmd)
         {
             try
             {
+                string hex = CookieHex();
+                if (hex == null) return false;
                 using (TcpClient c = new TcpClient("127.0.0.1", 9051))
                 {
                     NetworkStream s = c.GetStream();
                     StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
                     StreamReader r = new StreamReader(s);
-                    w.WriteLine("AUTHENTICATE \"" + ControlPassword + "\"");
+                    w.WriteLine("AUTHENTICATE " + hex);
                     if (!r.ReadLine().StartsWith("250")) return false;
                     w.WriteLine(cmd);
                     if (!r.ReadLine().StartsWith("250")) return false;
@@ -573,7 +614,19 @@ namespace StartTor
             if (prev)
             {
                 var victims = new List<Process>();
-                try { victims.AddRange(Process.GetProcessesByName("tor")); } catch { }
+                try
+                {
+                    foreach (Process p in Process.GetProcessesByName("tor"))
+                    {
+                        try
+                        {
+                            if (p.MainModule.FileName.Equals(TorExe, StringComparison.OrdinalIgnoreCase))
+                                victims.Add(p);
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
                 if (running != null && !victims.Exists(v => v.Id == running.Id))
                     victims.Add(running);
                 foreach (Process p in victims)
@@ -614,9 +667,13 @@ namespace StartTor
             }
             if (args.Length > 0 && args[0] == "--tun-off")
             {
-                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                Console.WriteLine("TUN off requested (keeper will tear down).");
-                return 0;
+                if (!TunActive())
+                {
+                    Console.WriteLine("TUN OFF");
+                    return 0;
+                }
+                TurnTunOff();
+                return TunActive() ? 1 : 0;
             }
             if (args.Length > 0 && args[0] == "--tun-status")
             {

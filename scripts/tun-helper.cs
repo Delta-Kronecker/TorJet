@@ -54,7 +54,7 @@ namespace TunHelper
         private static readonly string Consensus1 = Path.Combine(DataDir, "data", "cached-microdesc-consensus");
         private static readonly string Consensus2 = Path.Combine(DataDir, "data", "cached-consensus");
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
-        private static readonly string ControlPassword = "newway-j7DJPvxLaS1H";
+        private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
 
         // The launcher knows the data directory for sure; prefer it when the
         // helper is started by the launcher. Otherwise infer it: the helper used
@@ -285,16 +285,31 @@ namespace TunHelper
             catch { return false; }
         }
 
+        private static string CookieHex()
+        {
+            try
+            {
+                if (!File.Exists(ControlCookie)) return null;
+                byte[] cookie = File.ReadAllBytes(ControlCookie);
+                var sb = new StringBuilder(cookie.Length * 2);
+                foreach (byte b in cookie) sb.Append(b.ToString("x2"));
+                return sb.ToString();
+            }
+            catch { return null; }
+        }
+
         private static bool ControlSend(string cmd)
         {
             try
             {
+                string hex = CookieHex();
+                if (hex == null) return false;
                 using (TcpClient c = new TcpClient("127.0.0.1", CtrlPort))
                 {
                     NetworkStream s = c.GetStream();
                     StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
                     StreamReader r = new StreamReader(s);
-                    w.WriteLine("AUTHENTICATE \"" + ControlPassword + "\"");
+                    w.WriteLine("AUTHENTICATE " + hex);
                     if (!r.ReadLine().StartsWith("250")) return false;
                     w.WriteLine(cmd);
                     if (!r.ReadLine().StartsWith("250")) return false;
@@ -308,20 +323,99 @@ namespace TunHelper
         // Port 53 must be free (or be owned by this folder's own tor) before TUN
         // can use it as the system DNS target. Our tor is expected to keep DNS on
         // 127.0.0.1:53 after the first enable (the DNSPort line is never removed).
+        // Uses the IP Helper tables (not netstat) so the check is independent of
+        // the Windows display language.
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MibTcpRowOwnerPid
+        {
+            public uint state;
+            public uint localAddr;
+            public uint localPort;
+            public uint remoteAddr;
+            public uint remotePort;
+            public uint owningPid;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MibUdpRowOwnerPid
+        {
+            public uint localAddr;
+            public uint localPort;
+            public uint owningPid;
+        }
+
+        private const uint MibTcpStateListen = 2;
+        private const uint TcpTableOwnerPidAll = 5;
+        private const uint UdpTableOwnerPid = 1;
+
+        [DllImport("iphlpapi.dll")]
+        private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, uint tableClass, uint reserved);
+        [DllImport("iphlpapi.dll")]
+        private static extern uint GetExtendedUdpTable(IntPtr table, ref int size, bool order, int af, uint tableClass, uint reserved);
+
+        private static int FromNetPort(uint v)
+        {
+            return (int)(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
+        }
+
+        private static void CollectPort53Pids(HashSet<int> pids)
+        {
+            int size = 0;
+            uint rc = GetExtendedTcpTable(IntPtr.Zero, ref size, false, AF_INET, TcpTableOwnerPidAll, 0);
+            if (rc == NO_ERROR && size > 0)
+            {
+                IntPtr buf = Marshal.AllocHGlobal(size);
+                try
+                {
+                    if (GetExtendedTcpTable(buf, ref size, false, AF_INET, TcpTableOwnerPidAll, 0) == NO_ERROR)
+                    {
+                        int n = Marshal.ReadInt32(buf);
+                        int rowSize = Marshal.SizeOf(typeof(MibTcpRowOwnerPid));
+                        IntPtr p = IntPtr.Add(buf, sizeof(int));
+                        for (int i = 0; i < n; i++)
+                        {
+                            MibTcpRowOwnerPid row = (MibTcpRowOwnerPid)Marshal.PtrToStructure(p, typeof(MibTcpRowOwnerPid));
+                            if (row.state == MibTcpStateListen && FromNetPort(row.localPort) == 53 && row.owningPid > 0)
+                                pids.Add((int)row.owningPid);
+                            p = IntPtr.Add(p, rowSize);
+                        }
+                    }
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+
+            size = 0;
+            rc = GetExtendedUdpTable(IntPtr.Zero, ref size, false, AF_INET, UdpTableOwnerPid, 0);
+            if (rc == NO_ERROR && size > 0)
+            {
+                IntPtr buf = Marshal.AllocHGlobal(size);
+                try
+                {
+                    if (GetExtendedUdpTable(buf, ref size, false, AF_INET, UdpTableOwnerPid, 0) == NO_ERROR)
+                    {
+                        int n = Marshal.ReadInt32(buf);
+                        int rowSize = Marshal.SizeOf(typeof(MibUdpRowOwnerPid));
+                        IntPtr p = IntPtr.Add(buf, sizeof(int));
+                        for (int i = 0; i < n; i++)
+                        {
+                            MibUdpRowOwnerPid row = (MibUdpRowOwnerPid)Marshal.PtrToStructure(p, typeof(MibUdpRowOwnerPid));
+                            if (FromNetPort(row.localPort) == 53 && row.owningPid > 0)
+                                pids.Add((int)row.owningPid);
+                            p = IntPtr.Add(p, rowSize);
+                        }
+                    }
+                }
+                finally { Marshal.FreeHGlobal(buf); }
+            }
+        }
+
         private static bool Port53Free()
         {
             string torExe = Path.Combine(DataDir, "tor.exe");
             try
             {
                 var pids = new HashSet<int>();
-                string tcp = Run("netstat.exe", "-ano");
-                string udp = Run("netstat.exe", "-ano -p udp");
-                Regex re = new Regex(@":53\s");
-                foreach (string line in tcp.Split('\n'))
-                    if (line.IndexOf("LISTENING", StringComparison.OrdinalIgnoreCase) >= 0 && re.IsMatch(line))
-                        AddTrailingPid(line, pids);
-                foreach (string line in udp.Split('\n'))
-                    if (re.IsMatch(line)) AddTrailingPid(line, pids);
+                CollectPort53Pids(pids);
                 foreach (int pid in pids)
                 {
                     if (pid <= 0) continue;
@@ -336,20 +430,6 @@ namespace TunHelper
             }
             catch { }
             return true;
-        }
-
-        private static void AddTrailingPid(string line, HashSet<int> pids)
-        {
-            try
-            {
-                int sp = line.LastIndexOf(' ');
-                if (sp > 0)
-                {
-                    int pid;
-                    if (int.TryParse(line.Substring(sp + 1).Trim(), out pid)) pids.Add(pid);
-                }
-            }
-            catch { }
         }
 
         // Finds the tun2socks adapter and its REAL name. Windows may display it
@@ -487,10 +567,20 @@ namespace TunHelper
             IPAddress a;
             if (!IPAddress.TryParse(s, out a) || a.AddressFamily != AddressFamily.InterNetwork) return false;
             byte[] b = a.GetAddressBytes();
-            if (b[0] == 10 || b[0] == 127) return false;
-            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return false;
-            if (b[0] == 192 && b[1] == 168) return false;
-            if (b[0] == 169 && b[1] == 254) return false;
+            if (b[0] == 0) return false;                                 // 0/8
+            if (b[0] == 10) return false;                                // RFC1918
+            if (b[0] == 127) return false;                               // loopback
+            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return false;  // CGNAT 100.64/10
+            if (b[0] == 169 && b[1] == 254) return false;                // link-local
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return false;   // RFC1918
+            if (b[0] == 192 && b[1] == 168) return false;                // RFC1918
+            if (b[0] == 192 && b[1] == 0 && b[2] == 0) return false;     // 192.0.0/24
+            if (b[0] == 192 && b[1] == 0 && b[2] == 2) return false;     // TEST-NET-1
+            if (b[0] == 192 && b[1] == 88 && b[2] == 99) return false;   // 6to4 relay anycast
+            if (b[0] == 198 && (b[1] == 18 || b[1] == 19)) return false; // 198.18/15
+            if (b[0] == 198 && b[1] == 51 && b[2] == 100) return false;  // TEST-NET-2
+            if (b[0] == 203 && b[1] == 0 && b[2] == 113) return false;   // TEST-NET-3
+            if (b[0] >= 224) return false;                               // multicast + reserved
             return true;
         }
 
@@ -506,7 +596,10 @@ namespace TunHelper
                     {
                         if (!raw.StartsWith("r ")) continue;
                         string[] p = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                        if (p.Length >= 6 && IsPublicIpv4(p[5])) set.Add(p[5]);
+                        // microdesc consensus: r nick id date time ip orport dirport (ip at 5)
+                        // full consensus:      r nick id digest date time ip orport dirport (ip at 6)
+                        for (int i = 5; i <= 6 && i < p.Length; i++)
+                            if (IsPublicIpv4(p[i])) set.Add(p[i]);
                     }
                 }
                 catch { }
@@ -723,6 +816,14 @@ namespace TunHelper
                         {
                             if (known.Add(ip))
                                 AddRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf, 1);
+                        }
+                        foreach (string ip in known.ToList())
+                        {
+                            if (!fresh.Contains(ip))
+                            {
+                                known.Remove(ip);
+                                DeleteRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf);
+                            }
                         }
                         WriteState(BuildState(tun.Id, tunIf, physIf, physGw, known));
                     }
