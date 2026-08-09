@@ -25,8 +25,8 @@ UseMicrodescriptors 1
 
 # --- Bootstrap/circuit tuning (verified to reach 100% from a clean state) ---
 # NOTE: ExitNodes/StrictNodes and ConfluxEnabled historically stalled bootstrap
-# at 45-50% in this build. ExitNodes stays OFF. Conflux is a commented-out
-# experiment below - test with: start-tor.exe --bootstrap-only
+# at 45-50% in this build. ExitNodes stays OFF. Conflux is enabled below and
+# is the confirmed-working experiment (bootstrap reached 100% with it).
 DormantOnFirstStartup 0
 DormantCanceledByStartup 1
 LearnCircuitBuildTimeout 0
@@ -35,6 +35,7 @@ MaxCircuitDirtiness 3600
 NumEntryGuards 15
 NumDirectoryGuards 6
 MaxClientCircuitsPending 64
+SocksTimeout 60
 TokenBucketRefillInterval 5 msec
 KeepalivePeriod 3600
 
@@ -44,8 +45,9 @@ ClientBootstrapConsensusFallbackDownloadInitialDelay 0
 ClientBootstrapConsensusAuthorityOnlyDownloadInitialDelay 0
 ClientBootstrapConsensusMaxInProgressTries 6
 
-# --- Build circuits with fewer known relays (speed over privacy) ---
-PathsNeededToBuildCircuits 0.3
+# --- Consider the client connected once 25% of paths succeed (floor; was 0.3) ---
+# 0.25 is Tor's hard minimum for this option, so it is the fastest legal value.
+PathsNeededToBuildCircuits 0.25
 
 # --- Pluggable transports (same folder as tor.exe; used only when bridges are configured) ---
 ClientTransportPlugin webtunnel exec webtunnel.exe
@@ -60,9 +62,8 @@ AvoidDiskWrites 1
 SafeLogging 1
 
 # --- EXPERIMENT: Conflux (split traffic across 2 circuits, throughput UX) ---
-# Previously stalled bootstrap at 45-50% in this build. Currently ENABLED for
-# a re-test: run start-tor.exe --bootstrap-only and verify 100% bootstrap
-# before relying on it. If it stalls again, comment ConfluxEnabled back out.
+# Previously stalled bootstrap at 45-50% in this build. Verified to reach 100%
+# in the 0.4.9.11 build; kept ON for the throughput advantage.
 ConfluxEnabled 1
 ConfluxClientUX throughput
 
