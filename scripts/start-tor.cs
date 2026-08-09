@@ -58,6 +58,11 @@ namespace StartTor
         private static readonly string TunStopFile = Path.Combine(DataDir, "tun-stop.txt");
         private static readonly string TunResultFile = Path.Combine(DataDir, "tun-result.txt");
 
+        // Ports used by this program's tor (torrc.template / torrc.boost).
+        // Occupied ports at startup mean a previous tor instance is still alive.
+        private static readonly int[] TcpPorts = { 9050, 9051, 8118 };
+        private const int UdpDnsPort = 53530;
+
         private static Process torProc;
         private static bool cleaned;
 
@@ -505,6 +510,83 @@ namespace StartTor
             return 0;
         }
 
+        // --- startup port check --------------------------------------------
+        // If the TorBoost ports are already occupied, a previous tor instance is
+        // still running: stop it (and any leftover TUN/system proxy), then carry
+        // on with a fresh start instead of refusing to launch.
+        private static bool TcpPortBusy(int port)
+        {
+            TcpListener l = null;
+            try
+            {
+                l = new TcpListener(IPAddress.Loopback, port);
+                l.Start();
+                return false;
+            }
+            catch (SocketException) { return true; }
+            finally
+            {
+                if (l != null) try { l.Stop(); } catch { }
+            }
+        }
+
+        private static bool UdpPortBusy(int port)
+        {
+            try
+            {
+                using (UdpClient u = new UdpClient(new IPEndPoint(IPAddress.Loopback, port)))
+                { }
+                return false;
+            }
+            catch (SocketException) { return true; }
+        }
+
+        private static bool PreviousRunActive()
+        {
+            foreach (int p in TcpPorts)
+                if (TcpPortBusy(p)) return true;
+            return UdpPortBusy(UdpDnsPort);
+        }
+
+        private static void StopPreviousRun()
+        {
+            Process running = FindTor();
+            bool prev = running != null || PreviousRunActive();
+            if (!prev && !TunActive()) return;
+
+            Console.WriteLine("  [i] A previous TorBoost run is still active - stopping it.");
+
+            if (TunActive())
+            {
+                Console.WriteLine("  [i] Stopping previous TUN...");
+                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
+                for (int i = 0; i < 16 && TunActive(); i++) Thread.Sleep(500);
+                if (TunActive())
+                    try { SpawnElevated("off", true); } catch { }
+            }
+
+            if (prev)
+            {
+                var victims = new List<Process>();
+                try { victims.AddRange(Process.GetProcessesByName("tor")); } catch { }
+                if (running != null && !victims.Exists(v => v.Id == running.Id))
+                    victims.Add(running);
+                foreach (Process p in victims)
+                {
+                    try
+                    {
+                        Console.WriteLine("  [i] Stopping previous tor (PID " + p.Id + ")...");
+                        p.Kill();
+                        p.WaitForExit(5000);
+                    }
+                    catch { }
+                }
+                Thread.Sleep(1500);
+            }
+
+            SetSystemProxy(false);
+        }
+
         private static int Main(string[] args)
         {
             Console.Title = "TorBoost";
@@ -568,12 +650,7 @@ namespace StartTor
                 return 0;
             }
 
-            if (FindTor() != null)
-            {
-                Console.WriteLine("[x] tor is already running from this folder.");
-                Console.WriteLine("    Use:  start-tor.exe --stop  or  start-tor.exe --newcircuit");
-                return 1;
-            }
+            StopPreviousRun();
 
             Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
             {
