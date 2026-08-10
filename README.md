@@ -42,7 +42,8 @@ data\
    test: single-stream over the HTTP proxy, or the *max* test which opens
    several parallel SOCKS5 streams, each authenticated with a unique username
    so tor's isolation gives every stream its own circuit (the true
-   multi-path throughput ceiling). Press **C** to stop Tor.
+    multi-path throughput ceiling). Press **C** to stop Tor (system proxy,
+    TUN mode and the core) and return to the main menu.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
 
 ### TUN mode (all traffic through Tor)
@@ -77,6 +78,8 @@ You can also launch with fixed settings:
 start-tor.exe obfs4               start directly in obfs4 mode
 start-tor.exe obfs4 aggressive    start in obfs4 mode + strategy level
 start-tor.exe --strategy ultimate start with the ultimate strategy
+start-tor.exe obfs4 aggressive proxy   start + auto-enable the system proxy
+start-tor.exe obfs4 aggressive tun     start + auto-enable TUN mode
 start-tor.exe --newcircuit        request a new identity (NEWNYM)
 start-tor.exe --update-bridges    re-download the bridge lists from the
                                   Tor-Bridges-Collector repo and replace them

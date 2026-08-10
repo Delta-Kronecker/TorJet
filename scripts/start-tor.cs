@@ -11,9 +11,11 @@
 // automatically: press P to toggle the Windows system proxy
 // (HTTP 127.0.0.1:8118) on/off. T toggles TUN mode (routes ALL system traffic
 // through tor - needs Administrator, spawns the elevated tun-helper.exe).
-// C stops tor.
+// C stops tor (TUN + system proxy + core) and returns to the main menu.
 // Subcommands: --newcircuit, --stop, --tun-off, --tun-status, --update-bridges,
 // --bootstrap-only [mode].
+// A trailing `proxy` or `tun` argument auto-enables the Windows system proxy or
+// TUN mode right after bootstrap, e.g. `start-tor.exe obfs4 aggressive proxy`.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -55,19 +57,16 @@ namespace StartTor
             {
                 "MaxCircuitDirtiness 86400",
                 "CircuitsAvailableTimeout 1440",
-                "CircuitStreamTimeout 30",
-                "OptimisticData 1"
+                "CircuitStreamTimeout 30"
             },
             /* aggressive */ new[]
             {
                 "MaxCircuitDirtiness 86400",
                 "CircuitsAvailableTimeout 1440",
                 "CircuitStreamTimeout 30",
-                "OptimisticData 1",
                 "NumEntryGuards 15",
                 "NumPrimaryGuards 15",
                 "Schedulers KISTLite,Vanilla",
-                "KISTSockBufSizeFactor 4.0",
                 "KISTSchedRunInterval 5 msec"
             },
             /* ultimate */ new[]
@@ -75,11 +74,9 @@ namespace StartTor
                 "MaxCircuitDirtiness 86400",
                 "CircuitsAvailableTimeout 1440",
                 "CircuitStreamTimeout 30",
-                "OptimisticData 1",
                 "NumEntryGuards 15",
                 "NumPrimaryGuards 15",
                 "Schedulers KISTLite,Vanilla",
-                "KISTSockBufSizeFactor 4.0",
                 "KISTSchedRunInterval 5 msec",
                 "MaxClientCircuitsPending 128",
                 "TokenBucketRefillInterval 1 msec",
@@ -113,6 +110,7 @@ namespace StartTor
 
         private static Process torProc;
         private static bool cleaned;
+        private static int progressLineLen;
 
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
@@ -1027,6 +1025,96 @@ namespace StartTor
             return sets.Count > 0 ? 0 : 1;
         }
 
+        // Returns tor's own bootstrap status. Two sources are used and the more
+        // advanced one wins:
+        //   - the control port (GETINFO status/bootstrap-phase) is authoritative;
+        //   - the log fallback ("Bootstrapped NN% (tag)") covers the window
+        //     before the control port answers and guards against the launcher
+        //     missing the 100% line because it scrolled out of the log tail.
+        // tor.log is deleted before every start, so a stale "100%" from an older
+        // run can never be misread as the current run's status.
+        // Returns false when neither source has a percentage yet.
+        private static bool BootstrapPhase(out int pct, out string tag, out string summary)
+        {
+            pct = -1;
+            tag = "";
+            summary = "";
+            int ctl = -1, log = -1;
+            string ctlTag = "", logTag = "", ctlSummary = "";
+
+            var lines = ControlCommand("GETINFO status/bootstrap-phase");
+            if (lines != null)
+            {
+                foreach (string raw in lines)
+                {
+                    string l = raw.Trim();
+                    if (l.Length == 0) continue;
+                    Match m = Regex.Match(l, @"PROGRESS=(\d+)");
+                    if (m.Success)
+                    {
+                        ctl = int.Parse(m.Groups[1].Value);
+                        Match t = Regex.Match(l, @"TAG=([^\s]+)");
+                        if (t.Success) ctlTag = t.Groups[1].Value;
+                        Match s = Regex.Match(l, @"SUMMARY=(.*)$");
+                        if (s.Success) ctlSummary = s.Groups[1].Value.Trim('"');
+                        break;
+                    }
+                }
+            }
+
+            string tail = ReadLogTail(8192);
+            MatchCollection ms = Regex.Matches(tail, @"Bootstrapped\s+(\d+)%\s*(?:\(([^)]+)\))?");
+            if (ms.Count > 0)
+            {
+                Match m = ms[ms.Count - 1];
+                log = int.Parse(m.Groups[1].Value);
+                if (m.Groups[2].Success) logTag = m.Groups[2].Value;
+            }
+
+            if (log > ctl)
+            {
+                pct = log;
+                tag = logTag;
+                return true;
+            }
+            if (ctl >= 0)
+            {
+                pct = ctl;
+                tag = ctlTag;
+                summary = ctlSummary;
+                return true;
+            }
+            return false;
+        }
+
+        // Redraws the bootstrap progress bar on the current console line.
+        // The percentage is snapped to 10% steps (0, 10, 20, ..., 100).
+        private static void DrawProgress(int pct, string label)
+        {
+            const int width = 24;
+            pct = (pct / 10) * 10;
+            if (pct > 100) pct = 100;
+            if (pct < 0) pct = 0;
+            int filled = (int)Math.Round(pct / 100.0 * width);
+            if (filled > width) filled = width;
+            if (filled < 0) filled = 0;
+            string bar = new string('#', filled) + new string('.', width - filled);
+            string line = "    [" + bar + "] " + pct.ToString() + "%";
+            if (!string.IsNullOrEmpty(label)) line += "  " + label;
+            if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
+            Console.Write("\r" + line);
+            progressLineLen = line.Length;
+        }
+
+        private static void ClearProgressLine()
+        {
+            if (progressLineLen > 0)
+            {
+                Console.Write("\r" + new string(' ', progressLineLen) + "\r");
+                progressLineLen = 0;
+            }
+        }
+
         // Starts tor for the given mode, writes torrc, stops any previous run,
         // and waits until bootstrap reaches 100%. Returns the process or null.
         private static Process StartTorAndWait(int mode, int strategy, out string errorMessage)
@@ -1066,33 +1154,50 @@ namespace StartTor
 
             DateTime deadline = DateTime.UtcNow.AddMinutes(10);
             int lastPct = -1;
+            string lastTag = "";
+            DateTime stuckSince = DateTime.UtcNow;
             while (DateTime.UtcNow < deadline)
             {
                 try { proc.Refresh(); } catch { }
                 if (proc.HasExited)
                 {
+                    ClearProgressLine();
                     errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
                     return null;
                 }
-                MatchCollection ms = Regex.Matches(ReadLogTail(2000), "Bootstrapped (\\d+)%");
-                if (ms.Count > 0)
+                int pct;
+                string tag;
+                string summary;
+                if (BootstrapPhase(out pct, out tag, out summary))
                 {
-                    Match m = ms[ms.Count - 1];
-                    int pct = int.Parse(m.Groups[1].Value);
                     if (pct >= 100)
                     {
-                        Console.WriteLine("    Bootstrapped 100% ...");
+                        DrawProgress(100, tag);
+                        Console.WriteLine();
+                        progressLineLen = 0;
                         return proc;
                     }
                     if (pct != lastPct)
                     {
-                        Console.WriteLine("    Bootstrapped " + pct + "% ...");
                         lastPct = pct;
+                        lastTag = tag;
+                        stuckSince = DateTime.UtcNow;
+                        DrawProgress(pct, tag);
+                    }
+                    else if (DateTime.UtcNow - stuckSince > TimeSpan.FromMinutes(3))
+                    {
+                        DrawProgress(pct, tag + "  (still waiting...)");
+                    }
+                    else
+                    {
+                        DrawProgress(pct, tag);
                     }
                 }
-                Thread.Sleep(2000);
+                Thread.Sleep(1500);
             }
-            errorMessage = "bootstrap did not reach 100% in 10 minutes.\n" + ReadLogTail(1500);
+            ClearProgressLine();
+            errorMessage = "bootstrap did not reach 100% in 10 minutes (last seen: " +
+                           lastPct + "% " + lastTag + ").\n" + ReadLogTail(1500);
             return null;
         }
 
@@ -1414,6 +1519,130 @@ namespace StartTor
             SetSystemProxy(false);
         }
 
+        // Runs one Tor session: writes torrc, boots tor with a live progress
+        // bar, then serves the P/T/S/C keys until the user presses C or tor
+        // dies. Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
+        private static int RunTorSession(int mode, int strategy, bool genOnly,
+                                         bool bootstrapOnly, string autoMode,
+                                         bool menuReturn)
+        {
+            if (!File.Exists(TorExe))
+            {
+                Console.WriteLine("[x] tor.exe not found in " + DataDir);
+                WaitForKey();
+                return 1;
+            }
+            if (genOnly)
+            {
+                if (!WriteTorrc(mode, strategy)) { WaitForKey(); return 1; }
+                Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
+                return 0;
+            }
+
+            string startErr;
+            torProc = StartTorAndWait(mode, strategy, out startErr);
+            if (torProc == null)
+            {
+                Console.WriteLine("[x] " + startErr);
+                Cleanup();
+                cleaned = false;
+                if (menuReturn)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Press any key to return to the menu...");
+                    try { Console.ReadKey(true); } catch { }
+                    return 2;
+                }
+                WaitForKey();
+                return 1;
+            }
+
+            Console.WriteLine();
+            Console.WriteLine("Bootstrapped 100% - Tor is UP.");
+            Console.WriteLine();
+
+            if (bootstrapOnly)
+            {
+                Console.WriteLine("Test mode: stopping tor (no proxy change).");
+                Cleanup();
+                return 0;
+            }
+
+            bool proxyOn = false;
+            if (autoMode == "proxy")
+            {
+                proxyOn = true;
+                SetSystemProxy(true);
+                Console.WriteLine("  [i] System proxy ON  (127.0.0.1:8118)");
+            }
+            else if (autoMode == "tun")
+            {
+                if (TunActive())
+                    Console.WriteLine("  [i] TUN already ON");
+                else
+                    ToggleTun();
+            }
+            Console.WriteLine("  P               toggle the Windows system proxy on/off");
+            Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
+            Console.WriteLine("  S               run a speed test through the Tor proxy");
+            Console.WriteLine("  C               stop Tor and " + (menuReturn ? "return to the menu" : "exit"));
+            Console.WriteLine();
+            while (true)
+            {
+                bool alive = true;
+                if (torProc != null)
+                {
+                    try { torProc.Refresh(); alive = !torProc.HasExited; }
+                    catch { alive = false; }
+                }
+                if (!alive)
+                {
+                    Console.WriteLine("[x] tor exited with code " + (torProc != null ? torProc.ExitCode : -1) + ".");
+                    break;
+                }
+                try
+                {
+                    if (Console.KeyAvailable)
+                    {
+                        ConsoleKeyInfo ki = Console.ReadKey(true);
+                        if (ki.Key == ConsoleKey.P)
+                        {
+                            proxyOn = !proxyOn;
+                            SetSystemProxy(proxyOn);
+                            Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                        }
+                        else if (ki.Key == ConsoleKey.S)
+                        {
+                            SpeedTestMenu();
+                        }
+                        else if (ki.Key == ConsoleKey.T)
+                        {
+                            ToggleTun();
+                        }
+                        else if (ki.Key == ConsoleKey.C)
+                        {
+                            Console.WriteLine();
+                            Console.WriteLine("  [i] Stopping Tor...");
+                            Cleanup();
+                            cleaned = false;
+                            torProc = null;
+                            Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                            Console.WriteLine();
+                            return menuReturn ? 2 : 0;
+                        }
+                    }
+                }
+                catch { }
+                Thread.Sleep(150);
+            }
+
+            Cleanup();
+            cleaned = false;
+            Console.WriteLine("Tor stopped; system proxy restored.");
+            WaitForKey();
+            return 0;
+        }
+
         private static int Main(string[] args)
         {
             Console.Title = "TorBoost";
@@ -1497,6 +1726,7 @@ namespace StartTor
             int strategy = -1;
             bool bootstrapOnly = false;
             bool genOnly = false;
+            string autoMode = "";
             for (int i = 0; i < args.Length; i++)
             {
                 string a = args[i];
@@ -1504,6 +1734,8 @@ namespace StartTor
                 else if (a == "--gen-torrc-only") genOnly = true;
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
                 else if (a == "--strategy") strategy = ParseStrategy(a);
+                else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
+                else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
                 {
                     int m = ParseMode(a);
@@ -1514,104 +1746,20 @@ namespace StartTor
             }
             if (mode < 0)
             {
-                ShowMainMenu(out mode, out strategy);
-                if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
+                while (true)
+                {
+                    ShowMainMenu(out mode, out strategy);
+                    if (mode < 0) return 0;
+                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    if (rc != 2) return rc;
+                }
             }
             else
             {
                 if (strategy < 0) strategy = ReadLastStrategy();
                 if (strategy < 0) strategy = 0;
+                return RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, false);
             }
-
-            if (!File.Exists(TorExe))
-            {
-                Console.WriteLine("[x] tor.exe not found in " + DataDir);
-                WaitForKey();
-                return 1;
-            }
-            if (genOnly)
-            {
-                if (!WriteTorrc(mode, strategy)) { WaitForKey(); return 1; }
-                Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
-                return 0;
-            }
-
-            string startErr;
-            torProc = StartTorAndWait(mode, strategy, out startErr);
-            if (torProc == null)
-            {
-                Console.WriteLine("[x] " + startErr);
-                Cleanup();
-                WaitForKey();
-                return 1;
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("Bootstrapped 100% - Tor is UP.");
-            Console.WriteLine();
-
-            if (bootstrapOnly)
-            {
-                Console.WriteLine("Test mode: stopping tor (no proxy change).");
-                Cleanup();
-                return 0;
-            }
-
-            bool proxyOn = false;
-            Console.WriteLine("  P               toggle the Windows system proxy on/off");
-            Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
-            Console.WriteLine("  S               run a speed test through the Tor proxy");
-            Console.WriteLine("  C               stop Tor and exit");
-            Console.WriteLine();
-            Console.WriteLine();
-            while (true)
-            {
-                bool alive = true;
-                if (torProc != null)
-                {
-                    try { torProc.Refresh(); alive = !torProc.HasExited; }
-                    catch { alive = false; }
-                }
-                if (!alive)
-                {
-                    Console.WriteLine("[x] tor exited with code " + (torProc != null ? torProc.ExitCode : -1) + ".");
-                    break;
-                }
-                try
-                {
-                    if (Console.KeyAvailable)
-                    {
-                        ConsoleKeyInfo ki = Console.ReadKey(true);
-                        if (ki.Key == ConsoleKey.P)
-                        {
-                            proxyOn = !proxyOn;
-                            SetSystemProxy(proxyOn);
-                            Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
-                        }
-                        else if (ki.Key == ConsoleKey.S)
-                        {
-                            SpeedTestMenu();
-                        }
-                        else if (ki.Key == ConsoleKey.T)
-                        {
-                            ToggleTun();
-                        }
-                        else if (ki.Key == ConsoleKey.C)
-                        {
-                            Console.WriteLine("Stopping Tor...");
-                            Cleanup();
-                            Environment.Exit(0);
-                        }
-                    }
-                }
-                catch { }
-                Thread.Sleep(150);
-            }
-
-            Cleanup();
-            Console.WriteLine("Tor stopped; system proxy restored.");
-            WaitForKey();
-            return 0;
         }
     }
 }
