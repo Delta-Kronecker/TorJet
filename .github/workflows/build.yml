@@ -2,7 +2,7 @@ name: Build Tor for Windows
 
 on:
   push:
-    branches: [main, master]
+    branches: [TorBoost, main, master]
     tags: ['v*']
   workflow_dispatch:
     inputs:
