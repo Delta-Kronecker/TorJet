@@ -47,10 +47,10 @@ namespace StartTor
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
         {
-            "stock config, most compatible",
-            "long-lived reused circuits",
-            "more guards + faster scheduler + deeper reuse",
-            "max concurrency + greedy Vanilla scheduler"
+            "no tuning - stock tor config, most compatible",
+            "reuse circuits 24 h, 24-min prebuild window - fewer handshakes",
+            "15 primary guards, KISTLite+Vanilla 5 ms scheduler, 24 h reuse, 2 ms token bucket",
+            "20 primary guards, greedy Vanilla scheduler, 128 pending circuits, 1 ms token bucket"
         };
         private static readonly string[][] StrategyTorrc =
         {
@@ -419,7 +419,7 @@ namespace StartTor
             catch { }
         }
 
-        // Strategy for a run: env override (bench) > saved choice > standard.
+        // Strategy for a run: env override (bench) > saved choice > ultimate.
         private static int ResolveStrategy()
         {
             string env = Environment.GetEnvironmentVariable("BENCH_STRATEGY");
@@ -429,7 +429,7 @@ namespace StartTor
                 if (s >= 0) return s;
             }
             int last = ReadLastStrategy();
-            return last >= 0 ? last : 0;
+            return last >= 0 ? last : StrategyNames.Length - 1;
         }
 
         private static int ShowMenu()
@@ -471,11 +471,11 @@ namespace StartTor
                                       " - " + StrategyDesc[i]);
                 }
                 Console.Write("  Choose 1-" + StrategyNames.Length +
-                              " (Enter = " + StrategyNames[last >= 0 ? last : 0] + "): ");
+                              " (Enter = " + StrategyNames[last >= 0 ? last : StrategyNames.Length - 1] + "): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return -1; }
-                if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : 0;
+                if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : StrategyNames.Length - 1;
                 int n;
                 if (int.TryParse(input.Trim(), out n) && n >= 1 && n <= StrategyNames.Length) return n - 1;
                 int s = ParseStrategy(input.Trim());
@@ -496,18 +496,17 @@ namespace StartTor
             mode = ReadLastMode();
             if (mode < 0) mode = 0;
             strategy = ReadLastStrategy();
-            if (strategy < 0) strategy = 0;
+            if (strategy < 0) strategy = StrategyNames.Length - 1;
             while (true)
             {
                 Console.WriteLine();
                 Console.WriteLine("  TorJet");
                 Console.WriteLine("  ================");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
-                Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy] +
-                                  "  - " + StrategyDesc[strategy]);
-                Console.WriteLine("    3) Start Tor");
+                Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
+                Console.WriteLine("    0) Start Tor");
                 Console.WriteLine("    4) Exit");
-                Console.Write("  Choose 1-4 (Enter = 3): ");
+                Console.Write("  Choose 0-4 (Enter = 0): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -525,7 +524,7 @@ namespace StartTor
                         int s = ShowStrategyMenu();
                         if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
                     }
-                    else if (n == 3) return;
+                    else if (n == 0) return;
                     else if (n == 4) { mode = -1; return; }
                     else Console.WriteLine("    Invalid choice, try again.");
                 }
