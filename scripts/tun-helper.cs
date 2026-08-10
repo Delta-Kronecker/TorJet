@@ -1,5 +1,5 @@
 // tun-helper.cs - builds to tun-helper.exe (compile with build-start-tor.ps1).
-// Elevated Windows helper for TorBoost TUN mode. Compiled as winexe: no console.
+// Elevated Windows helper for TorJet TUN mode. Compiled as winexe: no console.
 //
 // TUN mode routes ALL system IPv4 traffic through the local tor by creating a
 // Wintun adapter (via tun2socks.exe + wintun.dll), moving the default route into
@@ -74,7 +74,7 @@ namespace TunHelper
             return d1;
         }
 
-        private const string TunName = "TorBoostTun";
+        private const string TunName = "TorJetTun";
         private const string TunAddr = "10.0.0.1";
         private const string TunMask = "255.255.255.0";
         private const string DnsMarker = "DNSPort 127.0.0.1:53";
@@ -84,9 +84,9 @@ namespace TunHelper
 
         // Only one keeper may run at a time: a second "on" (e.g. the user pressing
         // T twice in a row) used to race the first one, creating a second adapter
-        // named "TorBoostTun 1" that the fixed-name netsh calls then mis-targeted,
+        // named "TorJetTun 1" that the fixed-name netsh calls then mis-targeted,
         // which made the default-route step fail and left the state file empty.
-        private static readonly Mutex TunMutex = new Mutex(true, @"Local\TorBoostTunHelper");
+        private static readonly Mutex TunMutex = new Mutex(true, @"Local\TorJetTunHelper");
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
         private static extern IntPtr LoadLibrary(string path);
@@ -433,7 +433,7 @@ namespace TunHelper
         }
 
         // Finds the tun2socks adapter and its REAL name. Windows may display it
-        // as "TorBoostTun 1" (or worse) when a stale adapter already exists, so
+        // as "TorJetTun 1" (or worse) when a stale adapter already exists, so
         // every netsh call must use the discovered name, never the fixed one.
         private static bool GetTunAdapter(out int ifIndex, out string name)
         {

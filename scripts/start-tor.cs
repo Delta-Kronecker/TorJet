@@ -1,5 +1,5 @@
 // start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
-// TorBoost launcher - portable Tor client tuned for speed. Expected layout:
+// TorJet launcher - portable Tor client tuned for speed. Expected layout:
 //   start-tor.exe
 //   data\
 //     tor.exe  torrc.template  geoip  geoip6  transports
@@ -103,7 +103,7 @@ namespace StartTor
         private static readonly string TunStopFile = Path.Combine(DataDir, "tun-stop.txt");
         private static readonly string TunResultFile = Path.Combine(DataDir, "tun-result.txt");
 
-        // Ports used by this program's tor (torrc.template / torrc.boost).
+        // Ports used by this program's tor (torrc.template / torrc.jet).
         // Occupied ports at startup mean a previous tor instance is still alive.
         private static readonly int[] TcpPorts = { 9050, 9051, 8118 };
         private const int UdpDnsPort = 53530;
@@ -479,7 +479,7 @@ namespace StartTor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("  TorBoost");
+                Console.WriteLine("  TorJet");
                 Console.WriteLine("  ================");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy] +
@@ -1426,7 +1426,7 @@ namespace StartTor
         }
 
         // --- startup port check --------------------------------------------
-        // If the TorBoost ports are already occupied, a previous tor instance is
+        // If the TorJet ports are already occupied, a previous tor instance is
         // still running: stop it (and any leftover TUN/system proxy), then carry
         // on with a fresh start instead of refusing to launch.
         private static bool TcpPortBusy(int port)
@@ -1469,7 +1469,7 @@ namespace StartTor
             bool prev = running != null || PreviousRunActive();
             if (!prev && !TunActive()) return;
 
-            Console.WriteLine("  [i] A previous TorBoost run is still active - stopping it.");
+            Console.WriteLine("  [i] A previous TorJet run is still active - stopping it.");
 
             if (TunActive())
             {
@@ -1645,7 +1645,7 @@ namespace StartTor
 
         private static int Main(string[] args)
         {
-            Console.Title = "TorBoost";
+            Console.Title = "TorJet";
             Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;

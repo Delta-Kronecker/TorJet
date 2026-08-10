@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-  TorBoost benchmark orchestrator (step 0 harness).
+  TorJet benchmark orchestrator (step 0 harness).
 
   Works against a scratch copy of the release folder so your Downloads copy is
   never modified. Each run boots tor, waits for 100% bootstrap, runs a battery
@@ -8,7 +8,7 @@
   one CSV row per measurement.
 
 .PARAMETER Release
-  Pristine release folder (default: Downloads\torboost-win64-v1.1.7).
+  Pristine release folder (default: Downloads\torjet-win64-v1.1.7).
 
 .PARAMETER WorkDir
   Scratch folder created from Release. Reused across runs (keeps cached
@@ -44,8 +44,8 @@
   conflux set/leg counts.
 #>
 param(
-    [string]$Release = "C:\Users\agolb\Downloads\torboost-win64-v1.1.7",
-    [string]$WorkDir = "$env:TEMP\torboost-bench",
+    [string]$Release = "C:\Users\agolb\Downloads\torjet-win64-v1.1.7",
+    [string]$WorkDir = "$env:TEMP\torjet-bench",
     [string]$Mode = "direct",
     [int]$Iters = 3,
     [string]$Streams = "1,4,8",

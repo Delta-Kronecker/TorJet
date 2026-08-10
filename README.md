@@ -1,6 +1,6 @@
-# TorBoost
+# TorJet
 
-TorBoost is a single-folder, portable Tor client tuned for maximum
+TorJet is a single-folder, portable Tor client tuned for maximum
 download/upload throughput (padding disabled, faster bootstrap, longer circuit
 reuse). Built in CI from the official tor 0.4.9.11 sources plus pluggable
 transports (obfs4, snowflake, webtunnel). No installation and no `%APPDATA%` —
@@ -24,7 +24,7 @@ data\
 
 ## Usage
 
-1. Download the `torboost-win64` artifact from GitHub Actions and unzip.
+1. Download the `torjet-win64` artifact from GitHub Actions and unzip.
 2. Double-click `start-tor.exe`. The main menu lets you pick:
    - **Connection mode** — Direct (no bridges, when Tor isn't blocked),
      WebTunnel, Obfs4, Vanilla (bridges from `data\bridges\`)
@@ -55,7 +55,7 @@ press **T** again (or run `start-tor.exe --tun-off`).
 
 How it works:
 
-- Creates a Wintun adapter named `TorBoostTun` (`tun2socks.exe` + `wintun.dll`)
+- Creates a Wintun adapter named `TorJetTun` (`tun2socks.exe` + `wintun.dll`)
   and points the default route into it, so all system traffic goes to the local
   tor SOCKS proxy.
 - Points system DNS at `127.0.0.1:53` (tor's DNSPort, enabled with a config
@@ -92,9 +92,9 @@ start-tor.exe --stop              stop Tor and restore the proxy
 ## Building
 
 `.github/workflows/build.yml` builds tor + transports and publishes the
-`torboost-win64` artifact on every push.
+`torjet-win64` artifact on every push.
 
 - `tor-src\` — unmodified official tor 0.4.9.11 source
-- `configs\torrc.boost` — speed-optimized portable config template (becomes `data\torrc.template`)
+- `configs\torrc.jet` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `start-tor.exe` (compiled with `scripts\build-start-tor.ps1`)
