@@ -10,6 +10,11 @@ on:
         description: 'Release tag (e.g. v1.0.0). Leave empty for a build-only run.'
         required: false
         default: ''
+      beta:
+        description: 'Publish this release as a beta (pre-release) instead of latest'
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -192,6 +197,8 @@ jobs:
     if: |
       (github.event_name == 'workflow_dispatch' && github.event.inputs.tag != '') ||
       startsWith(github.ref, 'refs/tags/')
+    env:
+      BETA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.beta || 'false' }}
     steps:
       - name: Resolve tag
         id: tag
@@ -224,8 +231,20 @@ jobs:
         run: |
           TAG="${{ steps.tag.outputs.TAG }}"
           ZIP="torboost-win64-$TAG.zip"
+          if [ "$BETA" = "true" ]; then
+            PRERELEASE="--prerelease"
+            echo "Publishing as BETA (pre-release)"
+          else
+            PRERELEASE=""
+            echo "Publishing as full release (latest)"
+          fi
           if gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$TAG" "$ZIP" --repo "${{ github.repository }}" --clobber
+            if [ "$BETA" = "true" ]; then
+              gh release edit "$TAG" --repo "${{ github.repository }}" --prerelease
+            else
+              gh release edit "$TAG" --repo "${{ github.repository }}" --prerelease=false
+            fi
           else
             gh release create "$TAG" "$ZIP" \
               --repo "${{ github.repository }}" \
@@ -233,5 +252,6 @@ jobs:
               --notes "TorBoost (official tor 0.4.9.11), tuned for maximum
               download/upload throughput.
               Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla).
-              - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530"
+              - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530" \
+              $PRERELEASE
           fi
