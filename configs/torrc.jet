@@ -4,7 +4,7 @@
 # fully portable: copy/move it anywhere and it still works.
 
 # --- Local proxies (Windows system proxy uses HTTP 8118) ---
-SocksPort 127.0.0.1:9050
+SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
 HTTPTunnelPort 127.0.0.1:8118
 DNSPort 127.0.0.1:53530
 ControlPort 127.0.0.1:9051

@@ -136,6 +136,10 @@ namespace StartTor
             catch { return false; }
         }
 
+        private static string savedProxy;
+        private static string savedProxyOverride;
+        private static bool savedProxyOn;
+
         private static void SetSystemProxy(bool on)
         {
             if (!on && !ProxyIsOurs()) return;
@@ -143,11 +147,24 @@ namespace StartTor
             {
                 using (RegistryKey k = Registry.CurrentUser.CreateSubKey(ProxyKey))
                 {
-                    k.SetValue("ProxyEnable", on ? 1 : 0, RegistryValueKind.DWord);
                     if (on)
                     {
+                        if (!ProxyIsOurs())
+                        {
+                            savedProxy = k.GetValue("ProxyServer") as string ?? "";
+                            savedProxyOverride = k.GetValue("ProxyOverride") as string ?? "";
+                            object en = k.GetValue("ProxyEnable");
+                            savedProxyOn = en is int && (int)en == 1;
+                        }
+                        k.SetValue("ProxyEnable", 1, RegistryValueKind.DWord);
                         k.SetValue("ProxyServer", "127.0.0.1:8118", RegistryValueKind.String);
                         k.SetValue("ProxyOverride", "<local>", RegistryValueKind.String);
+                    }
+                    else
+                    {
+                        k.SetValue("ProxyEnable", savedProxyOn ? 1 : 0, RegistryValueKind.DWord);
+                        k.SetValue("ProxyServer", savedProxy ?? "", RegistryValueKind.String);
+                        k.SetValue("ProxyOverride", savedProxyOverride ?? "", RegistryValueKind.String);
                     }
                 }
             }
@@ -728,6 +745,8 @@ namespace StartTor
             TcpClient tc = new TcpClient();
             tc.Connect(IPAddress.Loopback, 9050);
             NetworkStream ns = tc.GetStream();
+            ns.ReadTimeout = 90000;
+            ns.WriteTimeout = 90000;
             // greeting: VER=5, NMETHODS=2, methods = no-auth(0), user/pass(2)
             byte[] g = { 5, 2, 0, 2 };
             ns.Write(g, 0, g.Length);
@@ -776,6 +795,8 @@ namespace StartTor
                 if (ns == null) return -1;
                 using (var ssl = new System.Net.Security.SslStream(ns))
                 {
+                    ssl.ReadTimeout = 90000;
+                    ssl.WriteTimeout = 90000;
                     ssl.AuthenticateAsClient(host, null,
                         System.Security.Authentication.SslProtocols.Tls12, false);
                     byte[] req = Encoding.ASCII.GetBytes(
@@ -1729,6 +1750,7 @@ namespace StartTor
             int strategy = -1;
             bool bootstrapOnly = false;
             bool genOnly = false;
+            bool newCircuit = false;
             string autoMode = "";
             for (int i = 0; i < args.Length; i++)
             {
@@ -1737,6 +1759,7 @@ namespace StartTor
                 else if (a == "--gen-torrc-only") genOnly = true;
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
                 else if (a == "--strategy") strategy = ParseStrategy(a);
+                else if (a == "--newcircuit") newCircuit = true;
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
                 else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
@@ -1746,6 +1769,13 @@ namespace StartTor
                     int s = ParseStrategy(a);
                     if (s >= 0) strategy = s;
                 }
+            }
+            if (newCircuit)
+            {
+                Console.WriteLine(ControlSend("SIGNAL NEWNYM")
+                    ? "New identity requested (NEWNYM)."
+                    : "No tor control port on 127.0.0.1:9051. Is tor running?");
+                return 0;
             }
             if (mode < 0)
             {

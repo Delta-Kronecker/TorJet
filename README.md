@@ -3,7 +3,7 @@
 TorJet is a single-folder, portable Tor client tuned for maximum
 download/upload throughput (padding disabled, faster bootstrap, longer circuit
 reuse). Built in CI from the official tor 0.4.9.11 sources plus pluggable
-transports (obfs4, snowflake, webtunnel). No installation and no `%APPDATA%` —
+transports (obfs4, webtunnel). No installation and no `%APPDATA%` —
 every file and all runtime state stays inside one folder, so you can copy or
 move it anywhere.
 
