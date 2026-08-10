@@ -25,15 +25,24 @@ data\
 ## Usage
 
 1. Download the `torboost-win64` artifact from GitHub Actions and unzip.
-2. Double-click `start-tor.exe`, pick a mode:
-   - **1 Direct** — no bridges (works when Tor is not blocked)
-   - **2 WebTunnel**, **3 Obfs4**, **4 Vanilla** — bridges from `data\bridges\`
-   Your choice is remembered for next time (`data\mode.txt`).
+2. Double-click `start-tor.exe`. The main menu lets you pick:
+   - **Connection mode** — Direct (no bridges, when Tor isn't blocked),
+     WebTunnel, Obfs4, Vanilla (bridges from `data\bridges\`)
+   - **Strategy level** — a packaged torrc tuning bundle, from most
+     compatible to fastest:
+     1. **standard** — stock config, most compatible
+     2. **balanced** — long-lived reused circuits (fewer handshakes)
+     3. **aggressive** — many guards + KISTLite scheduler
+     4. **ultimate** — max concurrency + per-stream circuits
+   Your choices are remembered for next time (`data\mode.txt`,
+   `data\strategy.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
    automatically — press **P** to toggle it on/off (HTTP 127.0.0.1:8118).
    Press **T** to toggle **TUN mode** (see below). Press **S** to run a speed
-   test (downloads 10 MB from speed.cloudflare.com through the Tor proxy and
-   reports instantaneous and average speed). Press **C** to stop Tor.
+   test: single-stream over the HTTP proxy, or the *max* test which opens
+   several parallel SOCKS5 streams, each authenticated with a unique username
+   so tor's isolation gives every stream its own circuit (the true
+   multi-path throughput ceiling). Press **C** to stop Tor.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
 
 ### TUN mode (all traffic through Tor)
@@ -62,17 +71,19 @@ Notes:
 - TUN mode and the P-proxy are independent — you can use either, both, or neither.
 - While TUN is on, only IPv4 is tunnelled (IPv6 is untouched).
 
-You can also launch with a fixed mode or command:
+You can also launch with fixed settings:
 
 ```
-start-tor.exe obfs4            start directly in obfs4 mode
-start-tor.exe --newcircuit     request a new identity (NEWNYM)
-start-tor.exe --update-bridges re-download the bridge lists from the
-                               Tor-Bridges-Collector repo and replace them
-                               in data\bridges\
-start-tor.exe --tun-off        turn TUN mode off (same as pressing T twice)
-start-tor.exe --tun-status     print whether TUN mode is on or off
-start-tor.exe --stop           stop Tor and restore the proxy
+start-tor.exe obfs4               start directly in obfs4 mode
+start-tor.exe obfs4 aggressive    start in obfs4 mode + strategy level
+start-tor.exe --strategy ultimate start with the ultimate strategy
+start-tor.exe --newcircuit        request a new identity (NEWNYM)
+start-tor.exe --update-bridges    re-download the bridge lists from the
+                                  Tor-Bridges-Collector repo and replace them
+                                  in data\bridges\
+start-tor.exe --tun-off           turn TUN mode off (same as pressing T twice)
+start-tor.exe --tun-status        print whether TUN mode is on or off
+start-tor.exe --stop              stop Tor and restore the proxy
 ```
 
 ## Building

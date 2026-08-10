@@ -29,6 +29,11 @@
 .PARAMETER VariantName
   Label stored in the CSV "variant" column (default "baseline").
 
+.PARAMETER Strategy
+  Built-in strategy level applied via the launcher (standard | balanced |
+  aggressive | ultimate). Overrides/joins ExtraTorrc in the written torrc.
+  (default: standard)
+
 .PARAMETER ExtraTorrc
   Extra torrc lines (newline-separated) appended to torrc.template for this run.
   Leave empty for a pure baseline.
@@ -46,6 +51,7 @@ param(
     [string]$Streams = "1,4,8",
     [string]$OutCSV = "results\bench.csv",
     [string]$VariantName = "baseline",
+    [string]$Strategy = "standard",
     [string]$ExtraTorrc = "",
     [string]$ConfluxModes = ""
 )
@@ -85,6 +91,7 @@ $torrcBackup  = "$torrcTemplate.bench-bak"
 function Invoke-Bench {
     param([string]$Name, [string]$Extra)
     $env:BENCH_VARIANT = $Name
+    $env:BENCH_STRATEGY = $Strategy
     if (-not (Test-Path $torrcBackup)) { Copy-Item $torrcTemplate $torrcBackup -Force }
     if ($Extra.Trim().Length -gt 0) {
         $base = Get-Content $torrcBackup -Raw
@@ -94,7 +101,7 @@ function Invoke-Bench {
         Copy-Item $torrcBackup $torrcTemplate -Force
     }
 
-    Write-Host "`n=== variant: $Name (mode=$Mode iters=$Iters streams=$Streams) ===" -ForegroundColor Cyan
+    Write-Host "`n=== variant: $Name (mode=$Mode strategy=$Strategy iters=$Iters streams=$Streams) ===" -ForegroundColor Cyan
     & (Join-Path $WorkDir "start-tor.exe") --bench $Mode --iters $Iters --streams $Streams --csv $OutCSV
     if ($LASTEXITCODE -ne 0) { Write-Host "[!] bench exited with code $LASTEXITCODE" -ForegroundColor Yellow }
 }
@@ -105,12 +112,12 @@ if ($ConfluxModes.Trim().Length -gt 0) {
         Write-Host "`n=== conflux check: $m ===" -ForegroundColor Cyan
         & (Join-Path $WorkDir "start-tor.exe") --conflux-check $m
     }
-    Remove-Item Env:BENCH_VARIANT -ErrorAction SilentlyContinue
+    Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
     exit 0
 }
 
 Invoke-Bench -Name $VariantName -Extra $ExtraTorrc
-Remove-Item Env:BENCH_VARIANT -ErrorAction SilentlyContinue
+Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
 
 Write-Host "`n=== last rows of $OutCSV ===" -ForegroundColor Green
 if (Test-Path $OutCSV) { Get-Content $OutCSV | Select-Object -Last ($Iters * (@($Streams -split ",").Count) + 1) }

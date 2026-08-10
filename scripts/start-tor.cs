@@ -39,6 +39,54 @@ namespace StartTor
         private static readonly string Torrc = Path.Combine(DataDir, "torrc");
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
         private static readonly string ModeFile = Path.Combine(DataDir, "mode.txt");
+        private static readonly string StrategyFile = Path.Combine(DataDir, "strategy.txt");
+        private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
+        private static readonly string[] StrategyDesc =
+        {
+            "stock config, most compatible",
+            "long-lived reused circuits",
+            "many guards + fast scheduler",
+            "max concurrency + per-stream circuits"
+        };
+        private static readonly string[][] StrategyTorrc =
+        {
+            /* standard */ new string[0],
+            /* balanced */ new[]
+            {
+                "MaxCircuitDirtiness 86400",
+                "CircuitsAvailableTimeout 1440",
+                "CircuitStreamTimeout 30",
+                "OptimisticData 1"
+            },
+            /* aggressive */ new[]
+            {
+                "MaxCircuitDirtiness 86400",
+                "CircuitsAvailableTimeout 1440",
+                "CircuitStreamTimeout 30",
+                "OptimisticData 1",
+                "NumEntryGuards 15",
+                "NumPrimaryGuards 15",
+                "Schedulers KISTLite,Vanilla",
+                "KISTSockBufSizeFactor 4.0",
+                "KISTSchedRunInterval 5 msec"
+            },
+            /* ultimate */ new[]
+            {
+                "MaxCircuitDirtiness 86400",
+                "CircuitsAvailableTimeout 1440",
+                "CircuitStreamTimeout 30",
+                "OptimisticData 1",
+                "NumEntryGuards 15",
+                "NumPrimaryGuards 15",
+                "Schedulers KISTLite,Vanilla",
+                "KISTSockBufSizeFactor 4.0",
+                "KISTSchedRunInterval 5 msec",
+                "MaxClientCircuitsPending 128",
+                "TokenBucketRefillInterval 1 msec",
+                "CircuitPriorityHalflife 5",
+                "SocksTimeout 120"
+            }
+        };
         private static readonly string TorLog = Path.Combine(DataDir, "data", "tor.log");
         private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
         private static readonly string ProxyKey =
@@ -333,6 +381,39 @@ namespace StartTor
             return -1;
         }
 
+        private static int ParseStrategy(string s)
+        {
+            for (int i = 0; i < StrategyNames.Length; i++)
+                if (s.Equals(StrategyNames[i], StringComparison.OrdinalIgnoreCase)) return i;
+            return -1;
+        }
+
+        private static int ReadLastStrategy()
+        {
+            try { if (File.Exists(StrategyFile)) return ParseStrategy(File.ReadAllText(StrategyFile).Trim()); }
+            catch { }
+            return -1;
+        }
+
+        private static void WriteStrategyFile(int strategy)
+        {
+            try { File.WriteAllText(StrategyFile, StrategyNames[strategy], new UTF8Encoding(false)); }
+            catch { }
+        }
+
+        // Strategy for a run: env override (bench) > saved choice > standard.
+        private static int ResolveStrategy()
+        {
+            string env = Environment.GetEnvironmentVariable("BENCH_STRATEGY");
+            if (!string.IsNullOrEmpty(env))
+            {
+                int s = ParseStrategy(env);
+                if (s >= 0) return s;
+            }
+            int last = ReadLastStrategy();
+            return last >= 0 ? last : 0;
+        }
+
         private static int ShowMenu()
         {
             int last = ReadLastMode();
@@ -357,7 +438,93 @@ namespace StartTor
             }
         }
 
-        private static bool WriteTorrc(int mode)
+        private static int ShowStrategyMenu()
+        {
+            int last = ReadLastStrategy();
+            while (true)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  Strategy level:");
+                for (int i = 0; i < StrategyNames.Length; i++)
+                {
+                    string star = i == 0 ? "" : "  ";
+                    Console.WriteLine("    " + (i + 1) + ") " + StrategyNames[i].PadRight(10) +
+                                      " - " + StrategyDesc[i]);
+                }
+                Console.Write("  Choose 1-" + StrategyNames.Length +
+                              " (Enter = " + StrategyNames[last >= 0 ? last : 0] + "): ");
+                string input;
+                try { input = Console.ReadLine(); }
+                catch { return -1; }
+                if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : 0;
+                int n;
+                if (int.TryParse(input.Trim(), out n) && n >= 1 && n <= StrategyNames.Length) return n - 1;
+                int s = ParseStrategy(input.Trim());
+                if (s >= 0) return s;
+                Console.WriteLine("    Invalid choice, try again.");
+            }
+        }
+
+        private static void WriteModeFile(int mode)
+        {
+            try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
+            catch { }
+        }
+
+        // Interactive startup: pick connection mode and strategy level, then start.
+        private static void ShowMainMenu(out int mode, out int strategy)
+        {
+            mode = ReadLastMode();
+            if (mode < 0) mode = 0;
+            strategy = ReadLastStrategy();
+            if (strategy < 0) strategy = 0;
+            while (true)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  TorBoost");
+                Console.WriteLine("  ================");
+                Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
+                Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy] +
+                                  "  - " + StrategyDesc[strategy]);
+                Console.WriteLine("    3) Start Tor");
+                Console.WriteLine("    4) Exit");
+                Console.Write("  Choose 1-4 (Enter = 3): ");
+                string input;
+                try { input = Console.ReadLine(); }
+                catch { mode = -1; return; }
+                if (string.IsNullOrWhiteSpace(input)) return;
+                int n;
+                if (int.TryParse(input.Trim(), out n))
+                {
+                    if (n == 1)
+                    {
+                        int m = ShowMenu();
+                        if (m >= 0) { mode = m; WriteModeFile(mode); }
+                    }
+                    else if (n == 2)
+                    {
+                        int s = ShowStrategyMenu();
+                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                    }
+                    else if (n == 3) return;
+                    else if (n == 4) { mode = -1; return; }
+                    else Console.WriteLine("    Invalid choice, try again.");
+                }
+                else
+                {
+                    int m = ParseMode(input.Trim());
+                    if (m >= 0) { mode = m; WriteModeFile(mode); }
+                    else
+                    {
+                        int s = ParseStrategy(input.Trim());
+                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                        else Console.WriteLine("    Invalid choice, try again.");
+                    }
+                }
+            }
+        }
+
+        private static bool WriteTorrc(int mode, int strategy)
         {
             if (!File.Exists(TorrcTemplate))
             {
@@ -394,10 +561,20 @@ namespace StartTor
                 foreach (string b in bridges) sb.AppendLine(b);
                 bridgeCount = bridges.Count;
             }
+            if (strategy >= 0 && strategy < StrategyNames.Length && StrategyTorrc[strategy].Length > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine();
+                sb.AppendLine("# --- strategy: " + StrategyNames[strategy] + " ---");
+                foreach (string line in StrategyTorrc[strategy]) sb.AppendLine(line);
+            }
             File.WriteAllText(Torrc, sb.ToString(), new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
             catch { }
+            try { WriteStrategyFile(strategy); }
+            catch { }
             Console.WriteLine("[i] torrc written (" + ModeNames[mode] +
+                              ", strategy " + StrategyNames[strategy] +
                               (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") + ")");
             return true;
         }
@@ -538,6 +715,141 @@ namespace StartTor
             {
                 Console.WriteLine("[x] speed test failed: " + ex.Message);
             }
+        }
+
+        // Opens a raw SOCKS5 (RFC 1928) connection through Tor's SOCKS port
+        // (127.0.0.1:9050). A unique `username` per connection makes tor's
+        // IsolateSOCKSAuth isolation give every stream its own circuit, which is
+        // what turns N parallel downloads into N parallel Tor paths instead of
+        // N streams sharing one circuit.
+        private static NetworkStream Socks5Connect(string host, int port, string username)
+        {
+            TcpClient tc = new TcpClient();
+            tc.Connect(IPAddress.Loopback, 9050);
+            NetworkStream ns = tc.GetStream();
+            // greeting: VER=5, NMETHODS=2, methods = no-auth(0), user/pass(2)
+            byte[] g = { 5, 2, 0, 2 };
+            ns.Write(g, 0, g.Length);
+            byte[] gm = new byte[2];
+            if (ns.Read(gm, 0, 2) != 2 || gm[0] != 5) { tc.Close(); return null; }
+            if (gm[1] == 2)
+            {
+                byte[] u = Encoding.UTF8.GetBytes(username);
+                byte[] p = Encoding.UTF8.GetBytes("torb");
+                ns.WriteByte(1);
+                ns.WriteByte((byte)u.Length);
+                ns.Write(u, 0, u.Length);
+                ns.WriteByte((byte)p.Length);
+                ns.Write(p, 0, p.Length);
+                byte[] au = new byte[2];
+                if (ns.Read(au, 0, 2) != 2 || au[1] != 0) { tc.Close(); return null; }
+            }
+            else if (gm[1] != 0)
+            {
+                tc.Close();
+                return null;
+            }
+            byte[] hb = Encoding.ASCII.GetBytes(host);
+            List<byte> req = new List<byte>();
+            req.Add(5); req.Add(1); req.Add(0); req.Add(3); req.Add((byte)hb.Length);
+            req.AddRange(hb);
+            req.Add((byte)(port >> 8)); req.Add((byte)(port & 0xff));
+            byte[] rq = req.ToArray();
+            ns.Write(rq, 0, rq.Length);
+            byte[] rh = new byte[4];
+            if (ns.Read(rh, 0, 4) != 4 || rh[0] != 5 || rh[1] != 0) { tc.Close(); return null; }
+            int atyp = rh[3];
+            int skip = atyp == 1 ? 6 : atyp == 4 ? 18 : 0;
+            if (atyp == 3) { skip = ns.ReadByte() + 2; }
+            for (int i = 0; i < skip; i++) ns.ReadByte();
+            return ns;
+        }
+
+        // Downloads `bytes` from host over a freshly established SOCKS5 stream
+        // (username gives it an isolated circuit). Returns bytes received.
+        private static long SocksDownload(string host, string username, long bytes)
+        {
+            try
+            {
+                NetworkStream ns = Socks5Connect(host, 443, username);
+                if (ns == null) return -1;
+                using (var ssl = new System.Net.Security.SslStream(ns))
+                {
+                    ssl.AuthenticateAsClient(host, null,
+                        System.Security.Authentication.SslProtocols.Tls12, false);
+                    byte[] req = Encoding.ASCII.GetBytes(
+                        "GET /__down?bytes=" + bytes + " HTTP/1.1\r\n" +
+                        "Host: " + host + "\r\n" +
+                        "User-Agent: start-tor-speedtest/1.0\r\n" +
+                        "Connection: close\r\n\r\n");
+                    ssl.Write(req, 0, req.Length);
+                    ssl.Flush();
+                    byte[] buf = new byte[64 * 1024];
+                    long total = 0;
+                    int n;
+                    while ((n = ssl.Read(buf, 0, buf.Length)) > 0) total += n;
+                    return total;
+                }
+            }
+            catch { return -1; }
+        }
+
+        // The "ultimate" speed test: N parallel SOCKS5 streams, each with its own
+        // username -> its own circuit. This is the max-throughput configuration
+        // the strategies are aiming for.
+        private static void MultiSpeedTest(int streams)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Max speed test: " + streams + " parallel streams " +
+                              "(each on its own circuit via SOCKS5 auth)...");
+            string host = "speed.cloudflare.com";
+            long target = 10L * 1024 * 1024;
+            long total = 0;
+            var lockObj = new object();
+            var errors = new List<string>();
+            var threads = new List<Thread>();
+            Stopwatch sw = Stopwatch.StartNew();
+            for (int i = 0; i < streams; i++)
+            {
+                string user = "torb" + i; // unique -> isolated circuit
+                Thread th = new Thread(delegate()
+                {
+                    long got = SocksDownload(host, user, target);
+                    if (got < 0)
+                    {
+                        lock (lockObj) { if (errors.Count == 0) errors.Add("stream " + user + " failed"); }
+                        got = 0;
+                    }
+                    Interlocked.Add(ref total, got);
+                });
+                th.IsBackground = true;
+                threads.Add(th);
+                th.Start();
+            }
+            foreach (Thread th in threads) th.Join();
+            sw.Stop();
+            double avg = total / sw.Elapsed.TotalSeconds;
+            Console.WriteLine("Done: " + total.ToString("#,0") + " bytes in " +
+                              sw.Elapsed.TotalSeconds.ToString("0.0") + " s");
+            Console.WriteLine("  aggregate average : " + FormatSpeed(avg));
+            if (errors.Count > 0) Console.WriteLine("  [i] " + errors.Count + " of " + streams + " streams failed");
+        }
+
+        private static void SpeedTestMenu()
+        {
+            Console.WriteLine();
+            Console.WriteLine("  Speed test:");
+            Console.WriteLine("    1) Single stream (HTTP 8118)");
+            Console.WriteLine("    2) Max: " + StrategyNames.Length + "+ parallel SOCKS5 streams, each own circuit");
+            Console.Write("  Choose 1-2 (Enter = 2): ");
+            string input;
+            try { input = Console.ReadLine(); }
+            catch { input = "2"; }
+            if (string.IsNullOrWhiteSpace(input)) input = "2";
+            int n;
+            if (!int.TryParse(input.Trim(), out n)) n = 2;
+            if (n == 1) SpeedTest();
+            else MultiSpeedTest(4);
         }
 
         // --- benchmark / conflux diagnostics (step 0 harness) --------------
@@ -717,7 +1029,7 @@ namespace StartTor
 
         // Starts tor for the given mode, writes torrc, stops any previous run,
         // and waits until bootstrap reaches 100%. Returns the process or null.
-        private static Process StartTorAndWait(int mode, out string errorMessage)
+        private static Process StartTorAndWait(int mode, int strategy, out string errorMessage)
         {
             errorMessage = null;
             if (!File.Exists(TorExe))
@@ -725,7 +1037,7 @@ namespace StartTor
                 errorMessage = "tor.exe not found in " + DataDir;
                 return null;
             }
-            if (!WriteTorrc(mode))
+            if (!WriteTorrc(mode, strategy))
             {
                 errorMessage = "failed to write torrc (bridge file missing?).";
                 return null;
@@ -911,7 +1223,7 @@ namespace StartTor
         private static void RunBench(int mode, int iters, int[] streamCounts, string csvPath)
         {
             string err;
-            Process proc = StartTorAndWait(mode, out err);
+            Process proc = StartTorAndWait(mode, ResolveStrategy(), out err);
             if (proc == null)
             {
                 Console.WriteLine("[x] " + err);
@@ -1123,7 +1435,7 @@ namespace StartTor
                 if (m < 0) m = ShowMenu();
                 if (m < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
                 string err;
-                Process p = StartTorAndWait(m, out err);
+                Process p = StartTorAndWait(m, ResolveStrategy(), out err);
                 if (p == null) { Console.WriteLine("[x] " + err); Cleanup(); return 1; }
                 Console.WriteLine("[i] bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
@@ -1182,16 +1494,34 @@ namespace StartTor
             }
 
             int mode = -1;
+            int strategy = -1;
             bool bootstrapOnly = false;
             bool genOnly = false;
-            foreach (string a in args)
+            for (int i = 0; i < args.Length; i++)
             {
+                string a = args[i];
                 if (a == "--bootstrap-only" || a == "-t") bootstrapOnly = true;
                 else if (a == "--gen-torrc-only") genOnly = true;
-                else { int m = ParseMode(a); if (m >= 0) mode = m; }
+                else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
+                else if (a == "--strategy") strategy = ParseStrategy(a);
+                else
+                {
+                    int m = ParseMode(a);
+                    if (m >= 0) { mode = m; continue; }
+                    int s = ParseStrategy(a);
+                    if (s >= 0) strategy = s;
+                }
             }
-            if (mode < 0) mode = ShowMenu();
-            if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
+            if (mode < 0)
+            {
+                ShowMainMenu(out mode, out strategy);
+                if (mode < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
+            }
+            else
+            {
+                if (strategy < 0) strategy = ReadLastStrategy();
+                if (strategy < 0) strategy = 0;
+            }
 
             if (!File.Exists(TorExe))
             {
@@ -1201,13 +1531,13 @@ namespace StartTor
             }
             if (genOnly)
             {
-                if (!WriteTorrc(mode)) { WaitForKey(); return 1; }
+                if (!WriteTorrc(mode, strategy)) { WaitForKey(); return 1; }
                 Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
                 return 0;
             }
 
             string startErr;
-            torProc = StartTorAndWait(mode, out startErr);
+            torProc = StartTorAndWait(mode, strategy, out startErr);
             if (torProc == null)
             {
                 Console.WriteLine("[x] " + startErr);
@@ -1260,7 +1590,7 @@ namespace StartTor
                         }
                         else if (ki.Key == ConsoleKey.S)
                         {
-                            SpeedTest();
+                            SpeedTestMenu();
                         }
                         else if (ki.Key == ConsoleKey.T)
                         {
