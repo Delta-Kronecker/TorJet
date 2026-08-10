@@ -1,4 +1,6 @@
 <#
+# TorJet Core License v1.0 (see LICENSE). Using this Core in another program
+# requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 .SYNOPSIS
   Compile scripts\start-tor.cs and scripts\tun-helper.cs using the .NET
   Framework csc. start-tor.cs -> console exe, tun-helper.cs -> gui/winexe.

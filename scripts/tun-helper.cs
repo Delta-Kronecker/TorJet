@@ -1,4 +1,6 @@
 // tun-helper.cs - builds to tun-helper.exe (compile with build-start-tor.ps1).
+// TorJet Core License v1.0 (see LICENSE). Using this Core in another program
+// requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 // Elevated Windows helper for TorJet TUN mode. Compiled as winexe: no console.
 //
 // TUN mode routes ALL system IPv4 traffic through the local tor by creating a

@@ -1,4 +1,6 @@
 <#
+# TorJet Core License v1.0 (see LICENSE). Using this Core in another program
+# requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 .SYNOPSIS
   TorJet benchmark orchestrator (step 0 harness).
 

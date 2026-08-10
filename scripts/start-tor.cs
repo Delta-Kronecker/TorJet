@@ -1,4 +1,6 @@
 // start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
+// TorJet Core License v1.0 (see LICENSE). Using this Core in another program
+// requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 // TorJet launcher - portable Tor client tuned for speed. Expected layout:
 //   start-tor.exe
 //   data\

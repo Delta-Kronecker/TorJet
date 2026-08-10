@@ -98,3 +98,22 @@ start-tor.exe --stop              stop Tor and restore the proxy
 - `configs\torrc.jet` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `start-tor.exe` (compiled with `scripts\build-start-tor.ps1`)
+
+## License
+
+The **TorJet Core** (launcher source, configs, and build scripts) is licensed
+under the **TorJet Core License v1.0** — see [`LICENSE`](LICENSE).
+
+In short: you may use, modify, and embed the Core in your own program **only**
+if you (1) display a prominent link to
+`https://github.com/Delta-Kronecker/TorJet` on the main page/screen of your
+program and/or its repository, and (2) state explicitly next to it:
+
+> This software uses the TorJet core, obtained from
+> https://github.com/Delta-Kronecker/TorJet
+
+Derivatives must be released under the same license (share-alike, including
+network/SaaS use), and any breach terminates the license automatically.
+
+Third-party components shipped with TorJet (tor, pluggable transports,
+tun2socks, wintun) keep their own licenses.
