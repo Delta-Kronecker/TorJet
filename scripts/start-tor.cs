@@ -1,4 +1,4 @@
-﻿// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
+// start-tor.cs - builds to start-tor.exe (compile with build-start-tor.ps1)
 // TorBoost launcher - portable Tor client tuned for speed. Expected layout:
 //   start-tor.exe
 //   data\
@@ -540,6 +540,458 @@ namespace StartTor
             }
         }
 
+        // --- benchmark / conflux diagnostics (step 0 harness) --------------
+
+        private static byte[] HexToBytes(string hex)
+        {
+            byte[] b = new byte[hex.Length / 2];
+            for (int i = 0; i < b.Length; i++)
+                b[i] = Convert.ToByte(hex.Substring(i * 2, 2), 16);
+            return b;
+        }
+
+        // Sends a command to the tor control port and returns the response
+        // payload lines (without the terminating status line).
+        private static List<string> ControlCommand(string cmd)
+        {
+            try
+            {
+                string hex = CookieHex();
+                if (hex == null) return null;
+                using (TcpClient c = new TcpClient("127.0.0.1", 9051))
+                {
+                    NetworkStream s = c.GetStream();
+                    StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
+                    StreamReader r = new StreamReader(s);
+                    w.WriteLine("AUTHENTICATE " + hex);
+                    string a = r.ReadLine();
+                    if (a == null || !a.StartsWith("250")) return null;
+                    w.WriteLine(cmd);
+                    var lines = new List<string>();
+                    string line;
+                    while ((line = r.ReadLine()) != null)
+                    {
+                        if (line.StartsWith("250 ")) break;
+                        if (line.StartsWith("250-")) lines.Add(line.Substring(4));
+                        else if (line.StartsWith("250+")) lines.Add(line.Substring(4));
+                        else lines.Add(line);
+                    }
+                    try { w.WriteLine("QUIT"); } catch { }
+                    return lines;
+                }
+            }
+            catch { return null; }
+        }
+
+        // Extracts the exit fingerprint ($hex) from a circuit-status line.
+        private static string ExtractExit(string line)
+        {
+            foreach (string tok in line.Split(' '))
+            {
+                if (tok.Length > 1 && tok[0] == '$' && tok.IndexOf(',') >= 0)
+                {
+                    string exit = tok.Substring(tok.LastIndexOf(',') + 1);
+                    int tilde = exit.IndexOf('~');
+                    if (tilde >= 0) exit = exit.Substring(0, tilde);
+                    return exit;
+                }
+            }
+            return "?";
+        }
+
+        private static string ExtractConfluxId(string line)
+        {
+            foreach (string tok in line.Split(' '))
+                if (tok.StartsWith("CONFLUX_ID="))
+                    return tok.Substring("CONFLUX_ID=".Length);
+            return null;
+        }
+
+        // Advertised bandwidth (bytes/s) of an exit, from GETINFO ns/id/<fp>.
+        private static string ExitBandwidth(string fpHex)
+        {
+            try
+            {
+                fpHex = fpHex.TrimStart('$');
+                if (fpHex == "?" || fpHex.Length != 40) return "?";
+                var lines = ControlCommand("GETINFO ns/id/" + fpHex);
+                if (lines == null) return "?";
+                foreach (string raw in lines)
+                {
+                    string line = raw.Trim();
+                    if (line.StartsWith("w "))
+                    {
+                        Match m = Regex.Match(line, "Bandwidth=(\\d+)");
+                        if (m.Success) return m.Groups[1].Value;
+                    }
+                }
+            }
+            catch { }
+            return "?";
+        }
+
+        // Counts conflux sets/legs and returns the exit of the first set.
+        private static string ConfluxInfo(out int sets, out int legs)
+        {
+            sets = 0;
+            legs = 0;
+            string exit = "?";
+            var legCount = new Dictionary<string, int>();
+            var lines = ControlCommand("GETINFO circuit-status");
+            if (lines == null) return exit;
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
+                if (line.Split(' ').Length < 3) continue;
+                string cid = ExtractConfluxId(line);
+                if (cid != null)
+                {
+                    if (!legCount.ContainsKey(cid)) legCount[cid] = 0;
+                    legCount[cid]++;
+                    string e = ExtractExit(line);
+                    if (exit == "?" && e != "?") exit = e;
+                }
+            }
+            sets = legCount.Count;
+            foreach (int n in legCount.Values) legs += n;
+            return exit;
+        }
+
+        private static int ConfluxStatus()
+        {
+            var lines = ControlCommand("GETINFO circuit-status");
+            if (lines == null)
+            {
+                Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
+                return 1;
+            }
+            int total = 0;
+            var sets = new Dictionary<string, List<string>>();
+            bool debug = Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
+                if (debug) Console.WriteLine("    raw: " + line);
+                if (line.Split(' ').Length < 3) continue;
+                total++;
+                string cid = ExtractConfluxId(line);
+                if (cid != null)
+                {
+                    if (!sets.ContainsKey(cid)) sets[cid] = new List<string>();
+                    sets[cid].Add(line);
+                }
+            }
+            int legs = 0;
+            foreach (var kv in sets) legs += kv.Value.Count;
+
+            Console.WriteLine();
+            Console.WriteLine("Conflux status:");
+            Console.WriteLine("  total circuits    : " + total);
+            Console.WriteLine("  conflux sets      : " + sets.Count);
+            Console.WriteLine("  conflux legs      : " + legs);
+            int idx = 1;
+            foreach (var kv in sets)
+            {
+                string rtt = "?";
+                string exit = "?";
+                foreach (string leg in kv.Value)
+                {
+                    foreach (string tok in leg.Split(' '))
+                        if (tok.StartsWith("CONFLUX_RTT=")) rtt = tok.Substring("CONFLUX_RTT=".Length);
+                    string e = ExtractExit(leg);
+                    if (exit == "?" && e != "?") exit = e;
+                }
+                Console.WriteLine("    set " + idx + ": " + kv.Value.Count + " leg(s), exit " +
+                                  exit + ", RTT " + rtt);
+                if (debug) Console.WriteLine("      [bw] exit bandwidth: " + ExitBandwidth(exit) + " bytes/s");
+                idx++;
+            }
+            if (sets.Count == 0)
+                Console.WriteLine("  [i] NO conflux circuits - conflux is NOT engaging (check consensus support).");
+            else
+                Console.WriteLine("  [i] conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
+            return sets.Count > 0 ? 0 : 1;
+        }
+
+        // Starts tor for the given mode, writes torrc, stops any previous run,
+        // and waits until bootstrap reaches 100%. Returns the process or null.
+        private static Process StartTorAndWait(int mode, out string errorMessage)
+        {
+            errorMessage = null;
+            if (!File.Exists(TorExe))
+            {
+                errorMessage = "tor.exe not found in " + DataDir;
+                return null;
+            }
+            if (!WriteTorrc(mode))
+            {
+                errorMessage = "failed to write torrc (bridge file missing?).";
+                return null;
+            }
+            StopPreviousRun();
+            Directory.CreateDirectory(Path.Combine(DataDir, "data"));
+            try { if (File.Exists(TorLog)) File.Delete(TorLog); } catch { }
+
+            ProcessStartInfo psi = new ProcessStartInfo
+            {
+                FileName = TorExe,
+                Arguments = "-f \"torrc\"",
+                WorkingDirectory = DataDir,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            Process proc;
+            try { proc = Process.Start(psi); }
+            catch (Exception ex)
+            {
+                errorMessage = "failed to start tor: " + ex.Message;
+                return null;
+            }
+            torProc = proc;
+            Console.WriteLine("[i] tor started (PID " + proc.Id + "), bootstrapping...");
+
+            DateTime deadline = DateTime.UtcNow.AddMinutes(10);
+            int lastPct = -1;
+            while (DateTime.UtcNow < deadline)
+            {
+                try { proc.Refresh(); } catch { }
+                if (proc.HasExited)
+                {
+                    errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
+                    return null;
+                }
+                MatchCollection ms = Regex.Matches(ReadLogTail(2000), "Bootstrapped (\\d+)%");
+                if (ms.Count > 0)
+                {
+                    Match m = ms[ms.Count - 1];
+                    int pct = int.Parse(m.Groups[1].Value);
+                    if (pct >= 100)
+                    {
+                        Console.WriteLine("    Bootstrapped 100% ...");
+                        return proc;
+                    }
+                    if (pct != lastPct)
+                    {
+                        Console.WriteLine("    Bootstrapped " + pct + "% ...");
+                        lastPct = pct;
+                    }
+                }
+                Thread.Sleep(2000);
+            }
+            errorMessage = "bootstrap did not reach 100% in 10 minutes.\n" + ReadLogTail(1500);
+            return null;
+        }
+
+        private static string benchUrl;
+        private static readonly string[] BenchEndpoints =
+        {
+            "https://speed.cloudflare.com/__down?bytes=10485760",
+            "https://speed.hetzner.de/10MB.bin",
+            "http://speedtest.tele2.net/10MB.zip"
+        };
+
+        // Picks the first speed endpoint reachable through the proxy.
+        private static void ProbeBenchUrl()
+        {
+            foreach (string u in BenchEndpoints)
+            {
+                try
+                {
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
+                    req.Proxy = new WebProxy("127.0.0.1", 8118);
+                    req.Method = "GET";
+                    req.Timeout = 30000;
+                    req.ReadWriteTimeout = 30000;
+                    req.UserAgent = "start-tor-speedtest/1.0";
+                    using (WebResponse resp = req.GetResponse())
+                    using (Stream s = resp.GetResponseStream())
+                    {
+                        byte[] buf = new byte[16384];
+                        if (s.Read(buf, 0, buf.Length) > 0)
+                        {
+                            benchUrl = u;
+                            Console.WriteLine("[i] speed endpoint OK: " + u);
+                            return;
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[i] endpoint failed (" + u + "): " + ex.Message);
+                }
+            }
+            benchUrl = null;
+            Console.WriteLine("[!] no speed endpoint reachable through the proxy.");
+        }
+
+        // Downloads `bytesPerStream` through the proxy on `streams` parallel
+        // connections and reports aggregate throughput + peak sampled rate.
+        private static void BenchDownload(int streams, long bytesPerStream,
+                                          out long total, out double secs, out double peak)
+        {
+            long totalBytes = 0;
+            long lastBytes = 0;
+            double lastElapsed = 0;
+            double peakRate = 0;
+            var errors = new List<string>();
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
+            var threads = new List<Thread>();
+            for (int i = 0; i < streams; i++)
+            {
+                Thread th = new Thread(delegate()
+                {
+                    long got = 0;
+                    try
+                    {
+                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                            benchUrl ?? BenchEndpoints[0]);
+                        req.Proxy = new WebProxy("127.0.0.1", 8118);
+                        req.Method = "GET";
+                        req.Timeout = 180000;
+                        req.ReadWriteTimeout = 180000;
+                        req.UserAgent = "start-tor-speedtest/1.0";
+                        using (WebResponse resp = req.GetResponse())
+                        using (Stream s = resp.GetResponseStream())
+                        {
+                            byte[] buf = new byte[64 * 1024];
+                            int n;
+                            while ((n = s.Read(buf, 0, buf.Length)) > 0) got += n;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        lock (errors) errors.Add(ex.Message);
+                    }
+                    Interlocked.Add(ref totalBytes, got);
+                });
+                th.IsBackground = true;
+                threads.Add(th);
+                th.Start();
+            }
+            while (true)
+            {
+                bool alive = false;
+                foreach (Thread th in threads) if (th.IsAlive) { alive = true; break; }
+                if (!alive) break;
+                Thread.Sleep(200);
+                double el = sw.Elapsed.TotalSeconds;
+                long tb = Interlocked.Read(ref totalBytes);
+                double dt = el - lastElapsed;
+                if (dt >= 1.0)
+                {
+                    double rate = (tb - lastBytes) / dt;
+                    if (rate > peakRate) peakRate = rate;
+                    lastBytes = tb;
+                    lastElapsed = el;
+                }
+            }
+            sw.Stop();
+            total = Interlocked.Read(ref totalBytes);
+            secs = sw.Elapsed.TotalSeconds;
+            double finalDt = secs - lastElapsed;
+            if (finalDt > 0.2)
+            {
+                double r = (total - lastBytes) / finalDt;
+                if (r > peakRate) peakRate = r;
+            }
+            peak = peakRate;
+            if (errors.Count > 0 && total == 0)
+            {
+                lock (errors)
+                {
+                    Console.WriteLine("      [err] " + (errors.Count == 1 ? errors[0] :
+                        errors[0] + " (+" + (errors.Count - 1) + " more)"));
+                }
+            }
+        }
+
+        private static void RunBench(int mode, int iters, int[] streamCounts, string csvPath)
+        {
+            string err;
+            Process proc = StartTorAndWait(mode, out err);
+            if (proc == null)
+            {
+                Console.WriteLine("[x] " + err);
+                Cleanup();
+                return;
+            }
+            try
+            {
+                ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                ServicePointManager.DefaultConnectionLimit = 64;
+            }
+            catch { }
+
+            Console.WriteLine("[i] bootstrap OK. Warming up 30s (building conflux legs)...");
+            Thread.Sleep(30000);
+            ProbeBenchUrl();
+            if (benchUrl == null)
+            {
+                Console.WriteLine("[x] aborting bench: no reachable speed endpoint.");
+                Cleanup();
+                return;
+            }
+
+            string variant = Environment.GetEnvironmentVariable("BENCH_VARIANT") ?? "";
+            bool writeHeader = !File.Exists(csvPath) || new FileInfo(csvPath).Length == 0;
+            var rows = new StringBuilder();
+            if (writeHeader)
+                rows.AppendLine("ts,variant,mode,streams,avg_mbps,peak_mbps,total_bytes,exit_fp,exit_bw,conflux_sets,conflux_legs");
+
+            foreach (int sc in streamCounts)
+            {
+                for (int i = 0; i < iters; i++)
+                {
+                    Console.WriteLine("  [" + (variant.Length > 0 ? variant : ModeNames[mode]) +
+                                      "] streams=" + sc + " iter=" + (i + 1) + " ...");
+                    long total;
+                    double secs, peak;
+                    BenchDownload(sc, 10L * 1024 * 1024, out total, out secs, out peak);
+                    double avg = secs > 0 ? total / secs : 0;
+                    Console.WriteLine("      avg " + FormatSpeed(avg) + "  peak " + FormatSpeed(peak) +
+                                      "  in " + secs.ToString("0.0") + " s");
+                    int cSets, cLegs;
+                    string exit = ConfluxInfo(out cSets, out cLegs);
+                    string bw = ExitBandwidth(exit);
+                    rows.AppendLine(string.Join(",",
+                        DateTime.UtcNow.ToString("yyyy-MM-dd HH:mm:ss"),
+                        Csv(variant), ModeNames[mode], sc.ToString(),
+                        (avg / (1024 * 1024)).ToString("0.000"),
+                        (peak / (1024 * 1024)).ToString("0.000"),
+                        total.ToString(), exit, bw, cSets.ToString(), cLegs.ToString()));
+                }
+            }
+            try { File.AppendAllText(csvPath, rows.ToString(), new UTF8Encoding(false)); }
+            catch (Exception ex) { Console.WriteLine("[x] failed to write CSV: " + ex.Message); }
+            Console.WriteLine("[i] CSV appended to " + csvPath);
+
+            int s2, l2;
+            string e2 = ConfluxInfo(out s2, out l2);
+            Console.WriteLine("[i] conflux at end: " + s2 + " set(s), " + l2 + " leg(s), exit " + e2);
+            Cleanup();
+        }
+
+        private static string Csv(string s)
+        {
+            if (s.IndexOfAny(new[] { ',', '"', '\n', '\r' }) < 0) return s;
+            return "\"" + s.Replace("\"", "\"\"") + "\"";
+        }
+
+        private static int[] ParseInts(string s)
+        {
+            var list = new List<int>();
+            foreach (string p in s.Split(','))
+            {
+                int n;
+                if (int.TryParse(p.Trim(), out n) && n >= 1) list.Add(n);
+            }
+            if (list.Count == 0) list.Add(1);
+            return list.ToArray();
+        }
+
         private static int StopTor()
         {
             Process p = FindTor();
@@ -620,7 +1072,12 @@ namespace StartTor
                     {
                         try
                         {
-                            if (p.MainModule.FileName.Equals(TorExe, StringComparison.OrdinalIgnoreCase))
+                            string path;
+                            try { path = p.MainModule.FileName; }
+                            catch { path = null; }
+                            if (path == null ||
+                                StringComparer.OrdinalIgnoreCase.Equals(
+                                    Path.GetFullPath(path), Path.GetFullPath(TorExe)))
                                 victims.Add(p);
                         }
                         catch { }
@@ -648,7 +1105,50 @@ namespace StartTor
         private static int Main(string[] args)
         {
             Console.Title = "TorBoost";
+            Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
+            {
+                e.Cancel = true;
+                Cleanup();
+                Environment.Exit(0);
+            };
 
+            if (args.Length > 0 && args[0] == "--conflux-status")
+            {
+                return ConfluxStatus();
+            }
+            if (args.Length > 0 && args[0] == "--conflux-check")
+            {
+                int m = -1;
+                for (int i = 1; i < args.Length; i++) { int mm = ParseMode(args[i]); if (mm >= 0) m = mm; }
+                if (m < 0) m = ShowMenu();
+                if (m < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
+                string err;
+                Process p = StartTorAndWait(m, out err);
+                if (p == null) { Console.WriteLine("[x] " + err); Cleanup(); return 1; }
+                Console.WriteLine("[i] bootstrap OK. Waiting 30s for conflux sets to build...");
+                Thread.Sleep(30000);
+                int code = ConfluxStatus();
+                Cleanup();
+                return code;
+            }
+            if (args.Length > 0 && args[0] == "--bench")
+            {
+                int bMode = -1;
+                int iters = 3;
+                int[] streams = { 1, 4, 8 };
+                string csvPath = "bench.csv";
+                for (int i = 1; i < args.Length; i++)
+                {
+                    if (args[i] == "--iters" && i + 1 < args.Length) { int.TryParse(args[++i], out iters); }
+                    else if (args[i] == "--streams" && i + 1 < args.Length) { streams = ParseInts(args[++i]); }
+                    else if (args[i] == "--csv" && i + 1 < args.Length) { csvPath = args[++i]; }
+                    else { int mm = ParseMode(args[i]); if (mm >= 0) bMode = mm; }
+                }
+                if (bMode < 0) bMode = ShowMenu();
+                if (bMode < 0) return 1;
+                RunBench(bMode, iters, streams, csvPath);
+                return 0;
+            }
             if (args.Length > 0 && args[0] == "--newcircuit")
             {
                 Console.WriteLine(ControlSend("SIGNAL NEWNYM")
@@ -699,85 +1199,18 @@ namespace StartTor
                 WaitForKey();
                 return 1;
             }
-            if (!WriteTorrc(mode)) { WaitForKey(); return 1; }
             if (genOnly)
             {
+                if (!WriteTorrc(mode)) { WaitForKey(); return 1; }
                 Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
                 return 0;
             }
 
-            StopPreviousRun();
-
-            Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
+            string startErr;
+            torProc = StartTorAndWait(mode, out startErr);
+            if (torProc == null)
             {
-                e.Cancel = true;
-                Cleanup();
-                Environment.Exit(0);
-            };
-
-            Directory.CreateDirectory(Path.Combine(DataDir, "data"));
-            try { if (File.Exists(TorLog)) File.Delete(TorLog); } catch { }
-
-            ProcessStartInfo psi = new ProcessStartInfo
-            {
-                FileName = TorExe,
-                Arguments = "-f \"torrc\"",
-                WorkingDirectory = DataDir,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
-            try { torProc = Process.Start(psi); }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[x] failed to start tor: " + ex.Message);
-                WaitForKey();
-                return 1;
-            }
-
-            Console.WriteLine("[i] tor started (PID " + torProc.Id + "), bootstrapping...");
-
-            DateTime deadline = DateTime.UtcNow.AddMinutes(10);
-            int lastPct = -1;
-            bool done = false;
-            bool exited = false;
-
-            while (!done && !exited && DateTime.UtcNow < deadline)
-            {
-                torProc.Refresh();
-                if (torProc.HasExited) { exited = true; break; }
-
-                MatchCollection ms = Regex.Matches(ReadLogTail(2000), "Bootstrapped (\\d+)%");
-                if (ms.Count > 0)
-                {
-                    Match m = ms[ms.Count - 1];
-                    int pct = int.Parse(m.Groups[1].Value);
-                    if (pct >= 100) { done = true; break; }
-                    if (pct != lastPct)
-                    {
-                        Console.WriteLine("    Bootstrapped " + pct + "% ...");
-                        lastPct = pct;
-                    }
-                }
-                Thread.Sleep(2000);
-            }
-
-            if (exited)
-            {
-                Console.WriteLine("[x] tor exited with code " + torProc.ExitCode + ".");
-                Console.WriteLine("    Last log lines:");
-                Console.WriteLine(ReadLogTail(1500));
-                Cleanup();
-                WaitForKey();
-                return 1;
-            }
-
-            if (!done)
-            {
-                Console.WriteLine("[x] bootstrap did not reach 100% in 10 minutes.");
-                Console.WriteLine("    Try a different mode (start-tor.exe webtunnel|obfs4|vanilla).");
-                Console.WriteLine("    Last log lines:");
-                Console.WriteLine(ReadLogTail(1500));
+                Console.WriteLine("[x] " + startErr);
                 Cleanup();
                 WaitForKey();
                 return 1;

@@ -4,6 +4,9 @@
 /bin/
 *.log
 
+# benchmark results (step 0 harness)
+/results/
+
 # tor runtime data (kept next to the packaged tor.exe, never in the repo)
 data/
 
