@@ -32,8 +32,8 @@ data\
      compatible to fastest:
      1. **standard** — stock config, most compatible
      2. **balanced** — long-lived reused circuits (fewer handshakes)
-     3. **aggressive** — many guards + KISTLite scheduler
-     4. **ultimate** — max concurrency + per-stream circuits
+     3. **aggressive** — many guards + KISTLite fast scheduler
+     4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
    Your choices are remembered for next time (`data\mode.txt`,
    `data\strategy.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed

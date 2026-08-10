@@ -45,6 +45,10 @@ ClientBootstrapConsensusFallbackDownloadInitialDelay 0
 ClientBootstrapConsensusAuthorityOnlyDownloadInitialDelay 0
 ClientBootstrapConsensusMaxInProgressTries 6
 
+# --- Fetch directory info early so the first circuits are ready sooner ---
+FetchDirInfoEarly 1
+FetchDirInfoExtraEarly 1
+
 # --- Consider the client connected once 25% of paths succeed (floor; was 0.3) ---
 # 0.25 is Tor's hard minimum for this option, so it is the fastest legal value.
 PathsNeededToBuildCircuits 0.25

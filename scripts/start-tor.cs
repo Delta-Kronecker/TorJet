@@ -48,7 +48,7 @@ namespace StartTor
             "stock config, most compatible",
             "long-lived reused circuits",
             "many guards + fast scheduler",
-            "max concurrency + per-stream circuits"
+            "max concurrency + greedy scheduler"
         };
         private static readonly string[][] StrategyTorrc =
         {
@@ -64,20 +64,20 @@ namespace StartTor
                 "MaxCircuitDirtiness 86400",
                 "CircuitsAvailableTimeout 1440",
                 "CircuitStreamTimeout 30",
-                "NumEntryGuards 15",
+                "CircuitBuildTimeout 20",
                 "NumPrimaryGuards 15",
                 "Schedulers KISTLite,Vanilla",
-                "KISTSchedRunInterval 5 msec"
+                "KISTSchedRunInterval 5 msec",
+                "MaxClientCircuitsPending 96"
             },
             /* ultimate */ new[]
             {
                 "MaxCircuitDirtiness 86400",
                 "CircuitsAvailableTimeout 1440",
                 "CircuitStreamTimeout 30",
-                "NumEntryGuards 15",
+                "CircuitBuildTimeout 20",
                 "NumPrimaryGuards 15",
-                "Schedulers KISTLite,Vanilla",
-                "KISTSchedRunInterval 5 msec",
+                "Schedulers Vanilla",
                 "MaxClientCircuitsPending 128",
                 "TokenBucketRefillInterval 1 msec",
                 "CircuitPriorityHalflife 5",
