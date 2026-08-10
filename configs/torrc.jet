@@ -56,6 +56,7 @@ PathsNeededToBuildCircuits 0.25
 # --- Pluggable transports (same folder as tor.exe; used only when bridges are configured) ---
 ClientTransportPlugin webtunnel exec webtunnel.exe
 ClientTransportPlugin obfs4 exec obfs4proxy.exe
+ClientTransportPlugin snowflake exec snowflake-client.exe
 
 # --- Operational (data\ folder is created next to tor.exe automatically) ---
 DataDirectory data

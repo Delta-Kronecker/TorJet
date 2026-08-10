@@ -39,6 +39,11 @@ jobs:
             go install gitlab.com/yawning/obfs4.git/obfs4proxy@v0.0.0-20231012084234-c3e2d44b1033
           cp "$GOPATH_BIN/obfs4proxy.exe" out/obfs4proxy.exe
 
+          echo "=== snowflake client ==="
+          GOOS=windows GOARCH=amd64 \
+            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1
+          cp "$GOPATH_BIN/client.exe" out/snowflake-client.exe
+
           echo "=== webtunnel client ==="
           GOOS=windows GOARCH=amd64 \
             go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@v0.0.6
@@ -246,7 +251,7 @@ jobs:
               --title "TorJet $TAG" \
               --notes "TorJet (official tor 0.4.9.11), tuned for maximum
               download/upload throughput.
-              Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla).
+              Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla / snowflake).
               - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530" \
               $PRERELEASE
           fi

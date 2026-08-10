@@ -17,7 +17,7 @@
   consensus state so bootstrap is fast); delete it to force a clean state.
 
 .PARAMETER Mode
-  Connection mode: direct | webtunnel | obfs4 | vanilla.
+  Connection mode: direct | webtunnel | obfs4 | vanilla | snowflake.
 
 .PARAMETER Iters
   Iterations per stream count (default 3).
