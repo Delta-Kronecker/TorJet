@@ -32,7 +32,7 @@ data\
      compatible to fastest:
      1. **standard** — stock config, most compatible
      2. **balanced** — long-lived reused circuits (fewer handshakes)
-     3. **aggressive** — many guards + KISTLite fast scheduler
+     3. **aggressive** — more guards + faster scheduler + deeper reuse
      4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
    Your choices are remembered for next time (`data\mode.txt`,
    `data\strategy.txt`).
