@@ -1141,9 +1141,12 @@ namespace StartTor
 
         // Starts tor for the given mode, writes torrc, stops any previous run,
         // and waits until bootstrap reaches 100%. Returns the process or null.
-        private static Process StartTorAndWait(int mode, int strategy, out string errorMessage)
+        // `aborted` is set when the user pressed C to stop during bootstrap.
+        private static Process StartTorAndWait(int mode, int strategy,
+                                               out string errorMessage, out bool aborted)
         {
             errorMessage = null;
+            aborted = false;
             if (!File.Exists(TorExe))
             {
                 errorMessage = "tor.exe not found in " + DataDir;
@@ -1189,6 +1192,17 @@ namespace StartTor
                     errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
                     return null;
                 }
+                try
+                {
+                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    {
+                        ClearProgressLine();
+                        try { proc.Kill(); } catch { }
+                        aborted = true;
+                        return null;
+                    }
+                }
+                catch { }
                 int pct;
                 string tag;
                 string summary;
@@ -1232,6 +1246,80 @@ namespace StartTor
             "https://speed.hetzner.de/10MB.bin",
             "http://speedtest.tele2.net/10MB.zip"
         };
+
+        // Downloads ~1 MiB through the HTTP proxy (127.0.0.1:8118). Returns
+        // true only when the full amount arrived, i.e. the tunnel actually
+        // carries traffic.
+        private static bool DownloadOneMib()
+        {
+            foreach (string u in BenchEndpoints)
+            {
+                try
+                {
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
+                    req.Proxy = new WebProxy("127.0.0.1", 8118);
+                    req.Method = "GET";
+                    req.Timeout = 30000;
+                    req.ReadWriteTimeout = 30000;
+                    req.UserAgent = "start-tor-verify/1.0";
+                    using (WebResponse resp = req.GetResponse())
+                    using (Stream s = resp.GetResponseStream())
+                    {
+                        byte[] buf = new byte[64 * 1024];
+                        long got = 0;
+                        while (got < (1 << 20))
+                        {
+                            int n = s.Read(buf, 0, buf.Length);
+                            if (n <= 0) break;
+                            got += n;
+                        }
+                        if (got >= (1 << 20)) return true;
+                    }
+                }
+                catch { }
+            }
+            return false;
+        }
+
+        // tor can report 100% bootstrap slightly before the path is actually
+        // usable. Download 1 MiB through the proxy; only when it completes is
+        // the menu shown. C aborts (stops tor, back to the main menu). After
+        // 5 minutes the menu is shown regardless, with a warning.
+        private static bool VerifyTunnelReady()
+        {
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
+            catch { }
+            Console.WriteLine("[i] verifying tunnel: downloading 1 MB through the proxy...");
+            DateTime deadline = DateTime.UtcNow.AddMinutes(5);
+            int attempt = 0;
+            while (true)
+            {
+                attempt++;
+                if (DownloadOneMib())
+                {
+                    Console.WriteLine("[i] tunnel verified (1 MB downloaded) - connection is up.");
+                    return true;
+                }
+                if (DateTime.UtcNow >= deadline)
+                {
+                    Console.WriteLine("[!] could not verify the tunnel after 5 minutes - showing the menu anyway.");
+                    return true;
+                }
+                if (attempt % 3 == 0)
+                    Console.WriteLine("[i] tunnel not ready yet (attempt " + attempt +
+                                      ") - retrying... (C = stop Tor)");
+                for (int i = 0; i < 20; i++)
+                {
+                    Thread.Sleep(500);
+                    try
+                    {
+                        if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                            return false;
+                    }
+                    catch { }
+                }
+            }
+        }
 
         // Picks the first speed endpoint reachable through the proxy.
         private static void ProbeBenchUrl()
@@ -1352,9 +1440,11 @@ namespace StartTor
         private static void RunBench(int mode, int iters, int[] streamCounts, string csvPath)
         {
             string err;
-            Process proc = StartTorAndWait(mode, ResolveStrategy(), out err);
+            bool aborted = false;
+            Process proc = StartTorAndWait(mode, ResolveStrategy(), out err, out aborted);
             if (proc == null)
             {
+                if (aborted) { Cleanup(); return; }
                 Console.WriteLine("[x] " + err);
                 Cleanup();
                 return;
@@ -1564,9 +1654,20 @@ namespace StartTor
             }
 
             string startErr;
-            torProc = StartTorAndWait(mode, strategy, out startErr);
+            bool aborted = false;
+            torProc = StartTorAndWait(mode, strategy, out startErr, out aborted);
             if (torProc == null)
             {
+                if (aborted)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("  [i] Stopping Tor...");
+                    Cleanup();
+                    cleaned = false;
+                    Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                    Console.WriteLine();
+                    return 2;
+                }
                 Console.WriteLine("[x] " + startErr);
                 Cleanup();
                 cleaned = false;
@@ -1592,6 +1693,17 @@ namespace StartTor
                 return 0;
             }
 
+            if (!VerifyTunnelReady())
+            {
+                Console.WriteLine("  [i] Stopping Tor...");
+                Cleanup();
+                cleaned = false;
+                torProc = null;
+                Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                Console.WriteLine();
+                return 2;
+            }
+
             bool proxyOn = false;
             if (autoMode == "proxy")
             {
@@ -1609,7 +1721,7 @@ namespace StartTor
             Console.WriteLine("  P               toggle the Windows system proxy on/off");
             Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
             Console.WriteLine("  S               run a speed test through the Tor proxy");
-            Console.WriteLine("  C               stop Tor and " + (menuReturn ? "return to the menu" : "exit"));
+            Console.WriteLine("  C               stop Tor and return to the menu");
             Console.WriteLine();
             while (true)
             {
@@ -1652,7 +1764,7 @@ namespace StartTor
                             torProc = null;
                             Console.WriteLine("  [i] Tor stopped; system proxy restored.");
                             Console.WriteLine();
-                            return menuReturn ? 2 : 0;
+                            return 2;
                         }
                     }
                 }
@@ -1688,8 +1800,9 @@ namespace StartTor
                 if (m < 0) m = ShowMenu();
                 if (m < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
                 string err;
-                Process p = StartTorAndWait(m, ResolveStrategy(), out err);
-                if (p == null) { Console.WriteLine("[x] " + err); Cleanup(); return 1; }
+                bool aborted = false;
+                Process p = StartTorAndWait(m, ResolveStrategy(), out err, out aborted);
+                if (p == null) { if (aborted) { Cleanup(); return 1; } Console.WriteLine("[x] " + err); Cleanup(); return 1; }
                 Console.WriteLine("[i] bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
                 int code = ConfluxStatus();
@@ -1791,7 +1904,13 @@ namespace StartTor
             {
                 if (strategy < 0) strategy = ReadLastStrategy();
                 if (strategy < 0) strategy = 0;
-                return RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, false);
+                while (true)
+                {
+                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    if (rc != 2) return rc;
+                    ShowMainMenu(out mode, out strategy);
+                    if (mode < 0) return 0;
+                }
             }
         }
     }
