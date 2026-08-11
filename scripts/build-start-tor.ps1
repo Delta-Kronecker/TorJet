@@ -3,14 +3,14 @@
 # requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 .SYNOPSIS
   Compile scripts\start-tor.cs and scripts\tun-helper.cs using the .NET
-  Framework csc. start-tor.cs -> console exe, tun-helper.cs -> gui/winexe.
+  Framework csc. start-tor.cs -> TorJet.exe (console exe), tun-helper.cs -> gui/winexe.
 
 .PARAMETER OutFile
-  Output path for start-tor.exe (default: scripts\start-tor.exe).
+  Output path for TorJet.exe (default: scripts\TorJet.exe).
   tun-helper.exe is written to the data\ folder next to it.
 #>
 param(
-    [string]$OutFile = (Join-Path $PSScriptRoot "start-tor.exe")
+    [string]$OutFile = (Join-Path $PSScriptRoot "TorJet.exe")
 )
 
 $candidates = @(

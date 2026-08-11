@@ -61,10 +61,10 @@ param(
 $ErrorActionPreference = "Stop"
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = Split-Path -Parent $scriptDir
-$newExe = Join-Path $scriptDir "start-tor.exe"
+$newExe = Join-Path $scriptDir "TorJet.exe"
 
 if (-not (Test-Path $Release)) { Write-Host "[x] release folder not found: $Release" -ForegroundColor Red; exit 1 }
-if (-not (Test-Path $newExe))  { Write-Host "[x] new start-tor.exe not built: $newExe" -ForegroundColor Red; exit 1 }
+if (-not (Test-Path $newExe))  { Write-Host "[x] new TorJet.exe not built: $newExe" -ForegroundColor Red; exit 1 }
 if (-not (Test-Path (Join-Path $Release "data\tor.exe"))) { Write-Host "[x] invalid release folder (no data\tor.exe)" -ForegroundColor Red; exit 1 }
 
 # --- (re)build scratch work dir from the release, keeping cached consensus -----
@@ -104,7 +104,7 @@ function Invoke-Bench {
     }
 
     Write-Host "`n=== variant: $Name (mode=$Mode strategy=$Strategy iters=$Iters streams=$Streams) ===" -ForegroundColor Cyan
-    & (Join-Path $WorkDir "start-tor.exe") --bench $Mode --iters $Iters --streams $Streams --csv $OutCSV
+    & (Join-Path $WorkDir "TorJet.exe") --bench $Mode --iters $Iters --streams $Streams --csv $OutCSV
     if ($LASTEXITCODE -ne 0) { Write-Host "[!] bench exited with code $LASTEXITCODE" -ForegroundColor Yellow }
 }
 
@@ -112,7 +112,7 @@ if ($ConfluxModes.Trim().Length -gt 0) {
     $modes = $ConfluxModes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
     foreach ($m in $modes) {
         Write-Host "`n=== conflux check: $m ===" -ForegroundColor Cyan
-        & (Join-Path $WorkDir "start-tor.exe") --conflux-check $m
+        & (Join-Path $WorkDir "TorJet.exe") --conflux-check $m
     }
     Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
     exit 0

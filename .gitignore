@@ -11,5 +11,5 @@
 data/
 
 # locally compiled launcher + helper (CI builds them into the artifact)
-/scripts/start-tor.exe
+/scripts/TorJet.exe
 /scripts/tun-helper.exe

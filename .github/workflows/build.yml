@@ -172,10 +172,10 @@ jobs:
           Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
 
-      - name: Compile start-tor.exe + tun-helper.exe
+      - name: Compile TorJet.exe + tun-helper.exe
         shell: pwsh
         run: |
-          & "scripts\build-start-tor.ps1" -OutFile "dist\start-tor.exe"
+          & "scripts\build-start-tor.ps1" -OutFile "dist\TorJet.exe"
 
       - name: Upload single release artifact
         uses: actions/upload-artifact@v4
@@ -221,7 +221,7 @@ jobs:
         shell: bash
         run: |
           cd release
-          zip -r "../torjet-win64-${{ steps.tag.outputs.TAG }}.zip" start-tor.exe data
+          zip -r "../torjet-win64-${{ steps.tag.outputs.TAG }}.zip" TorJet.exe data
           ls -la ../
 
       - name: Publish release
@@ -251,7 +251,7 @@ jobs:
               --title "TorJet $TAG" \
               --notes "TorJet (official tor 0.4.9.11), tuned for maximum
               download/upload throughput.
-              Unzip and run start-tor.exe - pick a mode (direct / webtunnel / obfs4 / vanilla / snowflake).
+              Unzip and run TorJet.exe - pick a mode (direct / webtunnel / obfs4 / vanilla / snowflake).
               - SocksPort 127.0.0.1:9050, HTTP proxy 127.0.0.1:8118, DNS 127.0.0.1:53530" \
               $PRERELEASE
           fi
