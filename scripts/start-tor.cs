@@ -1262,8 +1262,10 @@ namespace StartTor
                     DateTime.UtcNow - lastClose < TimeSpan.FromSeconds(watchCooldownS)) continue;
                 var lines = ControlCommand("GETINFO circuit-status");
                 if (lines == null) continue;
-                string worstId = null;
-                int worstRttUs = 0;
+
+                // Collect every BUILT conflux leg with its RTT and exit so the
+                // weakest one (highest RTT) can be picked and the whole set shown.
+                var legs = new List<string[]>();
                 foreach (string raw in lines)
                 {
                     string line = raw.Trim();
@@ -1274,20 +1276,41 @@ namespace StartTor
                     if (ExtractConfluxId(line) == null) continue;
                     int rttUs = 0;
                     foreach (string tok in parts)
-                    {
                         if (tok.StartsWith("CONFLUX_RTT=") &&
                             int.TryParse(tok.Substring("CONFLUX_RTT=".Length), out rttUs)) break;
-                    }
-                    if (rttUs <= 0 || rttUs < watchRttMs * 1000) continue;
-                    if (rttUs > worstRttUs) { worstRttUs = rttUs; worstId = parts[0]; }
+                    if (rttUs <= 0) continue;
+                    legs.Add(new[] { parts[0], rttUs.ToString(), line });
+                }
+                if (legs.Count == 0) continue;
+
+                // The weakest leg is the one with the highest RTT. It is only
+                // removed when it is above the configured threshold so healthy
+                // sets stay untouched.
+                string worstId = null;
+                int worstRttUs = 0;
+                foreach (string[] leg in legs)
+                {
+                    int rtt = int.Parse(leg[1]);
+                    if (rtt < watchRttMs * 1000) continue;
+                    if (rtt > worstRttUs) { worstRttUs = rtt; worstId = leg[0]; }
                 }
                 if (worstId == null) continue;
+
+                Console.WriteLine("circuit monitor: conflux legs:");
+                foreach (string[] leg in legs)
+                {
+                    int rtt = int.Parse(leg[1]);
+                    string exit = ExtractExit(leg[2]);
+                    string conflux = ExtractConfluxId(leg[2]);
+                    string mark = leg[0] == worstId ? "   <-- removing (weakest)" : "";
+                    Console.WriteLine("    leg " + leg[0] + "  RTT " + (rtt / 1000) +
+                                      " ms  exit " + exit + "  conflux " + conflux + mark);
+                }
                 if (ControlSend("CLOSECIRCUIT " + worstId))
                 {
                     lastClose = DateTime.UtcNow;
                     Console.WriteLine("circuit monitor: closed weak leg " + worstId +
-                                      " (RTT " + (worstRttUs / 1000000.0).ToString("0.0") +
-                                      " s) - replacement is being built.");
+                                      " (RTT " + (worstRttUs / 1000) + " ms) - replacement is being built.");
                 }
             }
         }

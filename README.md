@@ -169,9 +169,11 @@ physical interface, so tor's outbound TLS never loops back into the tunnel.
 ### Circuit health monitor
 
 While Tor is up, TorJet watches the conflux legs via the control port. Every
-30 s it asks tor for `circuit-status` and, if any leg's reported RTT is above
-1500 ms, closes that single worst leg (`CLOSECIRCUIT`). Tor builds a fresh leg
-and conflux migrates streams onto it, so slow, high-latency circuits get
+30 s it asks tor for `circuit-status` and picks the weakest leg - the one with
+the highest reported RTT. When that leg is above 1500 ms it prints the whole
+leg list (circuit id, RTT, exit, conflux set) marking the leg it is about to
+remove, then closes that single worst leg (`CLOSECIRCUIT`). Tor builds a fresh
+leg and conflux migrates streams onto it, so slow, high-latency circuits get
 replaced automatically instead of dragging the connection down. A 60 s cooldown
 between closes keeps the circuit set stable. Disable it with
 `--no-circuit-watch`; tune it with `--watch-rtt <ms>`,
