@@ -51,6 +51,7 @@
 #include "lib/string/scanf.h"
 
 #include "core/or/cpath_build_state_st.h"
+#include "core/or/crypt_path_st.h"
 #include "core/or/entry_connection_st.h"
 #include "core/or/origin_circuit_st.h"
 #include "core/or/socks_request_st.h"
