@@ -44,6 +44,10 @@ namespace StartTor
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
         private static readonly string ModeFile = Path.Combine(DataDir, "mode.txt");
         private static readonly string StrategyFile = Path.Combine(DataDir, "strategy.txt");
+        private static readonly string FragmentFile = Path.Combine(DataDir, "fragment.txt");
+        private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
+        private static readonly string XrayConfig = Path.Combine(DataDir, "xray", "config.json");
+        private const int FragmentSocksPort = 10808;
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
         {
@@ -112,6 +116,7 @@ namespace StartTor
         private const int UdpDnsPort = 53530;
 
         private static Process torProc;
+        private static Process xrayProc;
         private static bool cleaned;
         private static int progressLineLen;
         private static volatile bool updatePromptShown;
@@ -312,6 +317,7 @@ namespace StartTor
                 try { if (!torProc.HasExited) { torProc.Kill(); torProc.WaitForExit(5000); } }
                 catch { }
             }
+            StopXray();
             SetSystemProxy(false);
         }
 
@@ -420,6 +426,131 @@ namespace StartTor
             catch { }
         }
 
+        private static bool ReadFragmentSetting()
+        {
+            try
+            {
+                if (File.Exists(FragmentFile))
+                    return File.ReadAllText(FragmentFile).Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { }
+            return false;
+        }
+
+        private static void WriteFragmentFile(bool on)
+        {
+            try { File.WriteAllText(FragmentFile, on ? "on" : "off", new UTF8Encoding(false)); }
+            catch { }
+        }
+
+        private static Process FindXray()
+        {
+            foreach (Process p in Process.GetProcessesByName("xray"))
+            {
+                try
+                {
+                    if (p.MainModule.FileName.Equals(XrayExe, StringComparison.OrdinalIgnoreCase))
+                        return p;
+                }
+                catch { }
+            }
+            return null;
+        }
+
+        // Writes data\xray\config.json: a local SOCKS inbound whose freedom
+        // outbound splits the TLS ClientHello of every outbound connection.
+        // tor sends all of its guard/bridge TLS through this SOCKS proxy
+        // (Socks5Proxy in torrc), so the fragmented hello hides the Tor
+        // handshake from SNI/length based DPI. length/interval use the
+        // "from-to" string form required by xray-core v26+.
+        private static bool WriteXrayConfig()
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(XrayConfig));
+                string json =
+                    "{\n" +
+                    "  \"log\": { \"loglevel\": \"warning\" },\n" +
+                    "  \"inbounds\": [\n" +
+                    "    {\n" +
+                    "      \"listen\": \"127.0.0.1\",\n" +
+                    "      \"port\": " + FragmentSocksPort + ",\n" +
+                    "      \"protocol\": \"socks\",\n" +
+                    "      \"settings\": { \"auth\": \"noauth\", \"udp\": true }\n" +
+                    "    }\n" +
+                    "  ],\n" +
+                    "  \"outbounds\": [\n" +
+                    "    {\n" +
+                    "      \"protocol\": \"freedom\",\n" +
+                    "      \"settings\": {\n" +
+                    "        \"fragment\": {\n" +
+                    "          \"packets\": \"tlshello\",\n" +
+                    "          \"length\": \"100-200\",\n" +
+                    "          \"interval\": \"10-20\"\n" +
+                    "        }\n" +
+                    "      },\n" +
+                    "      \"streamSettings\": { \"sockopt\": { \"tcpNoDelay\": true } }\n" +
+                    "    }\n" +
+                    "  ]\n" +
+                    "}\n";
+                File.WriteAllText(XrayConfig, json, new UTF8Encoding(false));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[x] failed to write xray config: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static bool StartXray()
+        {
+            try
+            {
+                if (!File.Exists(XrayExe))
+                {
+                    Console.WriteLine("[!] xray.exe not found in " + DataDir +
+                                      " - fragment disabled for this run.");
+                    return false;
+                }
+                if (!WriteXrayConfig()) return false;
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = XrayExe,
+                    Arguments = "run -c xray\\config.json",
+                    WorkingDirectory = DataDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                Process p = Process.Start(psi);
+                xrayProc = p;
+                Console.WriteLine("[i] xray (fragment) started (PID " + p.Id +
+                                  ") on 127.0.0.1:" + FragmentSocksPort);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[x] failed to start xray: " + ex.Message);
+                return false;
+            }
+        }
+
+        private static void StopXray()
+        {
+            Process p = xrayProc;
+            xrayProc = null;
+            if (p != null)
+            {
+                try { if (!p.HasExited) { p.Kill(); p.WaitForExit(5000); } }
+                catch { }
+            }
+            p = FindXray();
+            if (p != null)
+            {
+                try { p.Kill(); p.WaitForExit(5000); } catch { }
+            }
+        }
+
         // Strategy for a run: env override (bench) > saved choice > ultimate.
         private static int ResolveStrategy()
         {
@@ -492,12 +623,13 @@ namespace StartTor
         }
 
         // Interactive startup: pick connection mode and strategy level, then start.
-        private static void ShowMainMenu(out int mode, out int strategy)
+        private static void ShowMainMenu(out int mode, out int strategy, out bool fragment)
         {
             mode = ReadLastMode();
             if (mode < 0) mode = 0;
             strategy = ReadLastStrategy();
             if (strategy < 0) strategy = StrategyNames.Length - 1;
+            fragment = ReadFragmentSetting();
             while (true)
             {
                 Console.WriteLine();
@@ -507,9 +639,10 @@ namespace StartTor
                 Console.WriteLine("    0) Start Tor");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
-                Console.WriteLine("    3) Exit");
+                Console.WriteLine("    3) Fragment (xray)   : " + (fragment ? "on" : "off"));
+                Console.WriteLine("    4) Exit");
                 Console.WriteLine("    C) Stop Tor and return to menu");
-                Console.Write("  Choose 0-3, C (Enter = 0): ");
+                Console.Write("  Choose 0-4, C (Enter = 0): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -528,7 +661,12 @@ namespace StartTor
                         int s = ShowStrategyMenu();
                         if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
                     }
-                    else if (n == 3) { mode = -1; return; }
+                    else if (n == 3)
+                    {
+                        fragment = !fragment;
+                        WriteFragmentFile(fragment);
+                    }
+                    else if (n == 4) { mode = -1; return; }
                     else Console.WriteLine("    Invalid choice, try again.");
                 }
                 else if (input.Trim().Equals("c", StringComparison.OrdinalIgnoreCase))
@@ -549,7 +687,7 @@ namespace StartTor
             }
         }
 
-        private static bool WriteTorrc(int mode, int strategy)
+        private static bool WriteTorrc(int mode, int strategy, bool fragment)
         {
             if (!File.Exists(TorrcTemplate))
             {
@@ -593,6 +731,13 @@ namespace StartTor
                 sb.AppendLine("# --- strategy: " + StrategyNames[strategy] + " ---");
                 foreach (string line in StrategyTorrc[strategy]) sb.AppendLine(line);
             }
+            if (fragment)
+            {
+                sb.AppendLine();
+                sb.AppendLine();
+                sb.AppendLine("# --- tlshello fragment via local xray (see config.json) ---");
+                sb.AppendLine("Socks5Proxy 127.0.0.1:" + FragmentSocksPort);
+            }
             File.WriteAllText(Torrc, sb.ToString(), new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
             catch { }
@@ -600,7 +745,8 @@ namespace StartTor
             catch { }
             Console.WriteLine("[i] torrc written (" + ModeNames[mode] +
                               ", strategy " + StrategyNames[strategy] +
-                              (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") + ")");
+                              (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") +
+                              (fragment ? ", fragment on" : "") + ")");
             return true;
         }
 
@@ -1149,7 +1295,7 @@ namespace StartTor
         // Starts tor for the given mode, writes torrc, stops any previous run,
         // and waits until bootstrap reaches 100%. Returns the process or null.
         // `aborted` is set when the user pressed C to stop during bootstrap.
-        private static Process StartTorAndWait(int mode, int strategy,
+        private static Process StartTorAndWait(int mode, int strategy, bool fragment,
                                                out string errorMessage, out bool aborted)
         {
             errorMessage = null;
@@ -1159,12 +1305,21 @@ namespace StartTor
                 errorMessage = "tor.exe not found in " + DataDir;
                 return null;
             }
-            if (!WriteTorrc(mode, strategy))
+            StopPreviousRun();
+            bool fragmentOn = fragment && File.Exists(XrayExe);
+            if (fragmentOn)
+            {
+                if (!StartXray())
+                {
+                    fragmentOn = false;
+                    Console.WriteLine("[!] fragment unavailable - continuing without it.");
+                }
+            }
+            if (!WriteTorrc(mode, strategy, fragmentOn))
             {
                 errorMessage = "failed to write torrc (bridge file missing?).";
                 return null;
             }
-            StopPreviousRun();
             Directory.CreateDirectory(Path.Combine(DataDir, "data"));
             try { if (File.Exists(TorLog)) File.Delete(TorLog); } catch { }
 
@@ -1441,7 +1596,7 @@ namespace StartTor
         {
             string err;
             bool aborted = false;
-            Process proc = StartTorAndWait(mode, ResolveStrategy(), out err, out aborted);
+            Process proc = StartTorAndWait(mode, ResolveStrategy(), false, out err, out aborted);
             if (proc == null)
             {
                 if (aborted) { Cleanup(); return; }
@@ -1574,7 +1729,9 @@ namespace StartTor
         {
             foreach (int p in TcpPorts)
                 if (TcpPortBusy(p)) return true;
-            return UdpPortBusy(UdpDnsPort);
+            if (UdpPortBusy(UdpDnsPort)) return true;
+            if (ReadFragmentSetting() && TcpPortBusy(FragmentSocksPort)) return true;
+            return false;
         }
 
         private static void StopPreviousRun()
@@ -1630,14 +1787,20 @@ namespace StartTor
                 Thread.Sleep(1500);
             }
 
+            if (FindXray() != null)
+            {
+                Console.WriteLine("  [i] Stopping previous xray (fragment)...");
+                StopXray();
+            }
+
             SetSystemProxy(false);
         }
 
         // Runs one Tor session: writes torrc, boots tor with a live progress
         // bar, then serves the P/T/S/C keys until the user presses C or tor
         // dies. Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
-        private static int RunTorSession(int mode, int strategy, bool genOnly,
-                                         bool bootstrapOnly, string autoMode,
+        private static int RunTorSession(int mode, int strategy, bool fragment,
+                                         bool genOnly, bool bootstrapOnly, string autoMode,
                                          bool menuReturn)
         {
             if (!File.Exists(TorExe))
@@ -1648,14 +1811,14 @@ namespace StartTor
             }
             if (genOnly)
             {
-                if (!WriteTorrc(mode, strategy)) { WaitForKey(); return 1; }
+                if (!WriteTorrc(mode, strategy, fragment)) { WaitForKey(); return 1; }
                 Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
                 return 0;
             }
 
             string startErr;
             bool aborted = false;
-            torProc = StartTorAndWait(mode, strategy, out startErr, out aborted);
+            torProc = StartTorAndWait(mode, strategy, fragment, out startErr, out aborted);
             if (torProc == null)
             {
                 if (aborted)
@@ -1872,7 +2035,7 @@ namespace StartTor
                 if (m < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
                 string err;
                 bool aborted = false;
-                Process p = StartTorAndWait(m, ResolveStrategy(), out err, out aborted);
+                Process p = StartTorAndWait(m, ResolveStrategy(), false, out err, out aborted);
                 if (p == null) { if (aborted) { Cleanup(); return 1; } Console.WriteLine("[x] " + err); Cleanup(); return 1; }
                 Console.WriteLine("[i] bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
@@ -1935,6 +2098,7 @@ namespace StartTor
             bool bootstrapOnly = false;
             bool genOnly = false;
             bool newCircuit = false;
+            bool fragment = ReadFragmentSetting();
             string autoMode = "";
             for (int i = 0; i < args.Length; i++)
             {
@@ -1944,6 +2108,8 @@ namespace StartTor
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
                 else if (a == "--strategy") strategy = ParseStrategy(a);
                 else if (a == "--newcircuit") newCircuit = true;
+                else if (a == "--fragment") fragment = true;
+                else if (a == "--no-fragment") fragment = false;
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
                 else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
@@ -1965,9 +2131,9 @@ namespace StartTor
             {
                 while (true)
                 {
-                    ShowMainMenu(out mode, out strategy);
+                    ShowMainMenu(out mode, out strategy, out fragment);
                     if (mode < 0) return 0;
-                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    int rc = RunTorSession(mode, strategy, fragment, genOnly, bootstrapOnly, autoMode, true);
                     if (rc != 2) return rc;
                 }
             }
@@ -1977,9 +2143,9 @@ namespace StartTor
                 if (strategy < 0) strategy = 0;
                 while (true)
                 {
-                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    int rc = RunTorSession(mode, strategy, fragment, genOnly, bootstrapOnly, autoMode, true);
                     if (rc != 2) return rc;
-                    ShowMainMenu(out mode, out strategy);
+                    ShowMainMenu(out mode, out strategy, out fragment);
                     if (mode < 0) return 0;
                 }
             }

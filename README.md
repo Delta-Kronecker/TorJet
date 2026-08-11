@@ -28,14 +28,18 @@ data\
 2. Double-click `TorJet.exe`. The main menu lets you pick:
    - **Connection mode** — Direct (no bridges, when Tor isn't blocked),
      WebTunnel, Obfs4, Vanilla, Snowflake (bridges from `data\bridges\`)
-   - **Strategy level** — a packaged torrc tuning bundle, from most
-     compatible to fastest:
-     1. **standard** — stock config, most compatible
-     2. **balanced** — long-lived reused circuits (fewer handshakes)
-     3. **aggressive** — more guards + faster scheduler + deeper reuse
-     4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
+    - **Strategy level** — a packaged torrc tuning bundle, from most
+      compatible to fastest:
+      1. **standard** — stock config, most compatible
+      2. **balanced** — long-lived reused circuits (fewer handshakes)
+      3. **aggressive** — more guards + faster scheduler + deeper reuse
+      4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
    Your choices are remembered for next time (`data\mode.txt`,
    `data\strategy.txt`).
+   - **Fragment (xray)** — routes all tor relay TLS through a local
+     `xray.exe` SOCKS proxy that fragments the TLS ClientHello (a common
+     circumvention technique against SNI/length-based DPI). Default off;
+     needs `data\xray.exe`. Also settable via `--fragment` / `--no-fragment`.
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
    automatically — press **P** to toggle it on/off (HTTP 127.0.0.1:8118).
    Press **T** to toggle **TUN mode** (see below). Press **S** to run a speed
@@ -116,4 +120,4 @@ Derivatives must be released under the same license (share-alike, including
 network/SaaS use), and any breach terminates the license automatically.
 
 Third-party components shipped with TorJet (tor, pluggable transports,
-tun2socks, wintun) keep their own licenses.
+tun2socks, wintun, xray) keep their own licenses.

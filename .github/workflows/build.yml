@@ -54,6 +54,11 @@ jobs:
             go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
           cp "$GOPATH_BIN/tun2socks.exe" out/tun2socks.exe
 
+          echo "=== xray (tlshello fragment) ==="
+          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip
+          unzip -o xray.zip xray.exe
+          cp xray.exe out/xray.exe
+
           echo "=== wintun driver ==="
           curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
           unzip -o wintun.zip wintun/bin/amd64/wintun.dll
