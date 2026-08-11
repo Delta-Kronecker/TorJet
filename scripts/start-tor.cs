@@ -128,8 +128,12 @@ namespace StartTor
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
         private static int watchRttMs = 1500;
-        private static int watchIntervalS = 30;
+        private static int watchIntervalS = 20;
         private static int watchCooldownS = 60;
+
+        // Guards console output shared between the main thread (warmup progress)
+        // and the circuit monitor thread, so lines never interleave mid-write.
+        private static readonly object consoleLock = new object();
 
         // During tunnel warmup the watch cooldown is relaxed so weak legs are
         // replaced immediately instead of waiting out the normal gap.
@@ -1243,11 +1247,12 @@ namespace StartTor
         }
 
         // Background circuit health monitor. Every watchIntervalS seconds it
-        // asks tor for circuit-status and closes the single worst conflux leg
-        // whose RTT is above watchRttMs. tor then builds a replacement leg and
-        // conflux migrates any streams off the closed one. Only conflux legs
-        // report CONFLUX_RTT, so non-conflux circuits are left alone. A
-        // watchCooldownS-second gap between closes prevents circuit churn.
+        // asks tor for circuit-status and closes the weakest half (rounded up)
+        // of the conflux legs whose RTT is above watchRttMs. tor then builds
+        // replacement legs and conflux migrates any streams off the closed
+        // ones. Only conflux legs report CONFLUX_RTT, so non-conflux circuits
+        // are left alone. A watchCooldownS-second gap between closes prevents
+        // circuit churn (relaxed during tunnel warmup).
         private static void CircuitWatchLoop()
         {
             DateTime lastClose = DateTime.MinValue;
@@ -1263,8 +1268,7 @@ namespace StartTor
                 var lines = ControlCommand("GETINFO circuit-status");
                 if (lines == null) continue;
 
-                // Collect every BUILT conflux leg with its RTT and exit so the
-                // weakest one (highest RTT) can be picked and the whole set shown.
+                // Collect every BUILT conflux leg with its RTT.
                 var legs = new List<string[]>();
                 foreach (string raw in lines)
                 {
@@ -1279,38 +1283,57 @@ namespace StartTor
                         if (tok.StartsWith("CONFLUX_RTT=") &&
                             int.TryParse(tok.Substring("CONFLUX_RTT=".Length), out rttUs)) break;
                     if (rttUs <= 0) continue;
-                    legs.Add(new[] { parts[0], rttUs.ToString(), line });
+                    legs.Add(new[] { parts[0], rttUs.ToString() });
                 }
                 if (legs.Count == 0) continue;
 
-                // The weakest leg is the one with the highest RTT. It is only
-                // removed when it is above the configured threshold so healthy
-                // sets stay untouched.
-                string worstId = null;
-                int worstRttUs = 0;
+                // The weak legs are those at/above the RTT threshold. Sort them
+                // worst first and close the weakest half (rounded up), so with
+                // 4 slow legs the 2 weakest go in one pass. Healthy legs are
+                // never touched.
+                var weak = new List<string[]>();
                 foreach (string[] leg in legs)
                 {
-                    int rtt = int.Parse(leg[1]);
-                    if (rtt < watchRttMs * 1000) continue;
-                    if (rtt > worstRttUs) { worstRttUs = rtt; worstId = leg[0]; }
+                    if (int.Parse(leg[1]) >= watchRttMs * 1000) weak.Add(leg);
                 }
-                if (worstId == null) continue;
+                if (weak.Count == 0) continue;
+                weak.Sort(delegate(string[] a, string[] b)
+                {
+                    return int.Parse(b[1]) - int.Parse(a[1]);
+                });
+                int removeCount = (int)Math.Ceiling(weak.Count / 2.0);
+                var toRemove = weak.GetRange(0, removeCount);
+                var toRemoveIds = new HashSet<string>();
+                foreach (string[] leg in toRemove) toRemoveIds.Add(leg[0]);
 
-                Console.WriteLine("circuit monitor: conflux legs:");
-                foreach (string[] leg in legs)
+                lock (consoleLock)
                 {
-                    int rtt = int.Parse(leg[1]);
-                    string exit = ExtractExit(leg[2]);
-                    string conflux = ExtractConfluxId(leg[2]);
-                    string mark = leg[0] == worstId ? "   <-- removing (weakest)" : "";
-                    Console.WriteLine("    leg " + leg[0] + "  RTT " + (rtt / 1000) +
-                                      " ms  exit " + exit + "  conflux " + conflux + mark);
-                }
-                if (ControlSend("CLOSECIRCUIT " + worstId))
-                {
-                    lastClose = DateTime.UtcNow;
-                    Console.WriteLine("circuit monitor: closed weak leg " + worstId +
-                                      " (RTT " + (worstRttUs / 1000) + " ms) - replacement is being built.");
+                    ClearProgressLine();
+                    Console.WriteLine("circuit monitor: conflux legs:");
+                    foreach (string[] leg in legs)
+                    {
+                        string mark = toRemoveIds.Contains(leg[0]) ? "   <-- removing (weakest)" : "";
+                        Console.WriteLine("    leg " + leg[0] + "  RTT " +
+                                          (int.Parse(leg[1]) / 1000) + " ms" + mark);
+                    }
+                    int closed = 0;
+                    string closedIds = "";
+                    foreach (string[] leg in toRemove)
+                    {
+                        if (ControlSend("CLOSECIRCUIT " + leg[0]))
+                        {
+                            closed++;
+                            if (closedIds.Length > 0) closedIds += ", ";
+                            closedIds += leg[0];
+                        }
+                    }
+                    if (closed > 0)
+                    {
+                        lastClose = DateTime.UtcNow;
+                        Console.WriteLine("circuit monitor: closed " + closed + " weak leg" +
+                                          (closed > 1 ? "s" : "") + " (" + closedIds +
+                                          ") - replacement is being built.");
+                    }
                 }
             }
         }
@@ -1381,27 +1404,33 @@ namespace StartTor
         // The percentage is snapped to 10% steps (0, 10, 20, ..., 100).
         private static void DrawProgress(int pct, string label)
         {
-            const int width = 24;
-            pct = (pct / 10) * 10;
-            if (pct > 100) pct = 100;
-            if (pct < 0) pct = 0;
-            int filled = (int)Math.Round(pct / 100.0 * width);
-            if (filled > width) filled = width;
-            if (filled < 0) filled = 0;
-            string bar = new string('#', filled) + new string('.', width - filled);
-            string line = "    [" + bar + "] " + pct.ToString() + "%";
-            if (!string.IsNullOrEmpty(label)) line += "  " + label;
-            if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
-            Console.Write("\r" + line);
-            progressLineLen = line.Length;
+            lock (consoleLock)
+            {
+                const int width = 24;
+                pct = (pct / 10) * 10;
+                if (pct > 100) pct = 100;
+                if (pct < 0) pct = 0;
+                int filled = (int)Math.Round(pct / 100.0 * width);
+                if (filled > width) filled = width;
+                if (filled < 0) filled = 0;
+                string bar = new string('#', filled) + new string('.', width - filled);
+                string line = "    [" + bar + "] " + pct.ToString() + "%";
+                if (!string.IsNullOrEmpty(label)) line += "  " + label;
+                if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
+                Console.Write("\r" + line);
+                progressLineLen = line.Length;
+            }
         }
 
         private static void ClearProgressLine()
         {
-            if (progressLineLen > 0)
+            lock (consoleLock)
             {
-                Console.Write("\r" + new string(' ', progressLineLen) + "\r");
-                progressLineLen = 0;
+                if (progressLineLen > 0)
+                {
+                    Console.Write("\r" + new string(' ', progressLineLen) + "\r");
+                    progressLineLen = 0;
+                }
             }
         }
 
@@ -1586,9 +1615,12 @@ namespace StartTor
                 string line = "warmup " + i + "/" + warmupSeconds + "  ok=" + ok +
                               "  fail=" + fail + "  avg=" + (ok > 0 ? totalMs / ok : 0) +
                               "ms  worst=" + worstMs + "ms";
-                if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
-                Console.Write("\r" + line);
-                progressLineLen = line.Length;
+                lock (consoleLock)
+                {
+                    if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
+                    Console.Write("\r" + line);
+                    progressLineLen = line.Length;
+                }
 
                 int wait = 1000 - (int)elapsedMs;
                 if (wait > 0)
@@ -1600,8 +1632,11 @@ namespace StartTor
                         {
                             if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
                             {
-                                ClearProgressLine();
-                                Console.WriteLine("warmup aborted (C) - stopping Tor.");
+                                lock (consoleLock)
+                                {
+                                    ClearProgressLine();
+                                    Console.WriteLine("warmup aborted (C) - stopping Tor.");
+                                }
                                 return false;
                             }
                         }
@@ -1609,24 +1644,29 @@ namespace StartTor
                     }
                 }
             }
-            ClearProgressLine();
-            Console.WriteLine();
-            Console.WriteLine("warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
-                              " timeouts in " + warmupSeconds + " s - avg " +
-                              (ok > 0 ? totalMs / ok : 0) + " ms, best " +
-                              (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
-                              " ms, worst " + worstMs + " ms.");
-            if (ok >= 5)
+            lock (consoleLock)
             {
-                long avg = ok > 0 ? totalMs / ok : 0;
-                if (avg > 3000)
-                    Console.WriteLine("[!] tunnel is up but average ping is high (" +
-                                      avg + " ms) - circuits may be slow.");
-                return true;
+                ClearProgressLine();
+                Console.WriteLine();
+                Console.WriteLine("warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
+                                  " timeouts in " + warmupSeconds + " s - avg " +
+                                  (ok > 0 ? totalMs / ok : 0) + " ms, best " +
+                                  (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
+                                  " ms, worst " + worstMs + " ms.");
+                if (ok >= 5)
+                {
+                    long avg = ok > 0 ? totalMs / ok : 0;
+                    if (avg > 3000)
+                        Console.WriteLine("[!] tunnel is up but average ping is high (" +
+                                          avg + " ms) - circuits may be slow.");
+                }
+                else
+                {
+                    Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
+                                      " successful pings) - stopping Tor.");
+                }
             }
-            Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
-                              " successful pings) - stopping Tor.");
-            return false;
+            return ok >= 5;
         }
 
         // Picks the first speed endpoint reachable through the proxy.
@@ -2010,18 +2050,19 @@ namespace StartTor
             }
 
             circuitWatchStop = false;
+            circuitWatchWarmup = true;
             if (circuitWatchEnabled)
             {
                 Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
                 watcher.Start();
                 Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
-                                  " s, closing legs above " + watchRttMs + " ms RTT (cooldown " +
-                                  watchCooldownS + " s, relaxed during warmup).");
+                                  " s, closing the weakest half of legs above " + watchRttMs +
+                                  " ms RTT (cooldown " + watchCooldownS +
+                                  " s, relaxed during warmup).");
             }
 
             // Warm the tunnel while the circuit monitor runs with the close
             // cooldown relaxed, so weak legs are replaced right away.
-            circuitWatchWarmup = true;
             bool tunnelReady = WarmupTunnel();
             circuitWatchWarmup = false;
             if (!tunnelReady)
