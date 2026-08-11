@@ -90,7 +90,9 @@ TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
 TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1500)
-TorJet.exe --watch-interval 30 check circuits every N seconds (default 60)
+TorJet.exe --watch-interval 30 check circuits every N seconds (default 30)
+TorJet.exe --watch-cooldown 60 min seconds between closes (default 60)
+TorJet.exe --warmup 60         tunnel warmup pings per run, 1/s (default 60)
 TorJet.exe --newcircuit        request a new identity (NEWNYM)
 TorJet.exe --update-bridges    re-download the bridge lists from the
                                   Tor-Bridges-Collector repo and replace them
@@ -167,13 +169,26 @@ physical interface, so tor's outbound TLS never loops back into the tunnel.
 ### Circuit health monitor
 
 While Tor is up, TorJet watches the conflux legs via the control port. Every
-60 s it asks tor for `circuit-status` and, if any leg's reported RTT is above
+30 s it asks tor for `circuit-status` and, if any leg's reported RTT is above
 1500 ms, closes that single worst leg (`CLOSECIRCUIT`). Tor builds a fresh leg
 and conflux migrates streams onto it, so slow, high-latency circuits get
-replaced automatically instead of dragging the connection down. A 90 s cooldown
+replaced automatically instead of dragging the connection down. A 60 s cooldown
 between closes keeps the circuit set stable. Disable it with
-`--no-circuit-watch`; tune it with `--watch-rtt <ms>` and
-`--watch-interval <seconds>`.
+`--no-circuit-watch`; tune it with `--watch-rtt <ms>`,
+`--watch-interval <seconds>` and `--watch-cooldown <seconds>`.
+
+### Tunnel warmup
+
+Once bootstrap hits 100%, TorJet warms the tunnel with lightweight
+`generate_204` pings through the HTTP proxy (one per second for 60 s, 5 s
+timeout each, latency is measured). The old 1 MiB download check was replaced:
+it gave false negatives on cold single-stream circuits and added ~1 MiB of
+padding traffic. Each ping is timed and the run ends with a summary
+(ok/fail/timeouts, average, best and worst latency). The tunnel is considered
+ready after at least 5 successful pings; otherwise Tor is stopped and the main
+menu is shown again. The circuit health monitor runs during warmup with its
+close cooldown relaxed, so weak legs are replaced immediately. Adjust the
+duration with `--warmup <seconds>` (default 60).
 
 ## Building
 

@@ -123,11 +123,22 @@ namespace StartTor
 
         // Circuit health monitor: a background thread that periodically closes
         // the slowest conflux leg (by CONFLUX_RTT) so tor rebuilds it. Disabled
-        // with --no-circuit-watch; thresholds via --watch-rtt / --watch-interval.
+        // with --no-circuit-watch; thresholds via --watch-rtt / --watch-interval
+        // and the close cooldown via --watch-cooldown.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
         private static int watchRttMs = 1500;
-        private static int watchIntervalS = 60;
+        private static int watchIntervalS = 30;
+        private static int watchCooldownS = 60;
+
+        // During tunnel warmup the watch cooldown is relaxed so weak legs are
+        // replaced immediately instead of waiting out the normal gap.
+        private static volatile bool circuitWatchWarmup;
+
+        // Ping-based tunnel warmup: one generate_204 request per second for
+        // warmupSeconds, replacing the old 1 MiB download check (which gave
+        // false negatives on cold single-stream circuits).
+        private static int warmupSeconds = 60;
 
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
@@ -1235,8 +1246,8 @@ namespace StartTor
         // asks tor for circuit-status and closes the single worst conflux leg
         // whose RTT is above watchRttMs. tor then builds a replacement leg and
         // conflux migrates any streams off the closed one. Only conflux legs
-        // report CONFLUX_RTT, so non-conflux circuits are left alone. A 90 s
-        // cooldown between closes prevents circuit churn.
+        // report CONFLUX_RTT, so non-conflux circuits are left alone. A
+        // watchCooldownS-second gap between closes prevents circuit churn.
         private static void CircuitWatchLoop()
         {
             DateTime lastClose = DateTime.MinValue;
@@ -1247,7 +1258,8 @@ namespace StartTor
                 if (torProc == null) continue;
                 try { torProc.Refresh(); if (torProc.HasExited) break; }
                 catch { break; }
-                if (DateTime.UtcNow - lastClose < TimeSpan.FromSeconds(90)) continue;
+                if (!circuitWatchWarmup &&
+                    DateTime.UtcNow - lastClose < TimeSpan.FromSeconds(watchCooldownS)) continue;
                 var lines = ControlCommand("GETINFO circuit-status");
                 if (lines == null) continue;
                 string worstId = null;
@@ -1487,72 +1499,110 @@ namespace StartTor
             "http://speedtest.tele2.net/10MB.zip"
         };
 
-        // Downloads ~1 MiB through the HTTP proxy (127.0.0.1:8118). Returns
-        // true only when the full amount arrived, i.e. the tunnel actually
-        // carries traffic.
-        private static bool DownloadOneMib()
+        // Lightweight endpoints that answer 204 No Content - perfect for
+        // tunnel warmup pings through the proxy.
+        private static readonly string[] PingEndpoints =
         {
-            foreach (string u in BenchEndpoints)
-            {
-                Stopwatch sw = Stopwatch.StartNew();
-                try
-                {
-                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
-                    req.Proxy = new WebProxy("127.0.0.1", 8118);
-                    req.Method = "GET";
-                    req.Timeout = 5000;
-                    req.ReadWriteTimeout = 5000;
-                    req.UserAgent = "torjet-verify/1.0";
-                    using (WebResponse resp = req.GetResponse())
-                    using (Stream s = resp.GetResponseStream())
-                    {
-                        byte[] buf = new byte[64 * 1024];
-                        long got = 0;
-                        while (got < (1 << 20))
-                        {
-                            if (sw.ElapsedMilliseconds > 5000) break;
-                            int n = s.Read(buf, 0, buf.Length);
-                            if (n <= 0) break;
-                            got += n;
-                        }
-                        if (got >= (1 << 20)) return true;
-                    }
-                }
-                catch { }
-            }
-            return false;
-        }
+            "https://www.gstatic.com/generate_204",
+            "https://connectivitycheck.gstatic.com/generate_204",
+            "https://cp.cloudflare.com/generate_204"
+        };
 
-        // tor can report 100% bootstrap slightly before the path is actually
-        // usable. Download 1 MiB through the proxy; only when it completes is
-        // the menu shown. C aborts (stops tor, back to the main menu). Each
-        // attempt uses a 5 s timeout; after 10 failed attempts tor is stopped
-        // and control returns to the main menu.
-        private static bool VerifyTunnelReady()
+        // Warms the tunnel with generate_204 pings through the HTTP proxy
+        // (127.0.0.1:8118) instead of a 1 MiB download, which produced false
+        // negatives on cold single-stream circuits. One request per second for
+        // warmupSeconds, each with a 5 s timeout. Every request is timed and
+        // counted; the tunnel is ready when at least 5 pings succeeded. C
+        // aborts (stops tor, back to the main menu).
+        private static bool WarmupTunnel()
         {
             try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
             catch { }
-            Console.WriteLine("verifying tunnel: downloading 1 MB through the proxy...");
-            for (int attempt = 1; attempt <= 10; attempt++)
+            Console.WriteLine("warming tunnel: pinging generate_204 every second for " +
+                              warmupSeconds + " s (C = stop Tor)...");
+            int ok = 0, fail = 0, timeouts = 0;
+            long totalMs = 0, bestMs = long.MaxValue, worstMs = 0;
+            for (int i = 1; i <= warmupSeconds; i++)
             {
-                if (DownloadOneMib())
+                bool success = false;
+                bool anyTimeout = false;
+                Stopwatch sw = Stopwatch.StartNew();
+                foreach (string u in PingEndpoints)
                 {
-                    Console.WriteLine("tunnel verified (1 MB downloaded) - connection is up.");
-                    return true;
-                }
-                Console.WriteLine("tunnel not ready (attempt " + attempt + "/10) - retrying... (C = stop Tor)");
-                for (int i = 0; i < 10; i++)
-                {
-                    Thread.Sleep(500);
                     try
                     {
-                        if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
-                            return false;
+                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
+                        req.Proxy = new WebProxy("127.0.0.1", 8118);
+                        req.Method = "GET";
+                        req.Timeout = 5000;
+                        req.ReadWriteTimeout = 5000;
+                        req.UserAgent = "torjet-warmup/1.0";
+                        using (WebResponse resp = req.GetResponse())
+                        {
+                            if ((int)((HttpWebResponse)resp).StatusCode < 400) { success = true; break; }
+                        }
+                    }
+                    catch (WebException wex)
+                    {
+                        if (wex.Status == WebExceptionStatus.Timeout) anyTimeout = true;
                     }
                     catch { }
                 }
+                sw.Stop();
+                long elapsedMs = sw.ElapsedMilliseconds;
+                if (success)
+                {
+                    ok++;
+                    totalMs += elapsedMs;
+                    if (elapsedMs < bestMs) bestMs = elapsedMs;
+                    if (elapsedMs > worstMs) worstMs = elapsedMs;
+                }
+                else if (anyTimeout) timeouts++;
+                else fail++;
+
+                string line = "warmup " + i + "/" + warmupSeconds + "  ok=" + ok +
+                              "  fail=" + fail + "  avg=" + (ok > 0 ? totalMs / ok : 0) +
+                              "ms  worst=" + worstMs + "ms";
+                if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
+                Console.Write("\r" + line);
+                progressLineLen = line.Length;
+
+                int wait = 1000 - (int)elapsedMs;
+                if (wait > 0)
+                {
+                    for (int t = 0; t < wait / 100; t++)
+                    {
+                        Thread.Sleep(100);
+                        try
+                        {
+                            if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                            {
+                                ClearProgressLine();
+                                Console.WriteLine("warmup aborted (C) - stopping Tor.");
+                                return false;
+                            }
+                        }
+                        catch { }
+                    }
+                }
             }
-            Console.WriteLine("[!] tunnel could not be verified after 10 attempts - stopping Tor.");
+            ClearProgressLine();
+            Console.WriteLine();
+            Console.WriteLine("warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
+                              " timeouts in " + warmupSeconds + " s - avg " +
+                              (ok > 0 ? totalMs / ok : 0) + " ms, best " +
+                              (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
+                              " ms, worst " + worstMs + " ms.");
+            if (ok >= 5)
+            {
+                long avg = ok > 0 ? totalMs / ok : 0;
+                if (avg > 3000)
+                    Console.WriteLine("[!] tunnel is up but average ping is high (" +
+                                      avg + " ms) - circuits may be slow.");
+                return true;
+            }
+            Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
+                              " successful pings) - stopping Tor.");
             return false;
         }
 
@@ -1936,7 +1986,22 @@ namespace StartTor
                 return 0;
             }
 
-            if (!VerifyTunnelReady())
+            circuitWatchStop = false;
+            if (circuitWatchEnabled)
+            {
+                Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
+                watcher.Start();
+                Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
+                                  " s, closing legs above " + watchRttMs + " ms RTT (cooldown " +
+                                  watchCooldownS + " s, relaxed during warmup).");
+            }
+
+            // Warm the tunnel while the circuit monitor runs with the close
+            // cooldown relaxed, so weak legs are replaced right away.
+            circuitWatchWarmup = true;
+            bool tunnelReady = WarmupTunnel();
+            circuitWatchWarmup = false;
+            if (!tunnelReady)
             {
                 Console.WriteLine("  Stopping Tor...");
                 Cleanup();
@@ -1945,15 +2010,6 @@ namespace StartTor
                 Console.WriteLine("  Tor stopped; system proxy restored.");
                 Console.WriteLine();
                 return 2;
-            }
-
-            circuitWatchStop = false;
-            if (circuitWatchEnabled)
-            {
-                Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
-                watcher.Start();
-                Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
-                                  " s, closing legs above " + watchRttMs + " ms RTT.");
             }
 
             bool proxyOn = false;
@@ -2203,6 +2259,8 @@ namespace StartTor
                 else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
                 else if (a == "--watch-rtt" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttMs); }
                 else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
+                else if (a == "--watch-cooldown" && i + 1 < args.Length) { int.TryParse(args[++i], out watchCooldownS); }
+                else if (a == "--warmup" && i + 1 < args.Length) { int.TryParse(args[++i], out warmupSeconds); }
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
                 else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
