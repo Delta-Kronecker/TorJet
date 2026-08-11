@@ -175,7 +175,10 @@ jobs:
       - name: Compile TorJet.exe + tun-helper.exe
         shell: pwsh
         run: |
-          & "scripts\build-start-tor.ps1" -OutFile "dist\TorJet.exe"
+          $ver = "${{ github.event.inputs.tag }}"
+          if (-not $ver) { $ver = "${{ github.ref_name }}" }
+          if ($ver -notmatch '^v?\d') { $ver = "" }
+          & "scripts\build-start-tor.ps1" -OutFile "dist\TorJet.exe" -Version $ver
 
       - name: Upload single release artifact
         uses: actions/upload-artifact@v4

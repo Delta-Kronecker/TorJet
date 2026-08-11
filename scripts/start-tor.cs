@@ -114,6 +114,7 @@ namespace StartTor
         private static Process torProc;
         private static bool cleaned;
         private static int progressLineLen;
+        private static volatile bool updatePromptShown;
 
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
@@ -501,7 +502,7 @@ namespace StartTor
             {
                 Console.WriteLine();
                 Console.WriteLine("  =============");
-                Console.WriteLine("     TorJet");
+                Console.WriteLine("     TorJet v" + TorJetVersion.App);
                 Console.WriteLine("  =============");
                 Console.WriteLine("    0) Start Tor");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
@@ -1296,15 +1297,15 @@ namespace StartTor
         {
             try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
             catch { }
-            Console.WriteLine("[i] verifying tunnel: downloading 1 MB through the proxy...");
+            Console.WriteLine("verifying tunnel: downloading 1 MB through the proxy...");
             for (int attempt = 1; attempt <= 10; attempt++)
             {
                 if (DownloadOneMib())
                 {
-                    Console.WriteLine("[i] tunnel verified (1 MB downloaded) - connection is up.");
+                    Console.WriteLine("tunnel verified (1 MB downloaded) - connection is up.");
                     return true;
                 }
-                Console.WriteLine("[i] tunnel not ready (attempt " + attempt + "/10) - retrying... (C = stop Tor)");
+                Console.WriteLine("tunnel not ready (attempt " + attempt + "/10) - retrying... (C = stop Tor)");
                 for (int i = 0; i < 10; i++)
                 {
                     Thread.Sleep(500);
@@ -1717,10 +1718,10 @@ namespace StartTor
                 else
                     ToggleTun();
             }
-            Console.WriteLine("  P               toggle the Windows system proxy on/off");
-            Console.WriteLine("  T               toggle TUN mode (all traffic through Tor)");
-            Console.WriteLine("  S               run a speed test through the Tor proxy");
-            Console.WriteLine("  C               stop Tor and return to the menu");
+            Console.WriteLine("  P  :  toggle the Windows system proxy on/off");
+            Console.WriteLine("  T  :  toggle TUN mode (all traffic through Tor)");
+            Console.WriteLine("  S  :  run a speed test through the Tor proxy");
+            Console.WriteLine("  C  :  stop Tor and return to the menu");
             Console.WriteLine();
             while (true)
             {
@@ -1778,6 +1779,74 @@ namespace StartTor
             return 0;
         }
 
+        // --- version / background update check ------------------------------
+        // Compares dotted versions (1.2.3); non-numeric parts are treated as 0.
+        private static int CompareVersions(string a, string b)
+        {
+            string[] pa = a.Split('.');
+            string[] pb = b.Split('.');
+            int n = Math.Max(pa.Length, pb.Length);
+            for (int i = 0; i < n; i++)
+            {
+                int x = i < pa.Length ? VersionPart(pa[i]) : 0;
+                int y = i < pb.Length ? VersionPart(pb[i]) : 0;
+                if (x != y) return x.CompareTo(y);
+            }
+            return 0;
+        }
+
+        private static int VersionPart(string s)
+        {
+            int v;
+            if (int.TryParse(s, out v)) return v;
+            Match m = Regex.Match(s, @"^\d+");
+            return m.Success ? int.Parse(m.Value) : 0;
+        }
+
+        // Queries the GitHub latest release; prints the download link when a
+        // newer version than the embedded one exists.
+        private static void CheckForUpdates()
+        {
+            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
+            catch { }
+            try
+            {
+                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                    "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
+                req.UserAgent = "torjet-update-check/" + TorJetVersion.App;
+                req.Timeout = 8000;
+                req.ReadWriteTimeout = 8000;
+                using (WebResponse resp = req.GetResponse())
+                using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
+                {
+                    Match m = Regex.Match(sr.ReadToEnd(), "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+                    if (m.Success)
+                    {
+                        string latest = m.Groups[1].Value.TrimStart('v', 'V');
+                        if (CompareVersions(latest, TorJetVersion.App) > 0)
+                        {
+                            updatePromptShown = true;
+                            Console.WriteLine();
+                            Console.WriteLine("  [i] New TorJet version available: v" + latest +
+                                              " (you have v" + TorJetVersion.App + ")");
+                            Console.WriteLine("      Download: https://github.com/Delta-Kronecker/TorJet/releases/latest");
+                            Console.WriteLine();
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static void UpdateCheckLoop()
+        {
+            while (true)
+            {
+                if (!updatePromptShown) CheckForUpdates();
+                Thread.Sleep(TimeSpan.FromMinutes(30));
+            }
+        }
+
         private static int Main(string[] args)
         {
             Console.Title = "TorJet";
@@ -1787,6 +1856,9 @@ namespace StartTor
                 Cleanup();
                 Environment.Exit(0);
             };
+
+            Thread updater = new Thread(UpdateCheckLoop) { IsBackground = true };
+            updater.Start();
 
             if (args.Length > 0 && args[0] == "--conflux-status")
             {
