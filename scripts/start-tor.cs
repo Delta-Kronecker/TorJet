@@ -95,8 +95,8 @@ namespace StartTor
         private const int InternetOptionSettingsChanged = 39;
         private const int InternetOptionRefresh = 37;
 
-        private static readonly string[] ModeNames = { "obfs4", "webtunnel", "vanilla", "direct", "snowflake" };
-        private static readonly string[] BridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "", "snowflake_tested.txt" };
+        private static readonly string[] ModeNames = { "vanilla", "obfs4", "webtunnel", "snowflake", "direct" };
+        private static readonly string[] BridgeFiles = { "vanilla_tested.txt", "obfs4_tested.txt", "webtunnel_tested.txt", "snowflake_tested.txt", "" };
         private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "snowflake_tested.txt" };
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
@@ -439,11 +439,11 @@ namespace StartTor
             {
                 Console.WriteLine();
                 Console.WriteLine("  Connection mode:");
-                Console.WriteLine("    1) Obfs4");
-                Console.WriteLine("    2) WebTunnel");
-                Console.WriteLine("    3) Vanilla");
-                Console.WriteLine("    4) Direct Tor");
-                Console.WriteLine("    5) Snowflake");
+                Console.WriteLine("    1) Vanilla");
+                Console.WriteLine("    2) Obfs4");
+                Console.WriteLine("    3) WebTunnel");
+                Console.WriteLine("    4) Snowflake");
+                Console.WriteLine("    5) Direct Tor");
                 Console.Write("  Choose 1-5 (Enter = " + ModeNames[last >= 0 ? last : 0] + "): ");
                 string input;
                 try { input = Console.ReadLine(); }
@@ -507,7 +507,8 @@ namespace StartTor
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
                 Console.WriteLine("    3) Exit");
-                Console.Write("  Choose 0-3 (Enter = 0): ");
+                Console.WriteLine("    C) Stop Tor and return to menu");
+                Console.Write("  Choose 0-3, C (Enter = 0): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -528,6 +529,10 @@ namespace StartTor
                     }
                     else if (n == 3) { mode = -1; return; }
                     else Console.WriteLine("    Invalid choice, try again.");
+                }
+                else if (input.Trim().Equals("c", StringComparison.OrdinalIgnoreCase))
+                {
+                    StopTor();
                 }
                 else
                 {
@@ -1260,8 +1265,8 @@ namespace StartTor
                     HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
                     req.Proxy = new WebProxy("127.0.0.1", 8118);
                     req.Method = "GET";
-                    req.Timeout = 30000;
-                    req.ReadWriteTimeout = 30000;
+                    req.Timeout = 5000;
+                    req.ReadWriteTimeout = 5000;
                     req.UserAgent = "torjet-verify/1.0";
                     using (WebResponse resp = req.GetResponse())
                     using (Stream s = resp.GetResponseStream())
@@ -1284,32 +1289,23 @@ namespace StartTor
 
         // tor can report 100% bootstrap slightly before the path is actually
         // usable. Download 1 MiB through the proxy; only when it completes is
-        // the menu shown. C aborts (stops tor, back to the main menu). After
-        // 5 minutes the menu is shown regardless, with a warning.
+        // the menu shown. C aborts (stops tor, back to the main menu). Each
+        // attempt uses a 5 s timeout; after 10 failed attempts tor is stopped
+        // and control returns to the main menu.
         private static bool VerifyTunnelReady()
         {
             try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
             catch { }
             Console.WriteLine("[i] verifying tunnel: downloading 1 MB through the proxy...");
-            DateTime deadline = DateTime.UtcNow.AddMinutes(5);
-            int attempt = 0;
-            while (true)
+            for (int attempt = 1; attempt <= 10; attempt++)
             {
-                attempt++;
                 if (DownloadOneMib())
                 {
                     Console.WriteLine("[i] tunnel verified (1 MB downloaded) - connection is up.");
                     return true;
                 }
-                if (DateTime.UtcNow >= deadline)
-                {
-                    Console.WriteLine("[!] could not verify the tunnel after 5 minutes - showing the menu anyway.");
-                    return true;
-                }
-                if (attempt % 3 == 0)
-                    Console.WriteLine("[i] tunnel not ready yet (attempt " + attempt +
-                                      ") - retrying... (C = stop Tor)");
-                for (int i = 0; i < 20; i++)
+                Console.WriteLine("[i] tunnel not ready (attempt " + attempt + "/10) - retrying... (C = stop Tor)");
+                for (int i = 0; i < 10; i++)
                 {
                     Thread.Sleep(500);
                     try
@@ -1320,6 +1316,8 @@ namespace StartTor
                     catch { }
                 }
             }
+            Console.WriteLine("[!] tunnel could not be verified after 10 attempts - stopping Tor.");
+            return false;
         }
 
         // Picks the first speed endpoint reachable through the proxy.
