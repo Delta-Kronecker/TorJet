@@ -88,6 +88,9 @@ TorJet.exe --strategy ultimate start with the ultimate strategy
 TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --fragment          enable the tlshello fragment (xray)
+TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
+TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1500)
+TorJet.exe --watch-interval 30 check circuits every N seconds (default 60)
 TorJet.exe --newcircuit        request a new identity (NEWNYM)
 TorJet.exe --update-bridges    re-download the bridge lists from the
                                   Tor-Bridges-Collector repo and replace them
@@ -160,6 +163,17 @@ tor.exe -> (xray fragment if enabled) -> Tor network -> exit -> destination
 
 tor's own relay connections are exempted with per-relay /32 host routes on the
 physical interface, so tor's outbound TLS never loops back into the tunnel.
+
+### Circuit health monitor
+
+While Tor is up, TorJet watches the conflux legs via the control port. Every
+60 s it asks tor for `circuit-status` and, if any leg's reported RTT is above
+1500 ms, closes that single worst leg (`CLOSECIRCUIT`). Tor builds a fresh leg
+and conflux migrates streams onto it, so slow, high-latency circuits get
+replaced automatically instead of dragging the connection down. A 90 s cooldown
+between closes keeps the circuit set stable. Disable it with
+`--no-circuit-watch`; tune it with `--watch-rtt <ms>` and
+`--watch-interval <seconds>`.
 
 ## Building
 

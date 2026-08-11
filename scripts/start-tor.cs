@@ -121,6 +121,14 @@ namespace StartTor
         private static int progressLineLen;
         private static volatile bool updatePromptShown;
 
+        // Circuit health monitor: a background thread that periodically closes
+        // the slowest conflux leg (by CONFLUX_RTT) so tor rebuilds it. Disabled
+        // with --no-circuit-watch; thresholds via --watch-rtt / --watch-interval.
+        private static volatile bool circuitWatchStop;
+        private static bool circuitWatchEnabled = true;
+        private static int watchRttMs = 1500;
+        private static int watchIntervalS = 60;
+
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
 
@@ -301,6 +309,7 @@ namespace StartTor
         {
             if (cleaned) return;
             cleaned = true;
+            circuitWatchStop = true;
             if (TunActive())
             {
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
@@ -653,9 +662,9 @@ namespace StartTor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("  =================");
+                Console.WriteLine("  ====================");
                 Console.WriteLine("     TorJet v" + TorJetVersion.App);
-                Console.WriteLine("  =================");
+                Console.WriteLine("  ====================");
                 Console.WriteLine("    0) Start Tor");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
@@ -1220,6 +1229,55 @@ namespace StartTor
             else
                 Console.WriteLine("  conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
             return sets.Count > 0 ? 0 : 1;
+        }
+
+        // Background circuit health monitor. Every watchIntervalS seconds it
+        // asks tor for circuit-status and closes the single worst conflux leg
+        // whose RTT is above watchRttMs. tor then builds a replacement leg and
+        // conflux migrates any streams off the closed one. Only conflux legs
+        // report CONFLUX_RTT, so non-conflux circuits are left alone. A 90 s
+        // cooldown between closes prevents circuit churn.
+        private static void CircuitWatchLoop()
+        {
+            DateTime lastClose = DateTime.MinValue;
+            while (!circuitWatchStop)
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(watchIntervalS));
+                if (circuitWatchStop) break;
+                if (torProc == null) continue;
+                try { torProc.Refresh(); if (torProc.HasExited) break; }
+                catch { break; }
+                if (DateTime.UtcNow - lastClose < TimeSpan.FromSeconds(90)) continue;
+                var lines = ControlCommand("GETINFO circuit-status");
+                if (lines == null) continue;
+                string worstId = null;
+                int worstRttUs = 0;
+                foreach (string raw in lines)
+                {
+                    string line = raw.Trim();
+                    if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
+                    string[] parts = line.Split(' ');
+                    if (parts.Length < 3) continue;
+                    if (!parts[1].Equals("BUILT", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (ExtractConfluxId(line) == null) continue;
+                    int rttUs = 0;
+                    foreach (string tok in parts)
+                    {
+                        if (tok.StartsWith("CONFLUX_RTT=") &&
+                            int.TryParse(tok.Substring("CONFLUX_RTT=".Length), out rttUs)) break;
+                    }
+                    if (rttUs <= 0 || rttUs < watchRttMs * 1000) continue;
+                    if (rttUs > worstRttUs) { worstRttUs = rttUs; worstId = parts[0]; }
+                }
+                if (worstId == null) continue;
+                if (ControlSend("CLOSECIRCUIT " + worstId))
+                {
+                    lastClose = DateTime.UtcNow;
+                    Console.WriteLine("circuit monitor: closed weak leg " + worstId +
+                                      " (RTT " + (worstRttUs / 1000000.0).ToString("0.0") +
+                                      " s) - replacement is being built.");
+                }
+            }
         }
 
         // Returns tor's own bootstrap status. Two sources are used and the more
@@ -1889,6 +1947,15 @@ namespace StartTor
                 return 2;
             }
 
+            circuitWatchStop = false;
+            if (circuitWatchEnabled)
+            {
+                Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
+                watcher.Start();
+                Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
+                                  " s, closing legs above " + watchRttMs + " ms RTT.");
+            }
+
             bool proxyOn = false;
             if (autoMode == "proxy")
             {
@@ -2132,6 +2199,10 @@ namespace StartTor
                 else if (a == "--newcircuit") newCircuit = true;
                 else if (a == "--fragment") fragment = true;
                 else if (a == "--no-fragment") fragment = false;
+                else if (a == "--circuit-watch") circuitWatchEnabled = true;
+                else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
+                else if (a == "--watch-rtt" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttMs); }
+                else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
                 else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
