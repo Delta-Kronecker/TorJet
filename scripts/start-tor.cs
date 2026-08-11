@@ -101,6 +101,7 @@ namespace StartTor
         };
         private static readonly string TorLog = Path.Combine(DataDir, "data", "tor.log");
         private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
+        private static readonly string LockFile = Path.Combine(DataDir, "data", "lock");
         private static readonly string ProxyKey =
             @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
 
@@ -147,6 +148,8 @@ namespace StartTor
         private static int watchStrikes = 2;
         private static int watchMinLegs = 2;
         private static int watchUnlinkedStrikes = 4;
+        private static int watchUnlinkedGraceS = 120;
+        private static int watchMaxPerPass = 6;
         private static int watchIntervalS = 20;
         private static int watchCooldownS = 60;
 
@@ -156,6 +159,10 @@ namespace StartTor
             new Dictionary<string, int>();
         private static readonly Dictionary<string, int> unlinkedStrikes =
             new Dictionary<string, int>();
+        // First pass a circuit was seen UNLINKED, so legs still legitimately
+        // building under load are never killed while they are young.
+        private static readonly Dictionary<string, DateTime> unlinkedFirstSeen =
+            new Dictionary<string, DateTime>();
 
         // Guards console output shared between the main thread (warmup progress)
         // and the circuit monitor thread, so lines never interleave mid-write.
@@ -1496,6 +1503,21 @@ namespace StartTor
                 var legList = ConfluxQuery();
                 if (legList == null) continue;
 
+                // Forget per-circuit state for legs that no longer exist, so a
+                // circuit id reused by tor never inherits stale strikes or
+                // first-seen timestamps.
+                var liveIds = new HashSet<string>();
+                foreach (string[] leg in legList) liveIds.Add(leg[1]);
+                var staleKeys = new List<string>();
+                foreach (string k in weakStrikes.Keys) if (!liveIds.Contains(k)) staleKeys.Add(k);
+                foreach (string k in staleKeys) weakStrikes.Remove(k);
+                staleKeys.Clear();
+                foreach (string k in unlinkedStrikes.Keys) if (!liveIds.Contains(k)) staleKeys.Add(k);
+                foreach (string k in staleKeys) unlinkedStrikes.Remove(k);
+                staleKeys.Clear();
+                foreach (string k in unlinkedFirstSeen.Keys) if (!liveIds.Contains(k)) staleKeys.Add(k);
+                foreach (string k in staleKeys) unlinkedFirstSeen.Remove(k);
+
                 // Quality-based pruning (strict mode). A linked leg is "weak" when:
                 //   - its RTT is at/above the absolute threshold (--watch-rtt), or
                 //   - it is clearly slower than the best leg of its own set
@@ -1507,6 +1529,39 @@ namespace StartTor
                 // passes are closed as dead weight. The best (lowest RTT) leg of
                 // each set is never closed, and a set is never pruned below
                 // --watch-min-legs.
+
+                // Top up: sets with fewer legs than the configured target get
+                // one CONFLUX ADD (capped per pass) so a set that never
+                // reached ConfluxNumLegs or lost legs refills toward it. Only
+                // the total leg count is used so we don't pile on while
+                // replacement builds are still in flight.
+                if (confluxLegs > 0)
+                {
+                    var setTotals = new Dictionary<string, int>();
+                    foreach (string[] leg in legList)
+                    {
+                        int n;
+                        if (!setTotals.TryGetValue(leg[0], out n)) n = 0;
+                        setTotals[leg[0]] = n + 1;
+                    }
+                    int addedThisPass = 0;
+                    foreach (var kv in setTotals)
+                    {
+                        if (addedThisPass >= watchMaxPerPass) break;
+                        if (kv.Value >= confluxLegs) continue;
+                        if (ControlStatus("CONFLUX ADD " + kv.Key) == 250)
+                        {
+                            addedThisPass++;
+                            lock (consoleLock)
+                            {
+                                ClearProgressLine();
+                                Console.WriteLine("circuit monitor: added a leg to set " +
+                                                  kv.Key + " (" + kv.Value + "/" +
+                                                  confluxLegs + " legs)");
+                            }
+                        }
+                    }
+                }
 
                 // Pass 1: best RTT per set (linked legs with a real RTT only).
                 var setBest = new Dictionary<string, long>();
@@ -1544,21 +1599,39 @@ namespace StartTor
                         {
                             strike++;
                             weakStrikes[circ] = strike;
+                            unlinkedStrikes.Remove(circ);
+                            unlinkedFirstSeen.Remove(circ);
                             if (strike >= watchStrikes)
                                 weak.Add(new[] { circ, rttUs.ToString(), set, "weak" });
                         }
                         else
                         {
                             weakStrikes.Remove(circ);
+                            unlinkedStrikes.Remove(circ);
+                            unlinkedFirstSeen.Remove(circ);
                         }
                     }
                     else if (!linked)
                     {
+                        DateTime first;
+                        if (!unlinkedFirstSeen.TryGetValue(circ, out first))
+                        {
+                            first = DateTime.UtcNow;
+                            unlinkedFirstSeen[circ] = first;
+                        }
                         int unStrike = 0;
                         unlinkedStrikes.TryGetValue(circ, out unStrike);
                         unStrike++;
                         unlinkedStrikes[circ] = unStrike;
-                        if (unStrike >= watchUnlinkedStrikes)
+                        // Never close young legs: right after a large launch
+                        // burst they are still building, so killing them only
+                        // adds churn and burns tor's per-set launch budget.
+                        // Also skip stuck-unlinked pruning entirely while the
+                        // tunnel is warming up (everything is building).
+                        bool young = DateTime.UtcNow - first <
+                                     TimeSpan.FromSeconds(watchUnlinkedGraceS);
+                        if (!circuitWatchWarmup && !young &&
+                            unStrike >= watchUnlinkedStrikes)
                             stuck.Add(new[] { circ, "0", set, "stuck-unlinked" });
                     }
                 }
@@ -1569,7 +1642,9 @@ namespace StartTor
                     return int.Parse(b[1]) - int.Parse(a[1]);
                 });
 
-                // Never prune a set below --watch-min-legs linked legs.
+                // Never prune a set below --watch-min-legs linked legs, and
+                // never close more than --watch-max-per-pass legs total in a
+                // single pass so replacement builds don't pile up at once.
                 var setLinked = new Dictionary<string, int>();
                 foreach (string[] leg in legList)
                 {
@@ -1584,6 +1659,7 @@ namespace StartTor
                 var toRemoveReasons = new Dictionary<string, string>();
                 foreach (string[] leg in weak)
                 {
+                    if (toRemove.Count >= watchMaxPerPass) break;
                     int n;
                     if (setLinked.TryGetValue(leg[2], out n) && n > watchMinLegs)
                     {
@@ -1594,6 +1670,7 @@ namespace StartTor
                 }
                 foreach (string[] leg in stuck)
                 {
+                    if (toRemove.Count >= watchMaxPerPass) break;
                     toRemove.Add(leg);
                     toRemoveReasons[leg[0]] = leg[3];
                     unlinkedStrikes.Remove(leg[0]);
@@ -1755,6 +1832,12 @@ namespace StartTor
                 return null;
             }
             StopPreviousRun();
+            // The OS releases listening sockets only after the killed process
+            // has fully exited, which lags Kill(). Wait until our ports are
+            // free and drop the stale lock file so a fresh start never races
+            // the teardown and dies with "Address already in use".
+            for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
+            try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
             bool fragmentOn = fragment && File.Exists(XrayExe);
             if (fragmentOn)
             {
@@ -1780,74 +1863,108 @@ namespace StartTor
                 UseShellExecute = false,
                 CreateNoWindow = true
             };
-            Process proc;
-            try { proc = Process.Start(psi); }
-            catch (Exception ex)
-            {
-                errorMessage = "failed to start tor: " + ex.Message;
-                return null;
-            }
-            torProc = proc;
-            Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
 
-            DateTime deadline = DateTime.UtcNow.AddMinutes(10);
-            int lastPct = -1;
-            string lastTag = "";
-            DateTime stuckSince = DateTime.UtcNow;
-            while (DateTime.UtcNow < deadline)
+            // If tor dies in the first few seconds because a leftover lock or
+            // occupied port was still held from the previous run, wait and
+            // retry with a fresh lock file before giving up.
+            for (int attempt = 1; ; attempt++)
             {
-                try { proc.Refresh(); } catch { }
-                if (proc.HasExited)
+                Process proc;
+                try { proc = Process.Start(psi); }
+                catch (Exception ex)
                 {
-                    ClearProgressLine();
-                    errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
+                    errorMessage = "failed to start tor: " + ex.Message;
                     return null;
                 }
-                try
+                torProc = proc;
+                Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
+
+                DateTime started = DateTime.UtcNow;
+                DateTime deadline = started.AddMinutes(10);
+                int lastPct = -1;
+                string lastTag = "";
+                DateTime stuckSince = DateTime.UtcNow;
+                bool retry = false;
+                while (DateTime.UtcNow < deadline)
                 {
-                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    try { proc.Refresh(); } catch { }
+                    if (proc.HasExited)
                     {
                         ClearProgressLine();
-                        try { proc.Kill(); } catch { }
-                        aborted = true;
+                        if (attempt < 3 &&
+                            DateTime.UtcNow - started < TimeSpan.FromSeconds(45))
+                        {
+                            string tail = ReadLogTail(1500);
+                            if (tail.IndexOf("already in use", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                tail.IndexOf("lock file", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                Console.WriteLine("tor exited early (code " + proc.ExitCode +
+                                                  ") - previous run still releasing ports, retrying...");
+                                retry = true;
+                                break;
+                            }
+                        }
+                        errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
                         return null;
                     }
+                    try
+                    {
+                        if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                        {
+                            ClearProgressLine();
+                            try { proc.Kill(); } catch { }
+                            aborted = true;
+                            return null;
+                        }
+                    }
+                    catch { }
+                    int pct;
+                    string tag;
+                    string summary;
+                    if (BootstrapPhase(out pct, out tag, out summary))
+                    {
+                        if (pct >= 100)
+                        {
+                            DrawProgress(100, tag);
+                            Console.WriteLine();
+                            progressLineLen = 0;
+                            return proc;
+                        }
+                        if (pct != lastPct)
+                        {
+                            lastPct = pct;
+                            lastTag = tag;
+                            stuckSince = DateTime.UtcNow;
+                            DrawProgress(pct, tag);
+                        }
+                        else if (DateTime.UtcNow - stuckSince > TimeSpan.FromMinutes(3))
+                        {
+                            DrawProgress(pct, tag + "  (still waiting...)");
+                        }
+                        else
+                        {
+                            DrawProgress(pct, tag);
+                        }
+                    }
+                    Thread.Sleep(1500);
                 }
-                catch { }
-                int pct;
-                string tag;
-                string summary;
-                if (BootstrapPhase(out pct, out tag, out summary))
+                if (retry)
                 {
-                    if (pct >= 100)
-                    {
-                        DrawProgress(100, tag);
-                        Console.WriteLine();
-                        progressLineLen = 0;
-                        return proc;
-                    }
-                    if (pct != lastPct)
-                    {
-                        lastPct = pct;
-                        lastTag = tag;
-                        stuckSince = DateTime.UtcNow;
-                        DrawProgress(pct, tag);
-                    }
-                    else if (DateTime.UtcNow - stuckSince > TimeSpan.FromMinutes(3))
-                    {
-                        DrawProgress(pct, tag + "  (still waiting...)");
-                    }
-                    else
-                    {
-                        DrawProgress(pct, tag);
-                    }
+                    for (int i = 0; i < 30 && PreviousRunActive(); i++)
+                        Thread.Sleep(500);
+                    try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
+                    continue;
                 }
-                Thread.Sleep(1500);
+                ClearProgressLine();
+                if (!proc.HasExited)
+                {
+                    errorMessage = "bootstrap did not reach 100% in 10 minutes (last seen: " +
+                                   lastPct + "% " + lastTag + ").\n" + ReadLogTail(1500);
+                    return null;
+                }
+                errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
+                return null;
             }
-            ClearProgressLine();
-            errorMessage = "bootstrap did not reach 100% in 10 minutes (last seen: " +
-                           lastPct + "% " + lastTag + ").\n" + ReadLogTail(1500);
-            return null;
         }
 
         private static string benchUrl;
@@ -2366,8 +2483,10 @@ namespace StartTor
                                   " s; weak legs (RTT >= " + watchRttMs + " ms, or >= " +
                                   watchFactor + "x the set best above " + watchRttFloorMs +
                                   " ms) are closed after " + watchStrikes + " strikes; " +
-                                  "stuck-unlinked after " + watchUnlinkedStrikes + " passes; " +
-                                  "never below " + watchMinLegs + " leg(s)/set (cooldown " +
+                                  "stuck-unlinked after " + watchUnlinkedStrikes +
+                                  " passes and " + watchUnlinkedGraceS + " s old; " +
+                                  "never below " + watchMinLegs + " leg(s)/set, max " +
+                                  watchMaxPerPass + " close(s)/pass (cooldown " +
                                   watchCooldownS + " s, relaxed during warmup).");
             }
 
@@ -2651,6 +2770,8 @@ namespace StartTor
                 else if (a == "--watch-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchStrikes); }
                 else if (a == "--watch-min-legs" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMinLegs); }
                 else if (a == "--watch-unlinked-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedStrikes); }
+                else if (a == "--watch-unlinked-grace" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedGraceS); }
+                else if (a == "--watch-max-per-pass" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMaxPerPass); }
                 else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
                 else if (a == "--watch-cooldown" && i + 1 < args.Length) { int.TryParse(args[++i], out watchCooldownS); }
                 else if (a == "--warmup" && i + 1 < args.Length) { int.TryParse(args[++i], out warmupSeconds); }
