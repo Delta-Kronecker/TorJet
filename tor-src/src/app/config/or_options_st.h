@@ -753,6 +753,12 @@ struct or_options_t {
   char *ConfluxClientUX_option;
   int ConfluxClientUX;
 
+  /** Number of legs to build per conflux set. 0 (default) means "use the
+   * consensus default" (cfx_num_legs, usually 2); any positive value overrides
+   * it so every set is always kept at exactly this many legs. This is a
+   * TorJet extension. */
+  int ConfluxNumLegs;
+
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;
   /** The length of time we think it will take to distribute votes. */

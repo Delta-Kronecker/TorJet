@@ -384,6 +384,7 @@ static const config_var_t option_vars_[] = {
   V(ConfluxEnabled,              AUTOBOOL, "auto"),
   VAR("ConfluxClientUX",         STRING,   ConfluxClientUX_option,
           "throughput"),
+  V(ConfluxNumLegs,              INT,      "0"),
   V(ConnLimit,                   POSINT,     "1000"),
   V(ConnDirectionStatistics,     BOOL,     "0"),
   V(ConstrainedSockets,          BOOL,     "0"),
@@ -3584,6 +3585,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
     else
       REJECT("ConfluxClientUX must be 'latency', 'throughput, "
              "'latency_lowmem', or 'throughput_lowmem'");
+  }
+
+  if (options->ConfluxNumLegs < 0 || options->ConfluxNumLegs > 16) {
+    REJECT("ConfluxNumLegs must be between 0 (consensus default) and 16");
   }
 
   if (options_validate_publish_server(old_options, options, msg) < 0)

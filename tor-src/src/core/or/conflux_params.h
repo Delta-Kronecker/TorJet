@@ -17,6 +17,7 @@ uint8_t conflux_params_get_max_prebuilt(void);
 uint8_t conflux_params_get_max_unlinked_leg_retry(void);
 uint8_t conflux_params_get_num_legs_set(void);
 uint8_t conflux_params_get_max_legs_set(void);
+void conflux_params_set_num_legs(uint8_t n);
 uint8_t conflux_params_get_drain_pct(void);
 uint8_t conflux_params_get_send_pct(void);
 uint32_t conflux_params_get_max_oooq(void);

@@ -239,6 +239,16 @@ conflux_params_get_num_legs_set(void)
   return num_legs_set;
 }
 
+/** TorJet extension: override the number of legs per set at runtime
+ * (e.g. from the CONFLUX SET control command). Ignored if out of range. */
+void
+conflux_params_set_num_legs(uint8_t n)
+{
+  if (n > 0 && n <= 16) {
+    num_legs_set = n;
+  }
+}
+
 /** Return the maximum number of legs per set. */
 uint8_t
 conflux_params_get_max_legs_set(void)
@@ -304,6 +314,16 @@ conflux_params_new_consensus(const networkstatus_t *ns)
     networkstatus_get_param(ns, "cfx_num_legs_set",
                             NUM_LEGS_SET_DEFAULT,
                             NUM_LEGS_SET_MIN, NUM_LEGS_SET_MAX);
+
+  /* TorJet extension: the torrc ConfluxNumLegs option (0 = consensus default)
+   * overrides the consensus cfx_num_legs_set, so every set is always kept at
+   * exactly that many legs. */
+  {
+    const or_options_t *opts = get_options();
+    if (opts && opts->ConfluxNumLegs > 0) {
+      num_legs_set = opts->ConfluxNumLegs;
+    }
+  }
 
   max_legs_set =
     networkstatus_get_param(ns, "cfx_max_legs_set",

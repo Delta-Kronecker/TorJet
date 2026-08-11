@@ -19,6 +19,10 @@
 #include "core/or/circuitbuild.h"
 #include "core/or/circuitlist.h"
 #include "core/or/circuituse.h"
+#include "core/or/conflux.h"
+#include "core/or/conflux_params.h"
+#include "core/or/conflux_pool.h"
+#include "core/or/conflux_util.h"
 #include "core/or/connection_edge.h"
 #include "core/or/circuitstats.h"
 #include "core/or/extendinfo.h"
@@ -41,8 +45,10 @@
 #include "feature/rend/rendcommon.h"
 #include "lib/crypt_ops/crypto_rand.h"
 #include "lib/crypt_ops/crypto_util.h"
+#include "lib/encoding/binascii.h"
 #include "lib/encoding/confline.h"
 #include "lib/encoding/kvline.h"
+#include "lib/string/scanf.h"
 
 #include "core/or/cpath_build_state_st.h"
 #include "core/or/entry_connection_st.h"
@@ -1429,6 +1435,125 @@ handle_control_droptimeouts(control_connection_t *conn,
   return 0;
 }
 
+static const control_cmd_syntax_t conflux_syntax = {
+  .min_args = 1,
+  .max_args = 2,
+};
+
+/** Implementation for the CONFLUX command.
+ *
+ * The CONFLUX command interacts with the conflux multipath subsystem. It
+ * takes one of the following subcommands:
+ *
+ *   CONFLUX QUERY
+ *      Print one line for every leg circuit of every conflux set, using the
+ *      same (truncated) set id as the CONFLUX_ID= field of circuit-status.
+ *
+ *   CONFLUX ADD <set-id>
+ *      Launch a new leg for the conflux set identified by <set-id>, which is
+ *      the CONFLUX_ID printed by circuit-status and CONFLUX QUERY.
+ *
+ *   CONFLUX SET <n>
+ *      Override the number of legs the client builds per conflux set.
+ */
+static int
+handle_control_conflux(control_connection_t *conn,
+                       const control_cmd_args_t *args)
+{
+  const char *cmd = smartlist_get(args->args, 0);
+
+  if (!strcasecmp(cmd, "QUERY")) {
+    if (smartlist_len(args->args) != 1) {
+      control_write_endreply(conn, 512, "CONFLUX QUERY takes no arguments");
+      return 0;
+    }
+    smartlist_t *reply = smartlist_new();
+    SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ_) {
+      const uint8_t *nonce;
+      if (!CIRCUIT_IS_ORIGIN(circ_) || circ_->marked_for_close)
+        continue;
+      origin_circuit_t *circ = TO_ORIGIN_CIRCUIT(circ_);
+      if (!(circ->base_.conflux || circ->base_.conflux_pending_nonce))
+        continue;
+      nonce = conflux_get_nonce(&circ->base_);
+      tor_assert(nonce);
+      if (circ->base_.conflux) {
+        const conflux_t *cfx = circ->base_.conflux;
+        smartlist_add_asprintf(reply,
+            "SET=%s CIRC=%lu LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
+            hex_str((const char *)nonce, DIGEST256_LEN/2),
+            (unsigned long)circ->global_identifier,
+            CONFLUX_NUM_LEGS(cfx),
+            conflux_get_circ_rtt(&circ->base_));
+      } else {
+        smartlist_add_asprintf(reply, "SET=%s CIRC=%lu STATE=UNLINKED",
+            hex_str((const char *)nonce, DIGEST256_LEN/2),
+            (unsigned long)circ->global_identifier);
+      }
+    } SMARTLIST_FOREACH_END(circ_);
+
+    if (smartlist_len(reply) == 0)
+      smartlist_add_strdup(reply, "(no conflux sets)");
+
+    control_printf_midreply(conn, 250, "CONFLUX status");
+    SMARTLIST_FOREACH(reply, char *, cp, control_printf_midreply(conn, 250,
+                                                                "%s", cp));
+    control_write_endreply(conn, 250, "OK");
+    SMARTLIST_FOREACH(reply, char *, cp, tor_free(cp));
+    smartlist_free(reply);
+  } else if (!strcasecmp(cmd, "ADD")) {
+    if (smartlist_len(args->args) != 2) {
+      control_write_endreply(conn, 512, "CONFLUX ADD requires a set id");
+      return 0;
+    }
+    const char *id = smartlist_get(args->args, 1);
+    const uint8_t *nonce = NULL;
+    SMARTLIST_FOREACH_BEGIN(circuit_get_global_list(), circuit_t *, circ_) {
+      if (!CIRCUIT_IS_ORIGIN(circ_) || circ_->marked_for_close)
+        continue;
+      if (!(circ_->conflux || circ_->conflux_pending_nonce))
+        continue;
+      const uint8_t *cand_nonce = conflux_get_nonce(circ_);
+      tor_assert(cand_nonce);
+      if (!strcasecmp(hex_str((const char *)cand_nonce, DIGEST256_LEN/2),
+                      id)) {
+        nonce = cand_nonce;
+        break;
+      }
+    } SMARTLIST_FOREACH_END(circ_);
+
+    if (!nonce) {
+      control_printf_endreply(conn, 552, "No such conflux set \"%s\"", id);
+      return 0;
+    }
+    if (!conflux_launch_leg(nonce)) {
+      control_write_endreply(conn, 551, "Couldn't start conflux leg");
+      return 0;
+    }
+    send_control_done(conn);
+  } else if (!strcasecmp(cmd, "SET")) {
+    if (smartlist_len(args->args) != 2) {
+      control_write_endreply(conn, 512, "CONFLUX SET requires a leg count");
+      return 0;
+    }
+    const char *n_str = smartlist_get(args->args, 1);
+    int n = -1;
+    if (tor_sscanf(n_str, "%d", &n) != 1 ||
+        n < 1 || n > conflux_params_get_max_legs_set()) {
+      control_printf_endreply(conn, 512, "Invalid number of legs \"%s\"",
+                              n_str);
+      return 0;
+    }
+    conflux_params_set_num_legs((uint8_t)n);
+    send_control_done(conn);
+  } else {
+    control_printf_endreply(conn, 512,
+                            "Unrecognized CONFLUX subcommand \"%s\"", cmd);
+    return 0;
+  }
+  return 0;
+}
+
 static const char *hsfetch_keywords[] = {
   "SERVER", NULL,
 };
@@ -2191,6 +2316,7 @@ static const control_cmd_def_t CONTROL_COMMANDS[] =
   ONE_LINE(authchallenge, CMD_FL_WIPE),
   ONE_LINE(dropguards, 0),
   ONE_LINE(droptimeouts, 0),
+  ONE_LINE(conflux, 0),
   ONE_LINE(hsfetch, 0),
   MULTLINE(hspost, 0),
   ONE_LINE(add_onion, CMD_FL_WIPE),
