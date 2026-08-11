@@ -122,14 +122,32 @@ namespace StartTor
         private static volatile bool updatePromptShown;
 
         // Circuit health monitor: a background thread that periodically closes
-        // the slowest conflux leg (by CONFLUX_RTT) so tor rebuilds it. Disabled
-        // with --no-circuit-watch; thresholds via --watch-rtt / --watch-interval
-        // and the close cooldown via --watch-cooldown.
+        // weak conflux legs so tor rebuilds them with fresh, higher-quality
+        // circuits. Disabled with --no-circuit-watch. Tuning knobs (all via
+        // CLI): --watch-rtt (absolute weak threshold, ms), --watch-rtt-floor
+        // (ms floor for the relative rule), --watch-factor (how much slower
+        // than the set's best leg counts as weak), --watch-strikes (consecutive
+        // weak passes before a close), --watch-min-legs (a set is never pruned
+        // below this many linked legs), --watch-unlinked-strikes (consecutive
+        // unlinked passes before a stuck leg is closed), plus --watch-interval
+        // and --watch-cooldown.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
-        private static int watchRttMs = 1500;
+        private static int watchRttMs = 1000;
+        private static int watchRttFloorMs = 400;
+        private static double watchFactor = 2.0;
+        private static int watchStrikes = 2;
+        private static int watchMinLegs = 2;
+        private static int watchUnlinkedStrikes = 4;
         private static int watchIntervalS = 20;
         private static int watchCooldownS = 60;
+
+        // Per-circuit consecutive-bad counters for the monitor (persist across
+        // passes so a single RTT spike never prunes a healthy leg).
+        private static readonly Dictionary<string, int> weakStrikes =
+            new Dictionary<string, int>();
+        private static readonly Dictionary<string, int> unlinkedStrikes =
+            new Dictionary<string, int>();
 
         // Guards console output shared between the main thread (warmup progress)
         // and the circuit monitor thread, so lines never interleave mid-write.
@@ -1385,45 +1403,131 @@ namespace StartTor
                 var legList = ConfluxQuery();
                 if (legList == null) continue;
 
-                // Collect every linked conflux leg with a measured RTT.
-                var legs = new List<string[]>();
+                // Quality-based pruning (strict mode). A linked leg is "weak" when:
+                //   - its RTT is at/above the absolute threshold (--watch-rtt), or
+                //   - it is clearly slower than the best leg of its own set
+                //     (>= --watch-rtt-floor ms AND >= --watch-factor times the
+                //     set's best RTT), so pruning adapts to each set's conditions.
+                // A leg must stay weak for --watch-strikes consecutive passes
+                // before it is closed, so a single measurement spike never prunes
+                // a good leg. Legs stuck UNLINKED for --watch-unlinked-strikes
+                // passes are closed as dead weight. The best (lowest RTT) leg of
+                // each set is never closed, and a set is never pruned below
+                // --watch-min-legs.
+
+                // Pass 1: best RTT per set (linked legs with a real RTT only).
+                var setBest = new Dictionary<string, long>();
                 foreach (string[] leg in legList)
                 {
                     if (!leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) continue;
                     int rttUs;
                     if (!int.TryParse(leg[5], out rttUs) || rttUs <= 0) continue;
-                    legs.Add(new[] { leg[1], rttUs.ToString() });
+                    long cur;
+                    if (!setBest.TryGetValue(leg[0], out cur) || rttUs < cur)
+                        setBest[leg[0]] = rttUs;
                 }
-                if (legs.Count == 0) continue;
 
-                // The weak legs are those at/above the RTT threshold. Sort them
-                // worst first and close the weakest half (rounded up), so with
-                // 4 slow legs the 2 weakest go in one pass. Healthy legs are
-                // never touched.
+                // Pass 2: classify every leg.
                 var weak = new List<string[]>();
-                foreach (string[] leg in legs)
+                var stuck = new List<string[]>();
+                foreach (string[] leg in legList)
                 {
-                    if (int.Parse(leg[1]) >= watchRttMs * 1000) weak.Add(leg);
+                    string set = leg[0], circ = leg[1];
+                    bool linked = leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase);
+                    int rttUs;
+                    bool hasRtt = int.TryParse(leg[5], out rttUs) && rttUs > 0;
+
+                    if (linked && hasRtt)
+                    {
+                        int strike = 0;
+                        weakStrikes.TryGetValue(circ, out strike);
+                        long best;
+                        bool isBestLeg = setBest.TryGetValue(set, out best) &&
+                                         best > 0 && rttUs <= best;
+                        bool absBad = rttUs >= watchRttMs * 1000L;
+                        bool relBad = rttUs >= watchRttFloorMs * 1000L &&
+                                      (double)rttUs >= (double)best * watchFactor;
+                        if ((absBad || relBad) && !isBestLeg)
+                        {
+                            strike++;
+                            weakStrikes[circ] = strike;
+                            if (strike >= watchStrikes)
+                                weak.Add(new[] { circ, rttUs.ToString(), set, "weak" });
+                        }
+                        else
+                        {
+                            weakStrikes.Remove(circ);
+                        }
+                    }
+                    else if (!linked)
+                    {
+                        int unStrike = 0;
+                        unlinkedStrikes.TryGetValue(circ, out unStrike);
+                        unStrike++;
+                        unlinkedStrikes[circ] = unStrike;
+                        if (unStrike >= watchUnlinkedStrikes)
+                            stuck.Add(new[] { circ, "0", set, "stuck-unlinked" });
+                    }
                 }
-                if (weak.Count == 0) continue;
+                if (weak.Count == 0 && stuck.Count == 0) continue;
+
                 weak.Sort(delegate(string[] a, string[] b)
                 {
                     return int.Parse(b[1]) - int.Parse(a[1]);
                 });
-                int removeCount = (int)Math.Ceiling(weak.Count / 2.0);
-                var toRemove = weak.GetRange(0, removeCount);
-                var toRemoveIds = new HashSet<string>();
-                foreach (string[] leg in toRemove) toRemoveIds.Add(leg[0]);
+
+                // Never prune a set below --watch-min-legs linked legs.
+                var setLinked = new Dictionary<string, int>();
+                foreach (string[] leg in legList)
+                {
+                    if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
+                    {
+                        int n;
+                        if (!setLinked.TryGetValue(leg[0], out n)) n = 0;
+                        setLinked[leg[0]] = n + 1;
+                    }
+                }
+                var toRemove = new List<string[]>();
+                var toRemoveReasons = new Dictionary<string, string>();
+                foreach (string[] leg in weak)
+                {
+                    int n;
+                    if (setLinked.TryGetValue(leg[2], out n) && n > watchMinLegs)
+                    {
+                        setLinked[leg[2]] = n - 1;
+                        toRemove.Add(leg);
+                        toRemoveReasons[leg[0]] = leg[3];
+                    }
+                }
+                foreach (string[] leg in stuck)
+                {
+                    toRemove.Add(leg);
+                    toRemoveReasons[leg[0]] = leg[3];
+                    unlinkedStrikes.Remove(leg[0]);
+                }
+                if (toRemove.Count == 0) continue;
 
                 lock (consoleLock)
                 {
                     ClearProgressLine();
                     Console.WriteLine("circuit monitor: conflux legs:");
-                    foreach (string[] leg in legs)
+                    foreach (string[] leg in legList)
                     {
-                        string mark = toRemoveIds.Contains(leg[0]) ? "   <-- removing (weakest)" : "";
-                        Console.WriteLine("    leg " + leg[0] + "  RTT " +
-                                          (int.Parse(leg[1]) / 1000) + " ms" + mark);
+                        string reason = "";
+                        toRemoveReasons.TryGetValue(leg[1], out reason);
+                        string mark = reason.Length > 0
+                            ? "   <-- removing (" + reason + ")" : "";
+                        if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
+                        {
+                            int rttUs;
+                            string r = int.TryParse(leg[5], out rttUs) && rttUs > 0
+                                           ? (rttUs / 1000) + " ms" : "?";
+                            Console.WriteLine("    leg " + leg[1] + "  RTT " + r + mark);
+                        }
+                        else
+                        {
+                            Console.WriteLine("    leg " + leg[1] + "  UNLINKED" + mark);
+                        }
                     }
                     int closed = 0;
                     string closedIds = "";
@@ -1432,6 +1536,7 @@ namespace StartTor
                         if (ControlSend("CLOSECIRCUIT " + leg[0]))
                         {
                             closed++;
+                            weakStrikes.Remove(leg[0]);
                             if (closedIds.Length > 0) closedIds += ", ";
                             closedIds += leg[0];
                         }
@@ -2165,9 +2270,12 @@ namespace StartTor
                 Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
                 watcher.Start();
                 Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
-                                  " s, closing the weakest half of legs above " + watchRttMs +
-                                  " ms RTT (cooldown " + watchCooldownS +
-                                  " s, relaxed during warmup).");
+                                  " s; weak legs (RTT >= " + watchRttMs + " ms, or >= " +
+                                  watchFactor + "x the set best above " + watchRttFloorMs +
+                                  " ms) are closed after " + watchStrikes + " strikes; " +
+                                  "stuck-unlinked after " + watchUnlinkedStrikes + " passes; " +
+                                  "never below " + watchMinLegs + " leg(s)/set (cooldown " +
+                                  watchCooldownS + " s, relaxed during warmup).");
             }
 
             // Warm the tunnel while the circuit monitor runs with the close
@@ -2445,6 +2553,11 @@ namespace StartTor
                 else if (a == "--circuit-watch") circuitWatchEnabled = true;
                 else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
                 else if (a == "--watch-rtt" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttMs); }
+                else if (a == "--watch-rtt-floor" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttFloorMs); }
+                else if (a == "--watch-factor" && i + 1 < args.Length) { double.TryParse(args[++i], out watchFactor); }
+                else if (a == "--watch-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchStrikes); }
+                else if (a == "--watch-min-legs" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMinLegs); }
+                else if (a == "--watch-unlinked-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedStrikes); }
                 else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
                 else if (a == "--watch-cooldown" && i + 1 < args.Length) { int.TryParse(args[++i], out watchCooldownS); }
                 else if (a == "--warmup" && i + 1 < args.Length) { int.TryParse(args[++i], out warmupSeconds); }
