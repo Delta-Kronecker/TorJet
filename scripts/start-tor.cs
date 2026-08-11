@@ -1081,9 +1081,10 @@ namespace StartTor
             return b;
         }
 
-        // Sends a command to the tor control port and returns the response
-        // payload lines (without the terminating status line).
-        private static List<string> ControlCommand(string cmd)
+        // Sends a command to the tor control port and returns every raw reply
+        // line, including the terminating status line ("250 OK" and friends).
+        // Returns null when the port is unreachable or auth fails.
+        private static List<string> ControlRaw(string cmd)
         {
             try
             {
@@ -1102,10 +1103,13 @@ namespace StartTor
                     string line;
                     while ((line = r.ReadLine()) != null)
                     {
-                        if (line.StartsWith("250 ")) break;
-                        if (line.StartsWith("250-")) lines.Add(line.Substring(4));
-                        else if (line.StartsWith("250+")) lines.Add(line.Substring(4));
-                        else lines.Add(line);
+                        lines.Add(line);
+                        // A reply ends at any status line: "250 OK", "250 ...",
+                        // or an error line like "510 ...", "552 ...".
+                        if (line.Length >= 4 && line[0] >= '0' && line[0] <= '9' &&
+                            line[1] >= '0' && line[1] <= '9' &&
+                            line[2] >= '0' && line[2] <= '9' && line[3] == ' ')
+                            break;
                     }
                     try { w.WriteLine("QUIT"); } catch { }
                     return lines;
@@ -1114,27 +1118,46 @@ namespace StartTor
             catch { return null; }
         }
 
-        // Extracts the exit fingerprint ($hex) from a circuit-status line.
-        private static string ExtractExit(string line)
+        // Sends a command to the tor control port and returns the response
+        // payload lines (without the terminating status line).
+        private static List<string> ControlCommand(string cmd)
         {
-            foreach (string tok in line.Split(' '))
+            var raw = ControlRaw(cmd);
+            if (raw == null) return null;
+            var lines = new List<string>();
+            foreach (string line in raw)
             {
-                if (tok.Length > 1 && tok[0] == '$' && tok.IndexOf(',') >= 0)
-                {
-                    string exit = tok.Substring(tok.LastIndexOf(',') + 1);
-                    int tilde = exit.IndexOf('~');
-                    if (tilde >= 0) exit = exit.Substring(0, tilde);
-                    return exit;
-                }
+                if (line.StartsWith("250 ")) break;
+                if (line.StartsWith("250-")) lines.Add(line.Substring(4));
+                else if (line.StartsWith("250+")) lines.Add(line.Substring(4));
             }
-            return "?";
+            return lines;
         }
 
-        private static string ExtractConfluxId(string line)
+        // Returns the numeric status code of a control command ("250", "552", ...)
+        // or -1 when the port is unreachable or auth fails.
+        private static int ControlStatus(string cmd)
         {
+            var raw = ControlRaw(cmd);
+            if (raw == null) return -1;
+            foreach (string line in raw)
+            {
+                int sp = line.IndexOf(' ');
+                if (sp > 0)
+                {
+                    int code;
+                    if (int.TryParse(line.Substring(0, sp), out code)) return code;
+                }
+            }
+            return -1;
+        }
+
+        // Returns the value of a "KEY=value" token in a space-separated line.
+        private static string Token(string line, string key)
+        {
+            string p = key + "=";
             foreach (string tok in line.Split(' '))
-                if (tok.StartsWith("CONFLUX_ID="))
-                    return tok.Substring("CONFLUX_ID=".Length);
+                if (tok.StartsWith(p)) return tok.Substring(p.Length);
             return null;
         }
 
@@ -1161,98 +1184,192 @@ namespace StartTor
             return "?";
         }
 
+        // Reads the CONFLUX QUERY output, one entry per leg circuit. Every entry
+        // is { set, circ, exit, legs, state, rttUs }. Returns null when the tor
+        // control port can't be reached.
+        private static List<string[]> ConfluxQuery()
+        {
+            var lines = ControlCommand("CONFLUX QUERY");
+            if (lines == null) return null;
+            var legs = new List<string[]>();
+            foreach (string raw in lines)
+            {
+                string line = raw.Trim();
+                if (line.Length == 0) continue;
+                if (line.StartsWith("CONFLUX status", StringComparison.OrdinalIgnoreCase)) continue;
+                string set = Token(line, "SET");
+                if (set == null) continue;
+                string exit = Token(line, "EXIT");
+                string state = Token(line, "STATE");
+                int legsN = 0, rttUs = 0;
+                int.TryParse(Token(line, "LEGS"), out legsN);
+                int.TryParse(Token(line, "RTT_US"), out rttUs);
+                legs.Add(new[] { set, Token(line, "CIRC") == null ? "?" : Token(line, "CIRC"),
+                                 exit == null ? "?" : exit, legsN.ToString(),
+                                 state == null ? "?" : state, rttUs.ToString() });
+            }
+            return legs;
+        }
+
         // Counts conflux sets/legs and returns the exit of the first set.
         private static string ConfluxInfo(out int sets, out int legs)
         {
             sets = 0;
             legs = 0;
             string exit = "?";
+            var legList = ConfluxQuery();
+            if (legList == null) return exit;
             var legCount = new Dictionary<string, int>();
-            var lines = ControlCommand("GETINFO circuit-status");
-            if (lines == null) return exit;
-            foreach (string raw in lines)
+            foreach (string[] leg in legList)
             {
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
-                if (line.Split(' ').Length < 3) continue;
-                string cid = ExtractConfluxId(line);
-                if (cid != null)
-                {
-                    if (!legCount.ContainsKey(cid)) legCount[cid] = 0;
-                    legCount[cid]++;
-                    string e = ExtractExit(line);
-                    if (exit == "?" && e != "?") exit = e;
-                }
+                if (!legCount.ContainsKey(leg[0])) legCount[leg[0]] = 0;
+                legCount[leg[0]]++;
+                if (exit == "?" && leg[2] != "?" && leg[2] != null) exit = leg[2];
             }
             sets = legCount.Count;
             foreach (int n in legCount.Values) legs += n;
             return exit;
         }
 
-        private static int ConfluxStatus()
+        // Adds a new leg to a conflux set via the CONFLUX ADD control command
+        // (TorJet extension). With no set id it targets the first set found, or
+        // prompts when several sets exist.
+        private static int AddConfluxLeg(string setId)
         {
-            var lines = ControlCommand("GETINFO circuit-status");
-            if (lines == null)
+            var legList = ConfluxQuery();
+            if (legList == null)
             {
                 Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
                 return 1;
             }
-            int total = 0;
-            var sets = new Dictionary<string, List<string>>();
-            bool debug = Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
-            foreach (string raw in lines)
+            if (legList.Count == 0)
             {
-                string line = raw.Trim();
-                if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
-                if (debug) Console.WriteLine("    raw: " + line);
-                if (line.Split(' ').Length < 3) continue;
-                total++;
-                string cid = ExtractConfluxId(line);
-                if (cid != null)
+                Console.WriteLine("[x] no conflux set to extend - conflux is NOT engaging (check consensus support).");
+                return 1;
+            }
+            var sets = new Dictionary<string, List<string[]>>();
+            foreach (string[] leg in legList)
+            {
+                if (!sets.ContainsKey(leg[0])) sets[leg[0]] = new List<string[]>();
+                sets[leg[0]].Add(leg);
+            }
+            if (string.IsNullOrEmpty(setId))
+            {
+                if (sets.Count > 1)
                 {
-                    if (!sets.ContainsKey(cid)) sets[cid] = new List<string>();
-                    sets[cid].Add(line);
+                    Console.WriteLine("  Multiple conflux sets; pick one:");
+                    int i = 1;
+                    foreach (var kv in sets)
+                    {
+                        Console.WriteLine("    " + i + ") " + kv.Key + " (" + kv.Value.Count + " legs)");
+                        i++;
+                    }
+                    Console.Write("  Set number (Enter = 1): ");
+                    string input;
+                    try { input = Console.ReadLine(); }
+                    catch { return 1; }
+                    if (string.IsNullOrWhiteSpace(input))
+                    {
+                        foreach (var kv in sets) { setId = kv.Key; break; }
+                    }
+                    else
+                    {
+                        int n;
+                        if (!int.TryParse(input.Trim(), out n) || n < 1 || n > sets.Count)
+                        {
+                            Console.WriteLine("    Invalid choice.");
+                            return 1;
+                        }
+                        i = 1;
+                        foreach (var kv in sets) { if (i == n) { setId = kv.Key; break; } i++; }
+                    }
+                }
+                else
+                {
+                    foreach (var kv in sets) setId = kv.Key;
                 }
             }
-            int legs = 0;
-            foreach (var kv in sets) legs += kv.Value.Count;
+            if (!sets.ContainsKey(setId))
+            {
+                Console.WriteLine("[x] no conflux set \"" + setId + "\" - use a SET= id from CONFLUX QUERY.");
+                return 1;
+            }
+            int status = ControlStatus("CONFLUX ADD " + setId);
+            if (status == 250)
+                Console.WriteLine("  Added a leg to conflux set " + setId + " - tor is building it.");
+            else
+                Console.WriteLine("[x] CONFLUX ADD " + setId + " failed (status " + status + ").");
+            return status == 250 ? 0 : 1;
+        }
 
+        private static int ConfluxStatus()
+        {
+            var legList = ConfluxQuery();
+            if (legList == null)
+            {
+                Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
+                return 1;
+            }
+            bool debug = Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
             Console.WriteLine();
             Console.WriteLine("Conflux status:");
-            Console.WriteLine("  total circuits    : " + total);
+            if (legList.Count == 0)
+            {
+                Console.WriteLine("  NO conflux circuits - conflux is NOT engaging (check consensus support).");
+                return 1;
+            }
+            var sets = new Dictionary<string, List<string[]>>();
+            foreach (string[] leg in legList)
+            {
+                if (!sets.ContainsKey(leg[0])) sets[leg[0]] = new List<string[]>();
+                sets[leg[0]].Add(leg);
+            }
+            int legs = legList.Count;
             Console.WriteLine("  conflux sets      : " + sets.Count);
             Console.WriteLine("  conflux legs      : " + legs);
             int idx = 1;
             foreach (var kv in sets)
             {
-                string rtt = "?";
+                int bestUs = int.MaxValue;
                 string exit = "?";
-                foreach (string leg in kv.Value)
+                int linked = 0;
+                foreach (string[] leg in kv.Value)
                 {
-                    foreach (string tok in leg.Split(' '))
-                        if (tok.StartsWith("CONFLUX_RTT=")) rtt = tok.Substring("CONFLUX_RTT=".Length);
-                    string e = ExtractExit(leg);
-                    if (exit == "?" && e != "?") exit = e;
+                    if (leg[2] != "?") exit = leg[2];
+                    if (leg[4] == "LINKED")
+                    {
+                        linked++;
+                        int rttUs;
+                        if (int.TryParse(leg[5], out rttUs) && rttUs > 0 && rttUs < bestUs)
+                            bestUs = rttUs;
+                    }
                 }
-                Console.WriteLine("    set " + idx + ": " + kv.Value.Count + " leg(s), exit " +
-                                  exit + ", RTT " + rtt);
-                if (debug) Console.WriteLine("      [bw] exit bandwidth: " + ExitBandwidth(exit) + " bytes/s");
+                string rtt = bestUs == int.MaxValue ? "?" : (bestUs / 1000) + " ms";
+                Console.WriteLine("    set " + idx + ": " + kv.Value.Count + " leg(s) (" + linked +
+                                  " linked), exit " + exit + ", best RTT " + rtt);
+                if (debug)
+                {
+                    foreach (string[] leg in kv.Value)
+                    {
+                        int rttUs;
+                        string r = int.TryParse(leg[5], out rttUs) && rttUs > 0
+                                       ? (rttUs / 1000) + " ms" : "?";
+                        Console.WriteLine("      [leg] circ " + leg[1] + " " + leg[4] + " RTT " + r);
+                    }
+                    Console.WriteLine("      [bw] exit bandwidth: " + ExitBandwidth(exit) + " bytes/s");
+                }
                 idx++;
             }
-            if (sets.Count == 0)
-                Console.WriteLine("  NO conflux circuits - conflux is NOT engaging (check consensus support).");
-            else
-                Console.WriteLine("  conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
-            return sets.Count > 0 ? 0 : 1;
+            Console.WriteLine("  conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
+            return 0;
         }
 
         // Background circuit health monitor. Every watchIntervalS seconds it
-        // asks tor for circuit-status and closes the weakest half (rounded up)
-        // of the conflux legs whose RTT is above watchRttMs. tor then builds
+        // asks tor (CONFLUX QUERY) and closes the weakest half (rounded up) of
+        // the conflux legs whose RTT is above watchRttMs. tor then builds
         // replacement legs and conflux migrates any streams off the closed
-        // ones. Only conflux legs report CONFLUX_RTT, so non-conflux circuits
-        // are left alone. A watchCooldownS-second gap between closes prevents
-        // circuit churn (relaxed during tunnel warmup).
+        // ones. Non-conflux circuits are left alone. A watchCooldownS-second
+        // gap between closes prevents circuit churn (relaxed during warmup).
         private static void CircuitWatchLoop()
         {
             DateTime lastClose = DateTime.MinValue;
@@ -1265,25 +1382,17 @@ namespace StartTor
                 catch { break; }
                 if (!circuitWatchWarmup &&
                     DateTime.UtcNow - lastClose < TimeSpan.FromSeconds(watchCooldownS)) continue;
-                var lines = ControlCommand("GETINFO circuit-status");
-                if (lines == null) continue;
+                var legList = ConfluxQuery();
+                if (legList == null) continue;
 
-                // Collect every BUILT conflux leg with its RTT.
+                // Collect every linked conflux leg with a measured RTT.
                 var legs = new List<string[]>();
-                foreach (string raw in lines)
+                foreach (string[] leg in legList)
                 {
-                    string line = raw.Trim();
-                    if (line.Length == 0 || line.StartsWith("circuit-status=")) continue;
-                    string[] parts = line.Split(' ');
-                    if (parts.Length < 3) continue;
-                    if (!parts[1].Equals("BUILT", StringComparison.OrdinalIgnoreCase)) continue;
-                    if (ExtractConfluxId(line) == null) continue;
-                    int rttUs = 0;
-                    foreach (string tok in parts)
-                        if (tok.StartsWith("CONFLUX_RTT=") &&
-                            int.TryParse(tok.Substring("CONFLUX_RTT=".Length), out rttUs)) break;
-                    if (rttUs <= 0) continue;
-                    legs.Add(new[] { parts[0], rttUs.ToString() });
+                    if (!leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) continue;
+                    int rttUs;
+                    if (!int.TryParse(leg[5], out rttUs) || rttUs <= 0) continue;
+                    legs.Add(new[] { leg[1], rttUs.ToString() });
                 }
                 if (legs.Count == 0) continue;
 
@@ -2093,6 +2202,8 @@ namespace StartTor
             Console.WriteLine("  P  :  toggle the Windows system proxy on/off");
             Console.WriteLine("  T  :  toggle TUN mode (all traffic through Tor)");
             Console.WriteLine("  S  :  run a speed test through the Tor proxy");
+            Console.WriteLine("  A  :  add a leg to a conflux set");
+            Console.WriteLine("  L  :  show conflux set status");
             Console.WriteLine("  C  :  stop Tor and return to the menu");
             Console.WriteLine();
             while (true)
@@ -2122,6 +2233,14 @@ namespace StartTor
                         else if (ki.Key == ConsoleKey.S)
                         {
                             SpeedTestMenu();
+                        }
+                        else if (ki.Key == ConsoleKey.A)
+                        {
+                            lock (consoleLock) AddConfluxLeg(null);
+                        }
+                        else if (ki.Key == ConsoleKey.L)
+                        {
+                            lock (consoleLock) ConfluxStatus();
                         }
                         else if (ki.Key == ConsoleKey.T)
                         {
@@ -2235,6 +2354,10 @@ namespace StartTor
             if (args.Length > 0 && args[0] == "--conflux-status")
             {
                 return ConfluxStatus();
+            }
+            if (args.Length > 0 && args[0] == "--conflux-add")
+            {
+                return AddConfluxLeg(args.Length > 1 ? args[1] : null);
             }
             if (args.Length > 0 && args[0] == "--conflux-check")
             {

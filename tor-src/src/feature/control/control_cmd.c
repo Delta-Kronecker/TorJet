@@ -1479,14 +1479,26 @@ handle_control_conflux(control_connection_t *conn,
       tor_assert(nonce);
       if (circ->base_.conflux) {
         const conflux_t *cfx = circ->base_.conflux;
+        /* The exit is the last hop of the cpath. Copy the hex out of hex_str()'s
+         * static buffer before calling hex_str() again for the nonce. */
+        char exit_hex[DIGEST_LEN*2 + 1];
+        if (circ->cpath && circ->cpath->prev &&
+            circ->cpath->prev->extend_info) {
+          tor_snprintf(exit_hex, sizeof(exit_hex), "%s",
+                       hex_str((const char *)circ->cpath->prev->extend_info->
+                                   identity_digest, DIGEST_LEN));
+        } else {
+          strlcpy(exit_hex, "?", sizeof(exit_hex));
+        }
         smartlist_add_asprintf(reply,
-            "SET=%s CIRC=%lu LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
+            "SET=%s CIRC=%lu EXIT=%s LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
             hex_str((const char *)nonce, DIGEST256_LEN/2),
             (unsigned long)circ->global_identifier,
+            exit_hex,
             CONFLUX_NUM_LEGS(cfx),
             conflux_get_circ_rtt(&circ->base_));
       } else {
-        smartlist_add_asprintf(reply, "SET=%s CIRC=%lu STATE=UNLINKED",
+        smartlist_add_asprintf(reply, "SET=%s CIRC=%lu EXIT=? STATE=UNLINKED",
             hex_str((const char *)nonce, DIGEST256_LEN/2),
             (unsigned long)circ->global_identifier);
       }
