@@ -579,6 +579,15 @@ cfx_del_leg(conflux_t *cfx, const circuit_t *circ)
   /* Remove it from the cfx. */
   smartlist_remove(cfx->legs, leg);
 
+  /* TorJet: only linked legs end up here, so a leg closed on purpose (e.g.
+   * by the launcher's quality monitor) frees one launch-budget slot. This
+   * lets tor keep refilling the set toward its target leg count without
+   * permanently exhausting the per-set retry cap. Legs that fail to link
+   * never reach this point, so the anti-churn protection stays intact. */
+  if (cfx->num_leg_launch > 0) {
+    cfx->num_leg_launch--;
+  }
+
   /* After removal, if this leg had the highest sent (or recv)
    * sequence number, it was in active use by us (or the other side).
    * We need to tear down the entire set. */
@@ -1656,6 +1665,19 @@ linked_circuit_closed(circuit_t *circ)
    * linked is likely entirely gone. Thus why this is done last. */
   if (full_teardown) {
     conflux_mark_all_for_close(nonce, is_client, END_CIRC_REASON_FINISHED);
+  }
+
+  /* TorJet: if a linked leg was closed while the set survived (e.g. by the
+   * launcher's quality monitor), launch a replacement so the set can refill
+   * toward its target leg count. The budget refund in cfx_del_leg() keeps
+   * this sustainable for long sessions. Mirrors the unlinked recovery logic
+   * in unlinked_circuit_closed(). */
+  if (!full_teardown && !shutting_down &&
+      !have_been_under_memory_pressure() && CIRCUIT_IS_ORIGIN(circ)) {
+    conflux_t *cfx = linked_pool_get(nonce, is_client);
+    if (cfx && CONFLUX_NUM_LEGS(cfx) > 0 && !cfx->in_full_teardown) {
+      conflux_launch_leg(nonce);
+    }
   }
 }
 
