@@ -385,6 +385,7 @@ static const config_var_t option_vars_[] = {
   VAR("ConfluxClientUX",         STRING,   ConfluxClientUX_option,
           "throughput"),
   V(ConfluxNumLegs,              INT,      "0"),
+  V(ConfluxNumSets,              INT,      "0"),
   V(ConnLimit,                   POSINT,     "1000"),
   V(ConnDirectionStatistics,     BOOL,     "0"),
   V(ConstrainedSockets,          BOOL,     "0"),
@@ -3589,6 +3590,10 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
 
   if (options->ConfluxNumLegs < 0 || options->ConfluxNumLegs > 16) {
     REJECT("ConfluxNumLegs must be between 0 (consensus default) and 16");
+  }
+
+  if (options->ConfluxNumSets < 0 || options->ConfluxNumSets > 32) {
+    REJECT("ConfluxNumSets must be between 0 (consensus default) and 32");
   }
 
   if (options_validate_publish_server(old_options, options, msg) < 0)

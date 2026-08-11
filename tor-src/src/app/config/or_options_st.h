@@ -757,7 +757,13 @@ struct or_options_t {
    * consensus default" (cfx_num_legs, usually 2); any positive value overrides
    * it so every set is always kept at exactly this many legs. This is a
    * TorJet extension. */
-  int ConfluxNumLegs;
+   int ConfluxNumLegs;
+
+  /** TorJet extension: target number of conflux sets to keep alive. 0 means
+   * "use the consensus default" (cfx_max_prebuilt_set, usually 3); any positive
+   * value overrides the prebuilt-set target and raises the linked-set cap to at
+   * least this many, so that many sets can coexist. */
+  int ConfluxNumSets;
 
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;
