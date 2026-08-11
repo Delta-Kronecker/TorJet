@@ -19,6 +19,9 @@ data\
   bridges\             obfs4_tested.txt, webtunnel_tested.txt, vanilla_tested.txt, snowflake_tested.txt
   tun2socks.exe        TUN mode: routes system traffic through the tor SOCKS proxy
   wintun.dll           Wintun driver used by tun2socks
+  xray.exe             optional: TLS fragment proxy (see Fragment toggle)
+  xray\config.json     xray config - edit freely, TorJet just runs it as-is
+                       (a default is written only when the file is missing)
   data\                runtime state (cached consensus, keys, tor.log)
 ```
 
@@ -84,6 +87,7 @@ TorJet.exe obfs4 aggressive    start in obfs4 mode + strategy level
 TorJet.exe --strategy ultimate start with the ultimate strategy
 TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
+TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --newcircuit        request a new identity (NEWNYM)
 TorJet.exe --update-bridges    re-download the bridge lists from the
                                   Tor-Bridges-Collector repo and replace them
@@ -92,6 +96,70 @@ TorJet.exe --tun-off           turn TUN mode off (same as pressing T twice)
 TorJet.exe --tun-status        print whether TUN mode is on or off
 TorJet.exe --stop              stop Tor and restore the proxy
 ```
+
+## How traffic flows
+
+TorJet exposes three local entry points, all bound to 127.0.0.1:
+
+| Port | Purpose | Who uses it |
+|------|---------|-------------|
+| 9050 | SOCKS5 proxy | your browser / apps |
+| 8118 | HTTP proxy | Windows system proxy (pressed **P**) |
+| 53530 | DNS | system DNS resolver (TUN mode) |
+
+Point your browser (or any app) at the **SOCKS5 proxy 127.0.0.1:9050**, or press
+**P** to set Windows' system proxy to the HTTP proxy 127.0.0.1:8118. These ports
+belong to **tor itself** — they are the front door. Everything you send there
+enters the Tor circuit.
+
+Port **10808** is *internal*: it is xray's SOCKS listener and you must **not**
+connect your browser to it.
+
+When **Fragment (xray)** is on, tor's own relay connections are routed through
+xray:
+
+```
+your browser
+   │  SOCKS5 127.0.0.1:9050   (tor's SocksPort)
+   ▼
+tor.exe
+   │  tor wants to open TLS to a guard/bridge
+   │  torrc line: Socks5Proxy 127.0.0.1:10808
+   ▼
+xray.exe 127.0.0.1:10808      (internal - NOT for the browser)
+   │  splits the TLS ClientHello into 100-200 byte chunks
+   │  at 10-20 ms intervals ("tlshello" fragmentation)
+   ▼
+real guard/bridge IP over the Tor network
+   ▼
+circuit  guard -> middle -> exit
+   ▼
+destination
+```
+
+So xray sits **between tor and the Tor network**, never between your browser
+and tor. Without `data\xray.exe` the `Socks5Proxy` line is simply not written
+and tor connects directly. With it, the first TLS handshake to your guard/bridge
+no longer reveals Tor's distinctive ClientHello (SNI, length pattern), which is
+how some ISPs detect and block Tor.
+
+### TUN mode traffic
+
+Press **T** and *all* system traffic is captured by a virtual adapter
+(`TorJetTun`, 10.0.0.1/24):
+
+```
+all apps
+   │  default route -> TorJetTun adapter
+   ▼
+tun2socks.exe  (transparent TCP -> SOCKS5)
+   │  SOCKS5 127.0.0.1:9050
+   ▼
+tor.exe -> (xray fragment if enabled) -> Tor network -> exit -> destination
+```
+
+tor's own relay connections are exempted with per-relay /32 host routes on the
+physical interface, so tor's outbound TLS never loops back into the tunnel.
 
 ## Building
 

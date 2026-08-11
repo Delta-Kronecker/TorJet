@@ -69,7 +69,7 @@ if (-not (Test-Path (Join-Path $Release "data\tor.exe"))) { Write-Host "[x] inva
 
 # --- (re)build scratch work dir from the release, keeping cached consensus -----
 if (-not (Test-Path (Join-Path $WorkDir "data\tor.exe"))) {
-    Write-Host "[i] creating scratch bench folder: $WorkDir"
+    Write-Host "creating scratch bench folder: $WorkDir"
     New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
     Copy-Item (Join-Path $Release "*") -Destination $WorkDir -Recurse -Force
     Copy-Item (Join-Path $Release "data\*") -Destination (Join-Path $WorkDir "data") -Recurse -Force

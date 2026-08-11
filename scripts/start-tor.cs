@@ -266,11 +266,11 @@ namespace StartTor
             }
             else
             {
-                if (!IsAdmin()) Console.WriteLine("  [i] TUN mode needs Administrator - accept the UAC prompt.");
-                Console.WriteLine("  [i] Turning TUN ON (all traffic via Tor)...");
+                if (!IsAdmin()) Console.WriteLine("  TUN mode needs Administrator - accept the UAC prompt.");
+                Console.WriteLine("  Turning TUN ON (all traffic via Tor)...");
                 if (!SpawnElevated("on", false))
                 {
-                    Console.WriteLine("  [i] TUN enable cancelled.");
+                    Console.WriteLine("  TUN enable cancelled.");
                     return;
                 }
                 string last = "";
@@ -280,21 +280,21 @@ namespace StartTor
                     last = ReadTunResult();
                     if (last.StartsWith("on:") || last.StartsWith("error:")) break;
                 }
-                Console.WriteLine("  [i] " + last);
+                Console.WriteLine("  " + last);
             }
         }
 
         private static void TurnTunOff()
         {
-            Console.WriteLine("  [i] Turning TUN OFF...");
+            Console.WriteLine("  Turning TUN OFF...");
             try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
             for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
-            if (!TunActive()) { Console.WriteLine("  [i] TUN OFF"); return; }
-            Console.WriteLine("  [i] keeper did not stop; forcing teardown (UAC)...");
+            if (!TunActive()) { Console.WriteLine("  TUN OFF"); return; }
+            Console.WriteLine("  keeper did not stop; forcing teardown (UAC)...");
             if (SpawnElevated("off", true))
-                Console.WriteLine("  [i] " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
+                Console.WriteLine("  " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
             else
-                Console.WriteLine("  [i] teardown cancelled - TUN still ON");
+                Console.WriteLine("  teardown cancelled - TUN still ON");
         }
 
         private static void Cleanup()
@@ -434,7 +434,7 @@ namespace StartTor
                     return File.ReadAllText(FragmentFile).Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
             }
             catch { }
-            return false;
+            return true;
         }
 
         private static void WriteFragmentFile(bool on)
@@ -458,11 +458,11 @@ namespace StartTor
         }
 
         // Writes data\xray\config.json: a local SOCKS inbound whose freedom
-        // outbound splits the TLS ClientHello of every outbound connection.
-        // tor sends all of its guard/bridge TLS through this SOCKS proxy
-        // (Socks5Proxy in torrc), so the fragmented hello hides the Tor
-        // handshake from SNI/length based DPI. length/interval use the
-        // "from-to" string form required by xray-core v26+.
+        // outbound applies TCP fragmentation to every connection. tor sends all
+        // of its guard/bridge TLS through this SOCKS proxy (Socks5Proxy in
+        // torrc), so the split ClientHello hides the Tor handshake from
+        // packet-length/SNI based DPI. Two stacked fragment layers: the first
+        // splits only the tlshello, the second re-splits the remaining stream.
         private static bool WriteXrayConfig()
         {
             try
@@ -483,11 +483,26 @@ namespace StartTor
                     "    {\n" +
                     "      \"protocol\": \"freedom\",\n" +
                     "      \"settings\": {\n" +
-                    "        \"fragment\": {\n" +
-                    "          \"packets\": \"tlshello\",\n" +
-                    "          \"length\": \"100-200\",\n" +
-                    "          \"interval\": \"10-20\"\n" +
-                    "        }\n" +
+                    "        \"tcp\": [\n" +
+                    "          {\n" +
+                    "            \"type\": \"fragment\",\n" +
+                    "            \"settings\": {\n" +
+                    "              \"packets\": \"tlshello\",\n" +
+                    "              \"lengths\": [\"5\", \"94\", \"1\"],\n" +
+                    "              \"delays\": [\"0\"],\n" +
+                    "              \"maxSplit\": \"0\"\n" +
+                    "            }\n" +
+                    "          },\n" +
+                    "          {\n" +
+                    "            \"type\": \"fragment\",\n" +
+                    "            \"settings\": {\n" +
+                    "              \"packets\": \"1-1\",\n" +
+                    "              \"lengths\": [\"109\", \"1\"],\n" +
+                    "              \"delays\": [\"1\"],\n" +
+                    "              \"maxSplit\": \"355\"\n" +
+                    "            }\n" +
+                    "          }\n" +
+                    "        ]\n" +
                     "      },\n" +
                     "      \"streamSettings\": { \"sockopt\": { \"tcpNoDelay\": true } }\n" +
                     "    }\n" +
@@ -513,7 +528,11 @@ namespace StartTor
                                       " - fragment disabled for this run.");
                     return false;
                 }
-                if (!WriteXrayConfig()) return false;
+                if (!File.Exists(XrayConfig))
+                {
+                    if (!WriteXrayConfig()) return false;
+                    Console.WriteLine("no data\\xray\\config.json found - wrote a default one.");
+                }
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = XrayExe,
@@ -524,8 +543,9 @@ namespace StartTor
                 };
                 Process p = Process.Start(psi);
                 xrayProc = p;
-                Console.WriteLine("[i] xray (fragment) started (PID " + p.Id +
-                                  ") on 127.0.0.1:" + FragmentSocksPort);
+                Console.WriteLine("xray (fragment) started (PID " + p.Id +
+                                  ") on 127.0.0.1:" + FragmentSocksPort +
+                                  " using xray\\config.json");
                 return true;
             }
             catch (Exception ex)
@@ -633,9 +653,9 @@ namespace StartTor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("  =============");
+                Console.WriteLine("  =================");
                 Console.WriteLine("     TorJet v" + TorJetVersion.App);
-                Console.WriteLine("  =============");
+                Console.WriteLine("  =================");
                 Console.WriteLine("    0) Start Tor");
                 Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
@@ -743,7 +763,7 @@ namespace StartTor
             catch { }
             try { WriteStrategyFile(strategy); }
             catch { }
-            Console.WriteLine("[i] torrc written (" + ModeNames[mode] +
+            Console.WriteLine("torrc written (" + ModeNames[mode] +
                               ", strategy " + StrategyNames[strategy] +
                               (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") +
                               (fragment ? ", fragment on" : "") + ")");
@@ -798,7 +818,7 @@ namespace StartTor
                     }
                     File.Copy(tmp, dest, true);
                     try { File.Delete(tmp); } catch { }
-                    Console.WriteLine("[i] " + f + ": " + n + " bridges - updated.");
+                    Console.WriteLine("" + f + ": " + n + " bridges - updated.");
                     ok++;
                 }
                 catch (Exception ex)
@@ -1007,7 +1027,7 @@ namespace StartTor
             Console.WriteLine("Done: " + total.ToString("#,0") + " bytes in " +
                               sw.Elapsed.TotalSeconds.ToString("0.0") + " s");
             Console.WriteLine("  aggregate average : " + FormatSpeed(avg));
-            if (errors.Count > 0) Console.WriteLine("  [i] " + errors.Count + " of " + streams + " streams failed");
+            if (errors.Count > 0) Console.WriteLine("  " + errors.Count + " of " + streams + " streams failed");
         }
 
         private static void SpeedTestMenu()
@@ -1196,9 +1216,9 @@ namespace StartTor
                 idx++;
             }
             if (sets.Count == 0)
-                Console.WriteLine("  [i] NO conflux circuits - conflux is NOT engaging (check consensus support).");
+                Console.WriteLine("  NO conflux circuits - conflux is NOT engaging (check consensus support).");
             else
-                Console.WriteLine("  [i] conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
+                Console.WriteLine("  conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
             return sets.Count > 0 ? 0 : 1;
         }
 
@@ -1339,7 +1359,7 @@ namespace StartTor
                 return null;
             }
             torProc = proc;
-            Console.WriteLine("[i] tor started (PID " + proc.Id + "), bootstrapping...");
+            Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
 
             DateTime deadline = DateTime.UtcNow.AddMinutes(10);
             int lastPct = -1;
@@ -1416,6 +1436,7 @@ namespace StartTor
         {
             foreach (string u in BenchEndpoints)
             {
+                Stopwatch sw = Stopwatch.StartNew();
                 try
                 {
                     HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
@@ -1431,6 +1452,7 @@ namespace StartTor
                         long got = 0;
                         while (got < (1 << 20))
                         {
+                            if (sw.ElapsedMilliseconds > 5000) break;
                             int n = s.Read(buf, 0, buf.Length);
                             if (n <= 0) break;
                             got += n;
@@ -1496,14 +1518,14 @@ namespace StartTor
                         if (s.Read(buf, 0, buf.Length) > 0)
                         {
                             benchUrl = u;
-                            Console.WriteLine("[i] speed endpoint OK: " + u);
+                            Console.WriteLine("speed endpoint OK: " + u);
                             return;
                         }
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine("[i] endpoint failed (" + u + "): " + ex.Message);
+                    Console.WriteLine("endpoint failed (" + u + "): " + ex.Message);
                 }
             }
             benchUrl = null;
@@ -1611,7 +1633,7 @@ namespace StartTor
             }
             catch { }
 
-            Console.WriteLine("[i] bootstrap OK. Warming up 30s (building conflux legs)...");
+            Console.WriteLine("bootstrap OK. Warming up 30s (building conflux legs)...");
             Thread.Sleep(30000);
             ProbeBenchUrl();
             if (benchUrl == null)
@@ -1652,11 +1674,11 @@ namespace StartTor
             }
             try { File.AppendAllText(csvPath, rows.ToString(), new UTF8Encoding(false)); }
             catch (Exception ex) { Console.WriteLine("[x] failed to write CSV: " + ex.Message); }
-            Console.WriteLine("[i] CSV appended to " + csvPath);
+            Console.WriteLine("CSV appended to " + csvPath);
 
             int s2, l2;
             string e2 = ConfluxInfo(out s2, out l2);
-            Console.WriteLine("[i] conflux at end: " + s2 + " set(s), " + l2 + " leg(s), exit " + e2);
+            Console.WriteLine("conflux at end: " + s2 + " set(s), " + l2 + " leg(s), exit " + e2);
             Cleanup();
         }
 
@@ -1740,11 +1762,11 @@ namespace StartTor
             bool prev = running != null || PreviousRunActive();
             if (!prev && !TunActive()) return;
 
-            Console.WriteLine("  [i] A previous TorJet run is still active - stopping it.");
+            Console.WriteLine("  A previous TorJet run is still active - stopping it.");
 
             if (TunActive())
             {
-                Console.WriteLine("  [i] Stopping previous TUN...");
+                Console.WriteLine("  Stopping previous TUN...");
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
                 for (int i = 0; i < 16 && TunActive(); i++) Thread.Sleep(500);
                 if (TunActive())
@@ -1778,7 +1800,7 @@ namespace StartTor
                 {
                     try
                     {
-                        Console.WriteLine("  [i] Stopping previous tor (PID " + p.Id + ")...");
+                        Console.WriteLine("  Stopping previous tor (PID " + p.Id + ")...");
                         p.Kill();
                         p.WaitForExit(5000);
                     }
@@ -1789,7 +1811,7 @@ namespace StartTor
 
             if (FindXray() != null)
             {
-                Console.WriteLine("  [i] Stopping previous xray (fragment)...");
+                Console.WriteLine("  Stopping previous xray (fragment)...");
                 StopXray();
             }
 
@@ -1812,7 +1834,7 @@ namespace StartTor
             if (genOnly)
             {
                 if (!WriteTorrc(mode, strategy, fragment)) { WaitForKey(); return 1; }
-                Console.WriteLine("[i] torrc written only (test mode, tor not started): " + Torrc);
+                Console.WriteLine("torrc written only (test mode, tor not started): " + Torrc);
                 return 0;
             }
 
@@ -1824,10 +1846,10 @@ namespace StartTor
                 if (aborted)
                 {
                     Console.WriteLine();
-                    Console.WriteLine("  [i] Stopping Tor...");
+                    Console.WriteLine("  Stopping Tor...");
                     Cleanup();
                     cleaned = false;
-                    Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                    Console.WriteLine("  Tor stopped; system proxy restored.");
                     Console.WriteLine();
                     return 2;
                 }
@@ -1858,11 +1880,11 @@ namespace StartTor
 
             if (!VerifyTunnelReady())
             {
-                Console.WriteLine("  [i] Stopping Tor...");
+                Console.WriteLine("  Stopping Tor...");
                 Cleanup();
                 cleaned = false;
                 torProc = null;
-                Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                Console.WriteLine("  Tor stopped; system proxy restored.");
                 Console.WriteLine();
                 return 2;
             }
@@ -1872,12 +1894,12 @@ namespace StartTor
             {
                 proxyOn = true;
                 SetSystemProxy(true);
-                Console.WriteLine("  [i] System proxy ON  (127.0.0.1:8118)");
+                Console.WriteLine("  System proxy ON  (127.0.0.1:8118)");
             }
             else if (autoMode == "tun")
             {
                 if (TunActive())
-                    Console.WriteLine("  [i] TUN already ON");
+                    Console.WriteLine("  TUN already ON");
                 else
                     ToggleTun();
             }
@@ -1908,7 +1930,7 @@ namespace StartTor
                         {
                             proxyOn = !proxyOn;
                             SetSystemProxy(proxyOn);
-                            Console.WriteLine("  [i] System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                            Console.WriteLine("  System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
                         }
                         else if (ki.Key == ConsoleKey.S)
                         {
@@ -1921,11 +1943,11 @@ namespace StartTor
                         else if (ki.Key == ConsoleKey.C)
                         {
                             Console.WriteLine();
-                            Console.WriteLine("  [i] Stopping Tor...");
+                            Console.WriteLine("  Stopping Tor...");
                             Cleanup();
                             cleaned = false;
                             torProc = null;
-                            Console.WriteLine("  [i] Tor stopped; system proxy restored.");
+                            Console.WriteLine("  Tor stopped; system proxy restored.");
                             Console.WriteLine();
                             return 2;
                         }
@@ -1990,7 +2012,7 @@ namespace StartTor
                         {
                             updatePromptShown = true;
                             Console.WriteLine();
-                            Console.WriteLine("  [i] New TorJet version available: v" + latest +
+                            Console.WriteLine("  New TorJet version available: v" + latest +
                                               " (you have v" + TorJetVersion.App + ")");
                             Console.WriteLine("      Download: https://github.com/Delta-Kronecker/TorJet/releases/latest");
                             Console.WriteLine();
@@ -2037,7 +2059,7 @@ namespace StartTor
                 bool aborted = false;
                 Process p = StartTorAndWait(m, ResolveStrategy(), false, out err, out aborted);
                 if (p == null) { if (aborted) { Cleanup(); return 1; } Console.WriteLine("[x] " + err); Cleanup(); return 1; }
-                Console.WriteLine("[i] bootstrap OK. Waiting 30s for conflux sets to build...");
+                Console.WriteLine("bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
                 int code = ConfluxStatus();
                 Cleanup();
