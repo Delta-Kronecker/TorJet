@@ -1606,10 +1606,10 @@ namespace StartTor
                     Console.WriteLine("circuit monitor: conflux legs:");
                     foreach (string[] leg in legList)
                     {
-                        string reason = "";
+                        string reason;
                         toRemoveReasons.TryGetValue(leg[1], out reason);
-                        string mark = reason.Length > 0
-                            ? "   <-- removing (" + reason + ")" : "";
+                        string mark = string.IsNullOrEmpty(reason)
+                            ? "" : "   <-- removing (" + reason + ")";
                         if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
                         {
                             int rttUs;
