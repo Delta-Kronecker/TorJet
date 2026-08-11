@@ -775,18 +775,20 @@ namespace StartTor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("  ====================");
-                Console.WriteLine("     TorJet v" + TorJetVersion.App);
-                Console.WriteLine("  ====================");
-                Console.WriteLine("    0) Start Tor");
-                Console.WriteLine("    1) Connection mode   : " + ModeNames[mode]);
-                Console.WriteLine("    2) Strategy level    : " + StrategyNames[strategy]);
-                Console.WriteLine("    3) Fragment (xray)   : " + (fragment ? "on" : "off"));
-                Console.WriteLine("    4) Conflux sets      : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
-                Console.WriteLine("    5) Conflux legs      : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
-                Console.WriteLine("    6) Exit");
-                Console.WriteLine("    C) Stop Tor and return to menu");
-                Console.Write("  Choose 0-6, C (Enter = 0): ");
+                Console.WriteLine("  =====================================");
+                Console.WriteLine("         TorJet v" + TorJetVersion.App);
+                Console.WriteLine("  =====================================");
+                Console.WriteLine();
+                Console.WriteLine("    1)  Start Tor");
+                Console.WriteLine("    2)  Connection mode   : " + ModeNames[mode]);
+                Console.WriteLine("    3)  Strategy level    : " + StrategyNames[strategy]);
+                Console.WriteLine("    4)  Fragment (xray)   : " + (fragment ? "on" : "off"));
+                Console.WriteLine("    5)  Conflux sets      : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
+                Console.WriteLine("    6)  Conflux legs      : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
+                Console.WriteLine("    7)  View log");
+                Console.WriteLine("    8)  Quit");
+                Console.WriteLine();
+                Console.Write("  Enter 1-8 (Enter = Start): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -794,30 +796,27 @@ namespace StartTor
                 int n;
                 if (int.TryParse(input.Trim(), out n))
                 {
-                    if (n == 0) return;
-                    if (n == 1)
+                    if (n == 1) return;
+                    if (n == 2)
                     {
                         int m = ShowMenu();
                         if (m >= 0) { mode = m; WriteModeFile(mode); }
                     }
-                    else if (n == 2)
+                    else if (n == 3)
                     {
                         int s = ShowStrategyMenu();
                         if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
                     }
-                    else if (n == 3)
+                    else if (n == 4)
                     {
                         fragment = !fragment;
                         WriteFragmentFile(fragment);
                     }
-                    else if (n == 4) { PromptConfluxSets(); }
-                    else if (n == 5) { PromptConfluxLegs(); }
-                    else if (n == 6) { mode = -1; return; }
-                    else Console.WriteLine("    Invalid choice, try again.");
-                }
-                else if (input.Trim().Equals("c", StringComparison.OrdinalIgnoreCase))
-                {
-                    StopTor();
+                    else if (n == 5) { PromptConfluxSets(); }
+                    else if (n == 6) { PromptConfluxLegs(); }
+                    else if (n == 7) { ViewLog(); }
+                    else if (n == 8) { mode = -1; return; }
+                    else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else
                 {
@@ -827,7 +826,7 @@ namespace StartTor
                     {
                         int s = ParseStrategy(input.Trim());
                         if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
-                        else Console.WriteLine("    Invalid choice, try again.");
+                        else Console.WriteLine("  Invalid choice, try again.");
                     }
                 }
             }
@@ -1420,7 +1419,7 @@ namespace StartTor
             return status == 250 ? 0 : 1;
         }
 
-        private static int ConfluxStatus()
+        private static int ConfluxStatus(bool detailed)
         {
             var legList = ConfluxQuery();
             if (legList == null)
@@ -1428,9 +1427,9 @@ namespace StartTor
                 Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
                 return 1;
             }
-            bool debug = Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
+            bool debug = detailed || Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
             Console.WriteLine();
-            Console.WriteLine("Conflux status:");
+            Console.WriteLine(Stamp() + "conflux status:");
             if (legList.Count == 0)
             {
                 Console.WriteLine("  NO conflux circuits - conflux is NOT engaging (check consensus support).");
@@ -1443,8 +1442,11 @@ namespace StartTor
                 sets[leg[0]].Add(leg);
             }
             int legs = legList.Count;
-            Console.WriteLine("  conflux sets      : " + sets.Count);
-            Console.WriteLine("  conflux legs      : " + legs);
+            int linkedTotal = 0;
+            foreach (string[] leg in legList)
+                if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) linkedTotal++;
+            Console.WriteLine("  sets: " + sets.Count + "   legs: " + legs +
+                              " (" + linkedTotal + " linked)");
             int idx = 1;
             foreach (var kv in sets)
             {
@@ -1454,7 +1456,7 @@ namespace StartTor
                 foreach (string[] leg in kv.Value)
                 {
                     if (leg[2] != "?") exit = leg[2];
-                    if (leg[4] == "LINKED")
+                    if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
                     {
                         linked++;
                         int rttUs;
@@ -1463,8 +1465,8 @@ namespace StartTor
                     }
                 }
                 string rtt = bestUs == int.MaxValue ? "?" : (bestUs / 1000) + " ms";
-                Console.WriteLine("    set " + idx + ": " + kv.Value.Count + " leg(s) (" + linked +
-                                  " linked), exit " + exit + ", best RTT " + rtt);
+                Console.WriteLine("  set " + idx + ": " + kv.Value.Count + " legs (" + linked +
+                                  " linked)  best " + rtt + "  exit " + exit);
                 if (debug)
                 {
                     foreach (string[] leg in kv.Value)
@@ -1472,13 +1474,13 @@ namespace StartTor
                         int rttUs;
                         string r = int.TryParse(leg[5], out rttUs) && rttUs > 0
                                        ? (rttUs / 1000) + " ms" : "?";
-                        Console.WriteLine("      [leg] circ " + leg[1] + " " + leg[4] + " RTT " + r);
+                        Console.WriteLine("      [leg] circ " + leg[1] + "  " + leg[4] +
+                                          "  RTT " + r);
                     }
                     Console.WriteLine("      [bw] exit bandwidth: " + ExitBandwidth(exit) + " bytes/s");
                 }
                 idx++;
             }
-            Console.WriteLine("  conflux is ACTIVE (" + sets.Count + " set(s), " + legs + " leg(s)).");
             return 0;
         }
 
@@ -1555,7 +1557,7 @@ namespace StartTor
                             lock (consoleLock)
                             {
                                 ClearProgressLine();
-                                Console.WriteLine("circuit monitor: added a leg to set " +
+                                Console.WriteLine(Stamp() + "monitor: added a leg to set " +
                                                   kv.Key + " (" + kv.Value + "/" +
                                                   confluxLegs + " legs)");
                             }
@@ -1680,29 +1682,14 @@ namespace StartTor
                 lock (consoleLock)
                 {
                     ClearProgressLine();
-                    Console.WriteLine("circuit monitor: conflux legs:");
-                    foreach (string[] leg in legList)
-                    {
-                        string reason;
-                        toRemoveReasons.TryGetValue(leg[1], out reason);
-                        string mark = string.IsNullOrEmpty(reason)
-                            ? "" : "   <-- removing (" + reason + ")";
-                        if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
-                        {
-                            int rttUs;
-                            string r = int.TryParse(leg[5], out rttUs) && rttUs > 0
-                                           ? (rttUs / 1000) + " ms" : "?";
-                            Console.WriteLine("    leg " + leg[1] + "  RTT " + r + mark);
-                        }
-                        else
-                        {
-                            Console.WriteLine("    leg " + leg[1] + "  UNLINKED" + mark);
-                        }
-                    }
                     int closed = 0;
+                    int weakN = 0, stuckN = 0;
                     string closedIds = "";
                     foreach (string[] leg in toRemove)
                     {
+                        string reason;
+                        toRemoveReasons.TryGetValue(leg[0], out reason);
+                        if (reason == "weak") weakN++; else stuckN++;
                         if (ControlSend("CLOSECIRCUIT " + leg[0]))
                         {
                             closed++;
@@ -1714,9 +1701,12 @@ namespace StartTor
                     if (closed > 0)
                     {
                         lastClose = DateTime.UtcNow;
-                        Console.WriteLine("circuit monitor: closed " + closed + " weak leg" +
-                                          (closed > 1 ? "s" : "") + " (" + closedIds +
-                                          ") - replacement is being built.");
+                        string what = "";
+                        if (weakN > 0) what = weakN + " weak";
+                        if (stuckN > 0)
+                            what = (what.Length > 0 ? what + ", " : "") + stuckN + " stuck-unlinked";
+                        Console.WriteLine(Stamp() + "monitor: closed " + what +
+                                          " leg(s) (" + closedIds + ") - replacement building");
                     }
                 }
             }
@@ -1815,6 +1805,48 @@ namespace StartTor
                     Console.Write("\r" + new string(' ', progressLineLen) + "\r");
                     progressLineLen = 0;
                 }
+            }
+        }
+
+        // Local clock stamp used on launcher log lines, e.g. "[12:34:56] ".
+        private static string Stamp()
+        {
+            return "[" + DateTime.Now.ToString("HH:mm:ss") + "] ";
+        }
+
+        // Shows the tail of tor.log. tor writes every line with its own exact
+        // timestamp (e.g. "Aug 12 12:34:56.789 [notice] ..."), which is kept
+        // as-is; lines without one get a local clock stamp added.
+        private static void ViewLog()
+        {
+            const int maxLines = 40;
+            try
+            {
+                if (!File.Exists(TorLog))
+                {
+                    Console.WriteLine("[!] no log yet at " + TorLog);
+                    return;
+                }
+                string[] lines = File.ReadAllLines(TorLog);
+                int start = Math.Max(0, lines.Length - maxLines);
+                lock (consoleLock)
+                {
+                    ClearProgressLine();
+                    Console.WriteLine(Stamp() + "tor log - last " +
+                                      (lines.Length - start) + " of " +
+                                      lines.Length + " line(s):");
+                    for (int i = start; i < lines.Length; i++)
+                    {
+                        string l = lines[i];
+                        if (l.Length == 0) continue;
+                        bool hasTs = Regex.IsMatch(l, @"^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}");
+                        Console.WriteLine("  " + (hasTs ? l : Stamp() + l));
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[!] cannot read log: " + ex.Message);
             }
         }
 
@@ -2519,12 +2551,10 @@ namespace StartTor
                 else
                     ToggleTun();
             }
-            Console.WriteLine("  P  :  toggle the Windows system proxy on/off");
-            Console.WriteLine("  T  :  toggle TUN mode (all traffic through Tor)");
-            Console.WriteLine("  S  :  run a speed test through the Tor proxy");
-            Console.WriteLine("  A  :  add a leg to a conflux set");
-            Console.WriteLine("  L  :  show conflux set status");
-            Console.WriteLine("  C  :  stop Tor and return to the menu");
+            Console.WriteLine("  P   toggle system proxy      D   conflux details");
+            Console.WriteLine("  T   toggle TUN mode          L   conflux summary");
+            Console.WriteLine("  S   speed test                V   view tor log");
+            Console.WriteLine("  A   add a leg to a set        C   stop Tor, back to menu");
             Console.WriteLine();
             while (true)
             {
@@ -2560,7 +2590,15 @@ namespace StartTor
                         }
                         else if (ki.Key == ConsoleKey.L)
                         {
-                            lock (consoleLock) ConfluxStatus();
+                            lock (consoleLock) ConfluxStatus(false);
+                        }
+                        else if (ki.Key == ConsoleKey.D)
+                        {
+                            lock (consoleLock) ConfluxStatus(true);
+                        }
+                        else if (ki.Key == ConsoleKey.V)
+                        {
+                            lock (consoleLock) ViewLog();
                         }
                         else if (ki.Key == ConsoleKey.T)
                         {
@@ -2673,7 +2711,7 @@ namespace StartTor
 
             if (args.Length > 0 && args[0] == "--conflux-status")
             {
-                return ConfluxStatus();
+                return ConfluxStatus(true);
             }
             if (args.Length > 0 && args[0] == "--conflux-add")
             {
@@ -2691,7 +2729,7 @@ namespace StartTor
                 if (p == null) { if (aborted) { Cleanup(); return 1; } Console.WriteLine("[x] " + err); Cleanup(); return 1; }
                 Console.WriteLine("bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
-                int code = ConfluxStatus();
+                int code = ConfluxStatus(false);
                 Cleanup();
                 return code;
             }
