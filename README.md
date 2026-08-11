@@ -169,15 +169,30 @@ physical interface, so tor's outbound TLS never loops back into the tunnel.
 ### Circuit health monitor
 
 While Tor is up, TorJet watches the conflux legs via the control port. Every
-20 s it asks tor for `circuit-status`, prints each leg (`leg <id>  RTT <ms>`)
-and closes the weakest half (rounded up) of the legs whose RTT is above
-1500 ms - with 4 slow legs the 2 weakest are closed in one pass
-(`CLOSECIRCUIT`). Tor builds replacement legs and conflux migrates streams
-onto them, so slow, high-latency circuits get replaced automatically instead of
-dragging the connection down. A 60 s cooldown between closes keeps the circuit
-set stable (relaxed during tunnel warmup). Disable it with
-`--no-circuit-watch`; tune it with `--watch-rtt <ms>`,
-`--watch-interval <seconds>` and `--watch-cooldown <seconds>`.
+20 s it asks tor for the conflux set list (`CONFLUX QUERY`) and prunes low
+quality legs so tor rebuilds them with fresh circuits:
+
+- a linked leg is **weak** when its RTT is at/above an absolute threshold
+  (`--watch-rtt`, default 1000 ms) or it is clearly slower than the best leg of
+  its own set (`>= --watch-rtt-floor` ms and `>= --watch-factor` times the set
+  best, defaults 400 ms and 2.0x);
+- a leg must stay weak for `--watch-strikes` consecutive passes (default 2)
+  before it is closed, so a single RTT spike never prunes a healthy leg;
+- the best (lowest RTT) leg of each set is never closed, and a set is never
+  pruned below `--watch-min-legs` (default 2);
+- legs stuck **unlinked** for `--watch-unlinked-strikes` passes (default 4)
+  AND older than `--watch-unlinked-grace` seconds (default 120) are closed as
+  dead weight, but never during tunnel warmup when everything is still
+  building;
+- at most `--watch-max-per-pass` legs (default 6) are closed per pass so
+  replacement builds don't pile up.
+
+tor launches a replacement leg for every closed leg (sets below the configured
+`ConfluxNumLegs` target are also topped up with `CONFLUX ADD`), and conflux
+migrates streams onto the fresh circuits. A 60 s cooldown between closes keeps
+the circuit set stable (relaxed during tunnel warmup). Disable it with
+`--no-circuit-watch`; tune it with `--watch-rtt <ms>`, `--watch-interval
+<seconds>`, `--watch-cooldown <seconds>` and the other `--watch-*` flags.
 
 ### Tunnel warmup
 
