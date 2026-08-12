@@ -100,6 +100,7 @@ namespace StartTor
             }
         };
         private static readonly string TorLog = Path.Combine(DataDir, "data", "tor.log");
+        private static readonly string JetLog = Path.Combine(DataDir, "data", "jet.log");
         private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
         private static readonly string LockFile = Path.Combine(DataDir, "data", "lock");
         private static readonly string ProxyKey =
@@ -775,20 +776,17 @@ namespace StartTor
             while (true)
             {
                 Console.WriteLine();
-                Console.WriteLine("  =====================================");
+                Console.WriteLine("  ==============================");
                 Console.WriteLine("         TorJet v" + TorJetVersion.App);
-                Console.WriteLine("  =====================================");
+                Console.WriteLine("  ==============================");
                 Console.WriteLine();
                 Console.WriteLine("    1)  Start Tor");
                 Console.WriteLine("    2)  Connection mode   : " + ModeNames[mode]);
-                Console.WriteLine("    3)  Strategy level    : " + StrategyNames[strategy]);
-                Console.WriteLine("    4)  Fragment (xray)   : " + (fragment ? "on" : "off"));
-                Console.WriteLine("    5)  Conflux sets      : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
-                Console.WriteLine("    6)  Conflux legs      : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
-                Console.WriteLine("    7)  View log");
-                Console.WriteLine("    8)  Quit");
+                Console.WriteLine("    3)  Settings");
+                Console.WriteLine("    4)  View log");
+                Console.WriteLine("    5)  Quit");
                 Console.WriteLine();
-                Console.Write("  Enter 1-8 (Enter = Start): ");
+                Console.Write("  Enter 1-5 (Enter = Start): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -804,18 +802,10 @@ namespace StartTor
                     }
                     else if (n == 3)
                     {
-                        int s = ShowStrategyMenu();
-                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                        ShowSettingsMenu(ref strategy, ref fragment);
                     }
-                    else if (n == 4)
-                    {
-                        fragment = !fragment;
-                        WriteFragmentFile(fragment);
-                    }
-                    else if (n == 5) { PromptConfluxSets(); }
-                    else if (n == 6) { PromptConfluxLegs(); }
-                    else if (n == 7) { ViewLog(); }
-                    else if (n == 8) { mode = -1; return; }
+                    else if (n == 4) { ViewLog(); }
+                    else if (n == 5) { mode = -1; return; }
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else
@@ -829,6 +819,48 @@ namespace StartTor
                         else Console.WriteLine("  Invalid choice, try again.");
                     }
                 }
+            }
+        }
+
+        // Settings submenu: strategy, fragment, conflux sets and conflux legs.
+        private static void ShowSettingsMenu(ref int strategy, ref bool fragment)
+        {
+            while (true)
+            {
+                Console.WriteLine();
+                Console.WriteLine("     Settings");
+                Console.WriteLine("     --------");
+                Console.WriteLine();
+                Console.WriteLine("       1)  Strategy level    : " + StrategyNames[strategy]);
+                Console.WriteLine("       2)  Fragment (xray)   : " + (fragment ? "on" : "off"));
+                Console.WriteLine("       3)  Conflux sets      : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
+                Console.WriteLine("       4)  Conflux legs      : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
+                Console.WriteLine("       5)  Back");
+                Console.WriteLine();
+                Console.Write("  Enter 1-5 (Enter = Back): ");
+                string input;
+                try { input = Console.ReadLine(); }
+                catch { return; }
+                if (string.IsNullOrWhiteSpace(input)) return;
+                int n;
+                if (int.TryParse(input.Trim(), out n))
+                {
+                    if (n == 1)
+                    {
+                        int s = ShowStrategyMenu();
+                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                    }
+                    else if (n == 2)
+                    {
+                        fragment = !fragment;
+                        WriteFragmentFile(fragment);
+                    }
+                    else if (n == 3) { PromptConfluxSets(); }
+                    else if (n == 4) { PromptConfluxLegs(); }
+                    else if (n == 5) return;
+                    else Console.WriteLine("  Invalid choice, try again.");
+                }
+                else Console.WriteLine("  Invalid choice, try again.");
             }
         }
 
@@ -908,6 +940,10 @@ namespace StartTor
                               (fragment ? ", fragment on" : "") +
                               (confluxSets > 0 ? ", " + confluxSets + " sets" : "") +
                               (confluxLegs > 0 ? ", " + confluxLegs + " legs/set" : "") + ")");
+            Log("torrc written (" + ModeNames[mode] + ", strategy " +
+                StrategyNames[strategy] + ", " + bridgeCount + " bridges, fragment " +
+                (fragment ? "on" : "off") + ", " + confluxSets + " sets, " +
+                confluxLegs + " legs/set)");
             return true;
         }
 
@@ -1481,6 +1517,8 @@ namespace StartTor
                 }
                 idx++;
             }
+            Log("conflux status: " + sets.Count + " set(s), " + legs +
+                " leg(s), " + linkedTotal + " linked");
             return 0;
         }
 
@@ -1554,13 +1592,9 @@ namespace StartTor
                         if (ControlStatus("CONFLUX ADD " + kv.Key) == 250)
                         {
                             addedThisPass++;
-                            lock (consoleLock)
-                            {
-                                ClearProgressLine();
-                                Console.WriteLine(Stamp() + "monitor: added a leg to set " +
-                                                  kv.Key + " (" + kv.Value + "/" +
-                                                  confluxLegs + " legs)");
-                            }
+                            ClearProgressLine();
+                            Log("monitor: added a leg to set " + kv.Key + " (" +
+                                kv.Value + "/" + confluxLegs + " legs)");
                         }
                     }
                 }
@@ -1679,35 +1713,32 @@ namespace StartTor
                 }
                 if (toRemove.Count == 0) continue;
 
-                lock (consoleLock)
+                ClearProgressLine();
+                int closed = 0;
+                int weakN = 0, stuckN = 0;
+                string closedIds = "";
+                foreach (string[] leg in toRemove)
                 {
-                    ClearProgressLine();
-                    int closed = 0;
-                    int weakN = 0, stuckN = 0;
-                    string closedIds = "";
-                    foreach (string[] leg in toRemove)
+                    string reason;
+                    toRemoveReasons.TryGetValue(leg[0], out reason);
+                    if (reason == "weak") weakN++; else stuckN++;
+                    if (ControlSend("CLOSECIRCUIT " + leg[0]))
                     {
-                        string reason;
-                        toRemoveReasons.TryGetValue(leg[0], out reason);
-                        if (reason == "weak") weakN++; else stuckN++;
-                        if (ControlSend("CLOSECIRCUIT " + leg[0]))
-                        {
-                            closed++;
-                            weakStrikes.Remove(leg[0]);
-                            if (closedIds.Length > 0) closedIds += ", ";
-                            closedIds += leg[0];
-                        }
+                        closed++;
+                        weakStrikes.Remove(leg[0]);
+                        if (closedIds.Length > 0) closedIds += ", ";
+                        closedIds += leg[0];
                     }
-                    if (closed > 0)
-                    {
-                        lastClose = DateTime.UtcNow;
-                        string what = "";
-                        if (weakN > 0) what = weakN + " weak";
-                        if (stuckN > 0)
-                            what = (what.Length > 0 ? what + ", " : "") + stuckN + " stuck-unlinked";
-                        Console.WriteLine(Stamp() + "monitor: closed " + what +
-                                          " leg(s) (" + closedIds + ") - replacement building");
-                    }
+                }
+                if (closed > 0)
+                {
+                    lastClose = DateTime.UtcNow;
+                    string what = "";
+                    if (weakN > 0) what = weakN + " weak";
+                    if (stuckN > 0)
+                        what = (what.Length > 0 ? what + ", " : "") + stuckN + " stuck-unlinked";
+                    Log("monitor: closed " + what + " leg(s) (" + closedIds +
+                        ") - replacement building");
                 }
             }
         }
@@ -1814,39 +1845,65 @@ namespace StartTor
             return "[" + DateTime.Now.ToString("HH:mm:ss") + "] ";
         }
 
+        // Appends a timestamped line to the launcher log (data\jet.log). All the
+        // operational detail (monitor actions, warmup, status snapshots) goes here
+        // so the live console stays clean. Logging never blocks or fails the app.
+        private static void Log(string msg)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(JetLog, FileMode.Append, FileAccess.Write,
+                                                      FileShare.ReadWrite))
+                using (StreamWriter sw = new StreamWriter(fs, Encoding.UTF8))
+                    sw.WriteLine(Stamp() + msg);
+            }
+            catch { }
+        }
+
+        // Reads the tail of a log file into lines without fighting the writer for
+        // the lock (FileShare.ReadWrite). Used by ViewLog so tor.log can be shown
+        // while tor.exe still has it open.
+        private static string[] ReadLogTailFile(string path, int bytes)
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read,
+                                                      FileShare.ReadWrite))
+                {
+                    long start = Math.Max(0, fs.Length - bytes);
+                    fs.Seek(start, SeekOrigin.Begin);
+                    using (StreamReader sr = new StreamReader(fs, Encoding.UTF8, true))
+                        return sr.ReadToEnd().Split(new[] { '\r', '\n' },
+                                                    StringSplitOptions.RemoveEmptyEntries);
+                }
+            }
+            catch { return new string[0]; }
+        }
+
         // Shows the tail of tor.log. tor writes every line with its own exact
         // timestamp (e.g. "Aug 12 12:34:56.789 [notice] ..."), which is kept
         // as-is; lines without one get a local clock stamp added.
         private static void ViewLog()
         {
             const int maxLines = 40;
-            try
+            lock (consoleLock)
             {
-                if (!File.Exists(TorLog))
-                {
-                    Console.WriteLine("[!] no log yet at " + TorLog);
-                    return;
-                }
-                string[] lines = File.ReadAllLines(TorLog);
-                int start = Math.Max(0, lines.Length - maxLines);
-                lock (consoleLock)
-                {
-                    ClearProgressLine();
-                    Console.WriteLine(Stamp() + "tor log - last " +
-                                      (lines.Length - start) + " of " +
-                                      lines.Length + " line(s):");
-                    for (int i = start; i < lines.Length; i++)
-                    {
-                        string l = lines[i];
-                        if (l.Length == 0) continue;
-                        bool hasTs = Regex.IsMatch(l, @"^[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}");
-                        Console.WriteLine("  " + (hasTs ? l : Stamp() + l));
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine("[!] cannot read log: " + ex.Message);
+                ClearProgressLine();
+                string[] jet = ReadLogTailFile(JetLog, 8192);
+                Console.WriteLine(Stamp() + "launcher log - last " +
+                                  Math.Min(jet.Length, maxLines) + " of " +
+                                  jet.Length + " line(s):");
+                if (jet.Length == 0) Console.WriteLine("  (no launcher events yet)");
+                for (int i = Math.Max(0, jet.Length - maxLines); i < jet.Length; i++)
+                    Console.WriteLine("  " + jet[i]);
+                Console.WriteLine();
+                string[] tor = ReadLogTailFile(TorLog, 16384);
+                Console.WriteLine(Stamp() + "tor log - last " +
+                                  Math.Min(tor.Length, maxLines) + " of " +
+                                  tor.Length + " line(s):");
+                if (tor.Length == 0) Console.WriteLine("  (empty - tor has not logged yet)");
+                for (int i = Math.Max(0, tor.Length - maxLines); i < tor.Length; i++)
+                    Console.WriteLine("  " + tor[i]);
             }
         }
 
@@ -2022,105 +2079,177 @@ namespace StartTor
         // warmupSeconds, each with a 5 s timeout. Every request is timed and
         // counted; the tunnel is ready when at least 5 pings succeeded. C
         // aborts (stops tor, back to the main menu).
+        // The ping loop runs on a worker thread while the caller polls for C, so
+        // abort works even when a request is stuck on a slow circuit. After the
+        // loop, conflux linkage is reported honestly: pings succeed on plain
+        // circuits even when no conflux leg has linked yet.
+        private static volatile bool warmupAbort;
+        private static volatile bool warmupRunning;
+        private static volatile int warmupDone, warmupOk, warmupFail, warmupTimeouts;
+        private static long warmupTotalMs, warmupBestMs, warmupWorstMs;
+
+        private static void DrawWarmupLine()
+        {
+            string line = "warmup " + warmupDone + "/" + warmupSeconds + "  ok=" +
+                          warmupOk + "  fail=" + warmupFail + "  avg=" +
+                          (warmupOk > 0 ? warmupTotalMs / warmupOk : 0) +
+                          "ms  worst=" + warmupWorstMs + "ms";
+            lock (consoleLock)
+            {
+                if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
+                Console.Write("\r" + line);
+                progressLineLen = line.Length;
+            }
+        }
+
         private static bool WarmupTunnel()
         {
             try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
             catch { }
             Console.WriteLine("warming tunnel: pinging generate_204 every second for " +
                               warmupSeconds + " s (C = stop Tor)...");
-            int ok = 0, fail = 0, timeouts = 0;
-            long totalMs = 0, bestMs = long.MaxValue, worstMs = 0;
-            for (int i = 1; i <= warmupSeconds; i++)
+            warmupAbort = false;
+            warmupRunning = true;
+            warmupDone = 0;
+            warmupOk = 0;
+            warmupFail = 0;
+            warmupTimeouts = 0;
+            warmupTotalMs = 0;
+            warmupBestMs = long.MaxValue;
+            warmupWorstMs = 0;
+
+            Thread worker = new Thread(delegate ()
             {
-                bool success = false;
-                bool anyTimeout = false;
-                Stopwatch sw = Stopwatch.StartNew();
-                foreach (string u in PingEndpoints)
+                for (int i = 1; i <= warmupSeconds; i++)
                 {
-                    try
+                    if (warmupAbort) break;
+                    bool success = false;
+                    bool anyTimeout = false;
+                    Stopwatch sw = Stopwatch.StartNew();
+                    foreach (string u in PingEndpoints)
                     {
-                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
-                        req.Proxy = new WebProxy("127.0.0.1", 8118);
-                        req.Method = "GET";
-                        req.Timeout = 5000;
-                        req.ReadWriteTimeout = 5000;
-                        req.UserAgent = "torjet-warmup/1.0";
-                        using (WebResponse resp = req.GetResponse())
-                        {
-                            if ((int)((HttpWebResponse)resp).StatusCode < 400) { success = true; break; }
-                        }
-                    }
-                    catch (WebException wex)
-                    {
-                        if (wex.Status == WebExceptionStatus.Timeout) anyTimeout = true;
-                    }
-                    catch { }
-                }
-                sw.Stop();
-                long elapsedMs = sw.ElapsedMilliseconds;
-                if (success)
-                {
-                    ok++;
-                    totalMs += elapsedMs;
-                    if (elapsedMs < bestMs) bestMs = elapsedMs;
-                    if (elapsedMs > worstMs) worstMs = elapsedMs;
-                }
-                else if (anyTimeout) timeouts++;
-                else fail++;
-
-                string line = "warmup " + i + "/" + warmupSeconds + "  ok=" + ok +
-                              "  fail=" + fail + "  avg=" + (ok > 0 ? totalMs / ok : 0) +
-                              "ms  worst=" + worstMs + "ms";
-                lock (consoleLock)
-                {
-                    if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
-                    Console.Write("\r" + line);
-                    progressLineLen = line.Length;
-                }
-
-                int wait = 1000 - (int)elapsedMs;
-                if (wait > 0)
-                {
-                    for (int t = 0; t < wait / 100; t++)
-                    {
-                        Thread.Sleep(100);
                         try
                         {
-                            if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
+                            req.Proxy = new WebProxy("127.0.0.1", 8118);
+                            req.Method = "GET";
+                            req.Timeout = 5000;
+                            req.ReadWriteTimeout = 5000;
+                            req.UserAgent = "torjet-warmup/1.0";
+                            using (WebResponse resp = req.GetResponse())
                             {
-                                lock (consoleLock)
-                                {
-                                    ClearProgressLine();
-                                    Console.WriteLine("warmup aborted (C) - stopping Tor.");
-                                }
-                                return false;
+                                if ((int)((HttpWebResponse)resp).StatusCode < 400) { success = true; break; }
                             }
+                        }
+                        catch (WebException wex)
+                        {
+                            if (wex.Status == WebExceptionStatus.Timeout) anyTimeout = true;
                         }
                         catch { }
                     }
+                    sw.Stop();
+                    long elapsedMs = sw.ElapsedMilliseconds;
+                    if (success)
+                    {
+                        warmupOk++;
+                        warmupTotalMs += elapsedMs;
+                        if (elapsedMs < warmupBestMs) warmupBestMs = elapsedMs;
+                        if (elapsedMs > warmupWorstMs) warmupWorstMs = elapsedMs;
+                    }
+                    else if (anyTimeout) warmupTimeouts++;
+                    else warmupFail++;
+                    warmupDone = i;
+                    long remaining = 1000 - elapsedMs;
+                    if (remaining > 0 && !warmupAbort)
+                    {
+                        long step = Math.Min(remaining, 200);
+                        for (long t = 0; t < remaining && !warmupAbort; t += step)
+                            Thread.Sleep((int)step);
+                    }
                 }
+                warmupRunning = false;
+            });
+            worker.IsBackground = true;
+            worker.Start();
+
+            while (warmupRunning && !warmupAbort)
+            {
+                DrawWarmupLine();
+                Thread.Sleep(200);
+                try
+                {
+                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    {
+                        warmupAbort = true;
+                        break;
+                    }
+                }
+                catch { }
             }
+
+            if (warmupAbort)
+            {
+                lock (consoleLock)
+                {
+                    ClearProgressLine();
+                    Console.WriteLine("warmup aborted (C) - stopping Tor.");
+                }
+                Log("warmup aborted by user (C)");
+                return false;
+            }
+
+            while (warmupRunning)
+            {
+                DrawWarmupLine();
+                Thread.Sleep(200);
+            }
+
             lock (consoleLock)
             {
                 ClearProgressLine();
                 Console.WriteLine();
-                Console.WriteLine("warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
-                                  " timeouts in " + warmupSeconds + " s - avg " +
-                                  (ok > 0 ? totalMs / ok : 0) + " ms, best " +
-                                  (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
-                                  " ms, worst " + worstMs + " ms.");
-                if (ok >= 5)
+            }
+            int ok = warmupOk, fail = warmupFail, timeouts = warmupTimeouts;
+            long totalMs = warmupTotalMs, bestMs = warmupBestMs, worstMs = warmupWorstMs;
+            string summary = "warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
+                             " timeouts in " + warmupSeconds + " s - avg " +
+                             (ok > 0 ? totalMs / ok : 0) + " ms, best " +
+                             (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
+                             " ms, worst " + worstMs + " ms.";
+            Console.WriteLine(summary);
+            Log(summary);
+
+            int sets = 0, legs = 0, linked = 0;
+            var legList = ConfluxQuery();
+            if (legList != null)
+            {
+                var setIds = new HashSet<string>();
+                foreach (string[] leg in legList)
                 {
-                    long avg = ok > 0 ? totalMs / ok : 0;
-                    if (avg > 3000)
-                        Console.WriteLine("[!] tunnel is up but average ping is high (" +
-                                          avg + " ms) - circuits may be slow.");
+                    setIds.Add(leg[0]);
+                    if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) linked++;
                 }
-                else
-                {
-                    Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
-                                      " successful pings) - stopping Tor.");
-                }
+                sets = setIds.Count;
+                legs = legList.Count;
+            }
+            string cfx = "conflux: " + sets + " set(s), " + legs + " leg(s), " +
+                         linked + " linked";
+            Console.WriteLine(cfx);
+            Log(cfx);
+            if (legList != null && legs > 0 && linked == 0)
+                Console.WriteLine("[!] no conflux leg is linked yet - pings ran on plain " +
+                                  "circuits, conflux is not aggregating traffic.");
+            if (ok >= 5)
+            {
+                long avg = ok > 0 ? totalMs / ok : 0;
+                if (avg > 3000)
+                    Console.WriteLine("[!] tunnel is up but average ping is high (" +
+                                      avg + " ms) - circuits may be slow.");
+            }
+            else
+            {
+                Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
+                                  " successful pings) - stopping Tor.");
             }
             return ok >= 5;
         }
@@ -2511,15 +2640,15 @@ namespace StartTor
             {
                 Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
                 watcher.Start();
-                Console.WriteLine("circuit monitor: watching every " + watchIntervalS +
-                                  " s; weak legs (RTT >= " + watchRttMs + " ms, or >= " +
-                                  watchFactor + "x the set best above " + watchRttFloorMs +
-                                  " ms) are closed after " + watchStrikes + " strikes; " +
-                                  "stuck-unlinked after " + watchUnlinkedStrikes +
-                                  " passes and " + watchUnlinkedGraceS + " s old; " +
-                                  "never below " + watchMinLegs + " leg(s)/set, max " +
-                                  watchMaxPerPass + " close(s)/pass (cooldown " +
-                                  watchCooldownS + " s, relaxed during warmup).");
+                Log("circuit monitor: watching every " + watchIntervalS +
+                    " s; weak legs (RTT >= " + watchRttMs + " ms, or >= " +
+                    watchFactor + "x the set best above " + watchRttFloorMs +
+                    " ms) are closed after " + watchStrikes + " strikes; " +
+                    "stuck-unlinked after " + watchUnlinkedStrikes +
+                    " passes and " + watchUnlinkedGraceS + " s old; " +
+                    "never below " + watchMinLegs + " leg(s)/set, max " +
+                    watchMaxPerPass + " close(s)/pass (cooldown " +
+                    watchCooldownS + " s, relaxed during warmup).");
             }
 
             // Warm the tunnel while the circuit monitor runs with the close
@@ -2552,9 +2681,9 @@ namespace StartTor
                     ToggleTun();
             }
             Console.WriteLine("  P   toggle system proxy      D   conflux details");
-            Console.WriteLine("  T   toggle TUN mode          L   conflux summary");
-            Console.WriteLine("  S   speed test                V   view tor log");
-            Console.WriteLine("  A   add a leg to a set        C   stop Tor, back to menu");
+            Console.WriteLine("  T   toggle TUN mode          L   view log");
+            Console.WriteLine("  S   speed test                A   add a leg to a set");
+            Console.WriteLine("  C   stop Tor, back to menu");
             Console.WriteLine();
             while (true)
             {
@@ -2590,7 +2719,7 @@ namespace StartTor
                         }
                         else if (ki.Key == ConsoleKey.L)
                         {
-                            lock (consoleLock) ConfluxStatus(false);
+                            lock (consoleLock) ViewLog();
                         }
                         else if (ki.Key == ConsoleKey.D)
                         {
