@@ -176,9 +176,9 @@ namespace StartTor
         // replaced immediately instead of waiting out the normal gap.
         private static volatile bool circuitWatchWarmup;
 
-        // Ping-based tunnel warmup: one generate_204 request per second for
-        // warmupSeconds, replacing the old 1 MiB download check (which gave
-        // false negatives on cold single-stream circuits).
+        // Ping-based tunnel warmup: one generate_204 request dispatched every
+        // second for warmupSeconds, replacing the old 1 MiB download check
+        // (which gave false negatives on cold single-stream circuits).
         private static int warmupSeconds = 60;
 
         [DllImport("wininet.dll", SetLastError = true)]
@@ -2245,27 +2245,50 @@ namespace StartTor
             }
         }
 
-        // Warms the tunnel with generate_204 pings through the HTTP proxy
-        // (127.0.0.1:8118) instead of a 1 MiB download, which produced false
-        // negatives on cold single-stream circuits. One request per second for
-        // warmupSeconds, each with a 5 s timeout. Every request is timed and
-        // counted; the tunnel is ready when at least 5 pings succeeded. C
-        // aborts (stops tor, back to the main menu).
-        // The ping loop runs on a worker thread while the caller polls for C, so
+        // Warms the tunnel with real SOCKS5 generate_204 pings (127.0.0.1:9050)
+        // instead of a 1 MiB download, which produced false negatives on cold
+        // single-stream circuits. One request is dispatched every second for
+        // warmupSeconds; each request is allowed up to 5 s to get a response and
+        // is recorded as ok / fail / timeout. Requests overlap: a slow one never
+        // stalls the 1/s cadence (the old loop tried up to 3 hosts sequentially
+        // with 5 s timeouts each, stretching a 60 s warmup to many minutes on a
+        // slow tunnel). The whole phase is therefore bounded to about
+        // warmupSeconds + 5 s (the last request's timeout), i.e. ~65 s. The
+        // tunnel is ready when at least 5 pings succeeded. C aborts (stops tor,
+        // back to the main menu).
+        // The ping loop runs on worker threads while the caller polls for C, so
         // abort works even when a request is stuck on a slow circuit. After the
         // loop, conflux linkage is reported honestly: pings succeed on plain
         // circuits even when no conflux leg has linked yet.
+        private static readonly object warmupLock = new object();
         private static volatile bool warmupAbort;
         private static volatile bool warmupRunning;
         private static volatile int warmupDone, warmupOk, warmupFail, warmupTimeouts;
         private static long warmupTotalMs, warmupBestMs, warmupWorstMs;
+        private static Stopwatch warmupPhaseSw;
+
+        private static string FormatClock(long ms)
+        {
+            TimeSpan ts = TimeSpan.FromMilliseconds(ms);
+            return ((int)ts.TotalMinutes).ToString("D2") + ":" + ts.Seconds.ToString("D2");
+        }
 
         private static void DrawWarmupLine()
         {
-            string line = "warmup " + warmupDone + "/" + warmupSeconds + "  ok=" +
-                          warmupOk + "  fail=" + warmupFail + "  avg=" +
-                          (warmupOk > 0 ? warmupTotalMs / warmupOk : 0) +
-                          "ms  worst=" + warmupWorstMs + "ms";
+            int done = 0, ok = 0, fail = 0, timeouts = 0;
+            long total = 0, worst = 0, phase = 0;
+            lock (warmupLock)
+            {
+                done = warmupDone; ok = warmupOk; fail = warmupFail; timeouts = warmupTimeouts;
+                total = warmupTotalMs; worst = warmupWorstMs;
+                if (warmupPhaseSw != null) phase = warmupPhaseSw.ElapsedMilliseconds;
+            }
+            long cap = (long)(warmupSeconds + 5) * 1000;
+            string line = "warmup " + done + "/" + warmupSeconds + "  [" +
+                          FormatClock(phase) + "/" + FormatClock(cap) +
+                          "]  ok=" + ok + "  fail=" + fail + "  timeout=" + timeouts +
+                          "  avg=" + (ok > 0 ? total / ok : 0) +
+                          "ms  worst=" + worst + "ms";
             lock (consoleLock)
             {
                 if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
@@ -2274,10 +2297,31 @@ namespace StartTor
             }
         }
 
+        private static void WarmupPingWorker(PingTarget target)
+        {
+            long ems;
+            int r = PingSocks(target.Host, target.Path, out ems);
+            lock (warmupLock)
+            {
+                warmupDone++;
+                if (r == 1)
+                {
+                    if (ems < 0) ems = 0;
+                    warmupOk++;
+                    warmupTotalMs += ems;
+                    if (ems < warmupBestMs) warmupBestMs = ems;
+                    if (ems > warmupWorstMs) warmupWorstMs = ems;
+                }
+                else if (r == -1) warmupTimeouts++;
+                else warmupFail++;
+            }
+        }
+
         private static bool WarmupTunnel()
         {
-            Console.WriteLine("warming tunnel: real delay test via SOCKS 127.0.0.1:9050 " +
-                              "every second for " + warmupSeconds + " s (C = stop Tor)...");
+            Console.WriteLine("warming tunnel: real delay test via SOCKS 127.0.0.1:9050, " +
+                              "1 request/s for " + warmupSeconds + " s, 5 s timeout " +
+                              "(C = stop Tor)...");
             warmupAbort = false;
             warmupRunning = true;
             warmupDone = 0;
@@ -2287,47 +2331,26 @@ namespace StartTor
             warmupTotalMs = 0;
             warmupBestMs = long.MaxValue;
             warmupWorstMs = 0;
+            warmupPhaseSw = Stopwatch.StartNew();
 
             Thread worker = new Thread(delegate ()
             {
+                var inflight = new List<Thread>();
                 for (int i = 1; i <= warmupSeconds; i++)
                 {
                     if (warmupAbort) break;
-                    bool success = false;
-                    bool anyTimeout = false;
-                    long okMs = -1;
-                    Stopwatch sw = Stopwatch.StartNew();
-                    foreach (PingTarget t in PingTargets)
-                    {
-                        long ems;
-                        int r = PingSocks(t.Host, t.Path, out ems);
-                        if (r == 1)
-                        {
-                            success = true;
-                            okMs = ems >= 0 ? ems : sw.ElapsedMilliseconds;
-                            break;
-                        }
-                        if (r == -1) anyTimeout = true;
-                    }
-                    sw.Stop();
-                    long elapsedMs = okMs >= 0 ? okMs : sw.ElapsedMilliseconds;
-                    if (success)
-                    {
-                        warmupOk++;
-                        warmupTotalMs += elapsedMs;
-                        if (elapsedMs < warmupBestMs) warmupBestMs = elapsedMs;
-                        if (elapsedMs > warmupWorstMs) warmupWorstMs = elapsedMs;
-                    }
-                    else if (anyTimeout) warmupTimeouts++;
-                    else warmupFail++;
-                    warmupDone = i;
-                    long remaining = 1000 - elapsedMs;
-                    if (remaining > 0 && !warmupAbort)
-                    {
-                        long step = Math.Min(remaining, 200);
-                        for (long t = 0; t < remaining && !warmupAbort; t += step)
-                            Thread.Sleep((int)step);
-                    }
+                    PingTarget target = PingTargets[(i - 1) % PingTargets.Length];
+                    Thread t = new Thread(delegate () { WarmupPingWorker(target); });
+                    t.IsBackground = true;
+                    t.Start();
+                    inflight.Add(t);
+                    long targetMs = (long)i * 1000;
+                    while (!warmupAbort && warmupPhaseSw.ElapsedMilliseconds < targetMs)
+                        Thread.Sleep(50);
+                }
+                if (!warmupAbort)
+                {
+                    foreach (Thread t in inflight) t.Join();
                 }
                 warmupRunning = false;
             });
@@ -2373,8 +2396,9 @@ namespace StartTor
             }
             int ok = warmupOk, fail = warmupFail, timeouts = warmupTimeouts;
             long totalMs = warmupTotalMs, bestMs = warmupBestMs, worstMs = warmupWorstMs;
+            long phaseMs = warmupPhaseSw == null ? 0 : warmupPhaseSw.ElapsedMilliseconds;
             string summary = "warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
-                             " timeouts in " + warmupSeconds + " s - avg " +
+                             " timeouts in " + FormatClock(phaseMs) + " - avg " +
                              (ok > 0 ? totalMs / ok : 0) + " ms, best " +
                              (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
                              " ms, worst " + worstMs + " ms.";

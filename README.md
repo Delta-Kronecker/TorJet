@@ -208,15 +208,18 @@ the circuit set stable (relaxed during tunnel warmup). Disable it with
 ### Tunnel warmup
 
 Once bootstrap hits 100%, TorJet warms the tunnel immediately with lightweight
-`generate_204` pings through the HTTP proxy (one per second for 60 s, 5 s
-timeout each, latency is measured), in parallel with the circuit health
-monitor. The old 1 MiB download check was replaced:
+`generate_204` pings sent through the **SOCKS5 proxy (127.0.0.1:9050)** — the
+same port you test — one request dispatched every second for 60 s, each allowed
+up to 5 s for a response (recorded as ok / fail / timeout). Requests overlap, so
+a slow circuit never stalls the 1/s cadence and the whole phase is bounded to
+about 65 s. The old 1 MiB download check was replaced:
 it gave false negatives on cold single-stream circuits and added ~1 MiB of
-padding traffic. Each ping is timed and the run ends with a summary
-(ok/fail/timeouts, average, best and worst latency). The tunnel is considered
-ready after at least 5 successful pings; otherwise Tor is stopped and the main
-menu is shown again. During warmup the monitor's close cooldown is relaxed, so
-weak legs are replaced immediately. Adjust the duration with
+padding traffic. The progress line shows a **clock** (elapsed/max, e.g.
+`[00:47/01:05]`) plus live ok/fail/timeout/avg/worst; the run ends with a
+summary (ok/fail/timeouts, average, best and worst latency). The tunnel is
+considered ready after at least 5 successful pings; otherwise Tor is stopped
+and the main menu is shown again. During warmup the monitor's close cooldown is
+relaxed, so weak legs are replaced immediately. Adjust the duration with
 `--warmup <seconds>` (default 60).
 
 ## Building
