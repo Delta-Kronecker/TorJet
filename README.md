@@ -202,7 +202,9 @@ quality legs so tor rebuilds them with fresh circuits:
 tor launches a replacement leg for every closed leg (sets below the configured
 `ConfluxNumLegs` target are also topped up with `CONFLUX ADD`), and conflux
 migrates streams onto the fresh circuits. A 20 s cooldown between closes keeps
-the circuit set stable (relaxed during tunnel warmup). Disable it with
+the circuit set stable (relaxed during tunnel warmup). After every close pass a
+summary report is printed to the console (legs closed, circuit ids, and the
+current conflux set/leg/linked counts). Disable it with
 `--no-circuit-watch`; tune it with `--watch-rtt <ms>`, `--watch-interval
 <seconds>`, `--watch-cooldown <seconds>` and the other `--watch-*` flags.
 

@@ -1750,16 +1750,16 @@ namespace StartTor
 
                 ClearProgressLine();
                 int closed = 0;
-                int weakN = 0, stuckN = 0;
+                int closedWeak = 0, closedStuck = 0;
                 string closedIds = "";
                 foreach (string[] leg in toRemove)
                 {
                     string reason;
                     toRemoveReasons.TryGetValue(leg[0], out reason);
-                    if (reason == "weak") weakN++; else stuckN++;
                     if (ControlSend("CLOSECIRCUIT " + leg[0]))
                     {
                         closed++;
+                        if (reason == "weak") closedWeak++; else closedStuck++;
                         weakStrikes.Remove(leg[0]);
                         if (closedIds.Length > 0) closedIds += ", ";
                         closedIds += leg[0];
@@ -1769,11 +1769,35 @@ namespace StartTor
                 {
                     lastClose = DateTime.UtcNow;
                     string what = "";
-                    if (weakN > 0) what = weakN + " weak";
-                    if (stuckN > 0)
-                        what = (what.Length > 0 ? what + ", " : "") + stuckN + " stuck-unlinked";
+                    if (closedWeak > 0) what = closedWeak + " weak";
+                    if (closedStuck > 0)
+                        what = (what.Length > 0 ? what + ", " : "") + closedStuck + " stuck-unlinked";
                     Log("monitor: closed " + what + " leg(s) (" + closedIds +
                         ") - replacement building");
+                    int cSets = 0, cLegs = 0, cLinked = 0;
+                    var now = ConfluxQuery();
+                    if (now != null)
+                    {
+                        var setIds = new HashSet<string>();
+                        foreach (string[] leg in now)
+                        {
+                            setIds.Add(leg[0]);
+                            if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) cLinked++;
+                        }
+                        cSets = setIds.Count;
+                        cLegs = now.Count;
+                    }
+                    lock (consoleLock)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine(Stamp() + "leg cleanup report:");
+                        Console.WriteLine("  closed    : " + closed + " (" + what + ")");
+                        Console.WriteLine("  circuits  : " + closedIds);
+                        Console.WriteLine("  conflux   : " + cSets + " set(s), " + cLegs +
+                                          " leg(s), " + cLinked + " linked");
+                        Console.WriteLine("  next scan : every " + watchIntervalS + " s; next close " +
+                                          "no earlier than " + watchCooldownS + " s from now");
+                    }
                 }
             }
         }
