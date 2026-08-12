@@ -47,15 +47,18 @@ namespace StartTor
         private static readonly string FragmentFile = Path.Combine(DataDir, "fragment.txt");
         private static readonly string ConfluxSetsFile = Path.Combine(DataDir, "conflux-sets.txt");
         private static readonly string ConfluxLegsFile = Path.Combine(DataDir, "conflux-legs.txt");
+        private static readonly string ConfluxLinkedSetsFile = Path.Combine(DataDir, "conflux-linked-sets.txt");
         private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
         private static readonly string XrayConfig = Path.Combine(DataDir, "xray", "config.json");
         private const int FragmentSocksPort = 10808;
 
-        // Conflux topology set from the main menu. 0 = use the consensus default
-        // (cfx_num_legs_set / cfx_max_prebuilt_set); positive values are written
-        // to the generated torrc as ConfluxNumSets / ConfluxNumLegs.
+        // Conflux topology set from the settings submenu. 0 = use the consensus
+        // default (cfx_num_legs_set / cfx_max_prebuilt_set / cfx_max_linked_set);
+        // positive values are written to the generated torrc as ConfluxNumSets /
+        // ConfluxNumLegs / ConfluxNumLinkedSets.
         private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile);
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile);
+        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile);
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
         {
@@ -566,6 +569,29 @@ namespace StartTor
             }
         }
 
+        private static void PromptConfluxLinkedSets()
+        {
+            Console.WriteLine("  ConfluxNumLinkedSets = hard cap on linked conflux sets");
+            Console.WriteLine("    (0 = consensus default, 1-32). Equal to 'Conflux sets' keeps exactly that");
+            Console.WriteLine("    many sets alive; larger lets tor build extras on top of in-use sets.");
+            Console.Write("  New value (Enter = keep " + confluxLinkedSets + "): ");
+            string input;
+            try { input = Console.ReadLine(); }
+            catch { return; }
+            if (string.IsNullOrWhiteSpace(input)) return;
+            int v;
+            if (int.TryParse(input.Trim(), out v) && v >= 0 && v <= 32)
+            {
+                confluxLinkedSets = v;
+                WriteConfluxSetting(ConfluxLinkedSetsFile, v);
+                Console.WriteLine("  Conflux linked sets set to " + (v == 0 ? "consensus default" : v.ToString()) + ".");
+            }
+            else
+            {
+                Console.WriteLine("  Invalid value (0-32).");
+            }
+        }
+
         private static Process FindXray()
         {
             foreach (Process p in Process.GetProcessesByName("xray"))
@@ -822,7 +848,7 @@ namespace StartTor
             }
         }
 
-        // Settings submenu: strategy, fragment, conflux sets and conflux legs.
+        // Settings submenu: strategy, fragment, conflux sets, legs and linked-set cap.
         private static void ShowSettingsMenu(ref int strategy, ref bool fragment)
         {
             while (true)
@@ -831,13 +857,14 @@ namespace StartTor
                 Console.WriteLine("     Settings");
                 Console.WriteLine("     --------");
                 Console.WriteLine();
-                Console.WriteLine("       1)  Strategy level    : " + StrategyNames[strategy]);
-                Console.WriteLine("       2)  Fragment (xray)   : " + (fragment ? "on" : "off"));
-                Console.WriteLine("       3)  Conflux sets      : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
-                Console.WriteLine("       4)  Conflux legs      : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
-                Console.WriteLine("       5)  Back");
+                Console.WriteLine("       1)  Strategy level      : " + StrategyNames[strategy]);
+                Console.WriteLine("       2)  Fragment (xray)     : " + (fragment ? "on" : "off"));
+                Console.WriteLine("       3)  Conflux sets        : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
+                Console.WriteLine("       4)  Conflux legs        : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
+                Console.WriteLine("       5)  Conflux linked (cap): " + (confluxLinkedSets == 0 ? "consensus" : confluxLinkedSets.ToString()));
+                Console.WriteLine("       6)  Back");
                 Console.WriteLine();
-                Console.Write("  Enter 1-5 (Enter = Back): ");
+                Console.Write("  Enter 1-6 (Enter = Back): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return; }
@@ -857,7 +884,8 @@ namespace StartTor
                     }
                     else if (n == 3) { PromptConfluxSets(); }
                     else if (n == 4) { PromptConfluxLegs(); }
-                    else if (n == 5) return;
+                    else if (n == 5) { PromptConfluxLinkedSets(); }
+                    else if (n == 6) return;
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else Console.WriteLine("  Invalid choice, try again.");
@@ -922,6 +950,13 @@ namespace StartTor
                 sb.AppendLine("# --- conflux: " + confluxSets + " set(s) ---");
                 sb.AppendLine("ConfluxNumSets " + confluxSets);
             }
+            if (confluxLinkedSets > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine();
+                sb.AppendLine("# --- conflux: linked-set cap " + confluxLinkedSets + " ---");
+                sb.AppendLine("ConfluxNumLinkedSets " + confluxLinkedSets);
+            }
             if (confluxLegs > 0)
             {
                 sb.AppendLine();
@@ -939,11 +974,12 @@ namespace StartTor
                               (BridgeFiles[mode].Length > 0 ? ", " + bridgeCount + " bridges" : "") +
                               (fragment ? ", fragment on" : "") +
                               (confluxSets > 0 ? ", " + confluxSets + " sets" : "") +
+                              (confluxLinkedSets > 0 ? ", cap " + confluxLinkedSets : "") +
                               (confluxLegs > 0 ? ", " + confluxLegs + " legs/set" : "") + ")");
             Log("torrc written (" + ModeNames[mode] + ", strategy " +
                 StrategyNames[strategy] + ", " + bridgeCount + " bridges, fragment " +
-                (fragment ? "on" : "off") + ", " + confluxSets + " sets, " +
-                confluxLegs + " legs/set)");
+                (fragment ? "on" : "off") + ", " + confluxSets + " sets, cap " +
+                confluxLinkedSets + ", " + confluxLegs + " legs/set)");
             return true;
         }
 

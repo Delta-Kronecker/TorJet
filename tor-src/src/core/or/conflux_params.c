@@ -330,16 +330,20 @@ conflux_params_new_consensus(const networkstatus_t *ns)
                             MAX_LEGS_SET_DEFAULT,
                             MAX_LEGS_SET_MIN, MAX_LEGS_SET_MAX);
 
-  /* TorJet extension: the torrc ConfluxNumSets option (0 = consensus default)
-   * overrides the consensus cfx_max_prebuilt_set target and raises the linked
-   * set cap to at least that many, so ConfluxNumSets sets can coexist. */
+  /* TorJet extension: the torrc ConfluxNumSets / ConfluxNumLinkedSets options
+   * (0 = consensus default) override the consensus cfx_max_prebuilt_set /
+   * cfx_max_linked_set values, so the user controls how many sets are prebuilt
+   * and the hard cap on linked sets. When only ConfluxNumSets is set, the
+   * linked-set cap defaults to exactly that many so no extra sets are built on
+   * top of sets that are currently in use. */
   {
     const or_options_t *opts = get_options();
     if (opts && opts->ConfluxNumSets > 0) {
       max_prebuilt_set = opts->ConfluxNumSets;
-      if (max_linked_set < opts->ConfluxNumSets) {
-        max_linked_set = opts->ConfluxNumSets;
-      }
+      max_linked_set = opts->ConfluxNumSets;
+    }
+    if (opts && opts->ConfluxNumLinkedSets > 0) {
+      max_linked_set = opts->ConfluxNumLinkedSets;
     }
   }
 

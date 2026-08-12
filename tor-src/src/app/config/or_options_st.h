@@ -759,11 +759,17 @@ struct or_options_t {
    * TorJet extension. */
    int ConfluxNumLegs;
 
-  /** TorJet extension: target number of conflux sets to keep alive. 0 means
+  /** TorJet extension: target number of conflux sets to prebuild/keep. 0 means
    * "use the consensus default" (cfx_max_prebuilt_set, usually 3); any positive
-   * value overrides the prebuilt-set target and raises the linked-set cap to at
-   * least this many, so that many sets can coexist. */
+   * value overrides the prebuilt-set target. */
   int ConfluxNumSets;
+
+  /** TorJet extension: hard cap on the number of linked conflux sets tor may
+   * keep at once. 0 means "use the consensus default" (cfx_max_linked_set,
+   * usually 10); any positive value overrides it. Setting it equal to
+   * ConfluxNumSets keeps exactly that many sets alive even while some are in
+   * use; a larger value allows extra sets on top so that many stay ready. */
+  int ConfluxNumLinkedSets;
 
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;

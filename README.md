@@ -37,12 +37,23 @@ data\
       2. **balanced** — long-lived reused circuits (fewer handshakes)
       3. **aggressive** — more guards + faster scheduler + deeper reuse
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
-   Your choices are remembered for next time (`data\mode.txt`,
-   `data\strategy.txt`).
    - **Fragment (xray)** — routes all tor relay TLS through a local
      `xray.exe` SOCKS proxy that fragments the TLS ClientHello (a common
      circumvention technique against SNI/length-based DPI). Default off;
      needs `data\xray.exe`. Also settable via `--fragment` / `--no-fragment`.
+   - **Conflux topology** (from the Settings submenu) — how many conflux
+     circuit sets tor keeps:
+     - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
+       sets to prebuild/keep alive. Each set is one exit path.
+     - **Conflux legs** (`ConfluxNumLegs`, 0=consensus default) — legs per
+       set; more legs = more parallel bandwidth per set.
+     - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
+       default) — hard cap on linked sets. Set it equal to *Conflux sets*
+       to keep exactly that many alive even while some are in use; a larger
+       value lets tor build extra sets on top of in-use ones.
+   Your choices are remembered for next time (`data\mode.txt`,
+   `data\strategy.txt`, `data\conflux-sets.txt`,
+   `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
    automatically — press **P** to toggle it on/off (HTTP 127.0.0.1:8118).
    Press **T** to toggle **TUN mode** (see below). Press **S** to run a speed
