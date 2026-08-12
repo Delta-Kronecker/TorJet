@@ -149,13 +149,13 @@ namespace StartTor
         private static int watchRttMs = 1000;
         private static int watchRttFloorMs = 400;
         private static double watchFactor = 2.0;
-        private static int watchStrikes = 2;
-        private static int watchMinLegs = 2;
+        private static int watchStrikes = 1;
+        private static int watchMinLegs = 1;
         private static int watchUnlinkedStrikes = 4;
         private static int watchUnlinkedGraceS = 120;
         private static int watchMaxPerPass = 6;
-        private static int watchIntervalS = 20;
-        private static int watchCooldownS = 60;
+        private static int watchIntervalS = 10;
+        private static int watchCooldownS = 20;
 
         // Per-circuit consecutive-bad counters for the monitor (persist across
         // passes so a single RTT spike never prunes a healthy leg).
@@ -1600,8 +1600,7 @@ namespace StartTor
                 //     (>= --watch-rtt-floor ms AND >= --watch-factor times the
                 //     set's best RTT), so pruning adapts to each set's conditions.
                 // A leg must stay weak for --watch-strikes consecutive passes
-                // before it is closed, so a single measurement spike never prunes
-                // a good leg. Legs stuck UNLINKED for --watch-unlinked-strikes
+                // before it is closed. Legs stuck UNLINKED for --watch-unlinked-strikes
                 // passes are closed as dead weight. The best (lowest RTT) leg of
                 // each set is never closed, and a set is never pruned below
                 // --watch-min-legs.

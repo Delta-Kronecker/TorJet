@@ -1,0 +1,58 @@
+name: Sync Release Notes
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    name: Rewrite release notes from tagged commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rewrite release notes from tagged commits
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+
+          echo "Resolving tags to commits..."
+          declare -A tag_commit
+          while read -r ref sha type; do
+            tag="${ref#refs/tags/}"
+            if [ "$type" = "commit" ]; then
+              tag_commit["$tag"]="$sha"
+            else
+              tag_commit["$tag"]="$(gh api "repos/$REPO/git/tags/$sha" --jq '.object.sha')"
+            fi
+          done < <(gh api "repos/$REPO/git/refs/tags?per_page=100" --paginate --jq '.[] | "\(.ref) \(.object.sha) \(.object.type)"')
+
+          echo "Syncing release notes..."
+          updated=0
+          unchanged=0
+          gh api "repos/$REPO/releases?per_page=100" --paginate --jq '.[] | .tag_name' |
+          while read -r tag; do
+            sha="${tag_commit[$tag]:-}"
+            if [ -z "$sha" ]; then
+              echo "skip    $tag (no matching tag ref)"
+              continue
+            fi
+            msg="$(gh api "repos/$REPO/commits/$sha" --jq '.commit.message')"
+            current="$(gh release view "$tag" --repo "$REPO" --json body --jq .body 2>/dev/null || true)"
+            if [ "$msg" = "$current" ]; then
+              echo "unchanged $tag"
+              unchanged=$((unchanged + 1))
+              continue
+            fi
+            printf '%s\n' "$msg" > notes.md
+            gh release edit "$tag" --repo "$REPO" --notes-file notes.md
+            echo "updated   $tag"
+            updated=$((updated + 1))
+          done
+
+          echo "Done: $updated updated, $unchanged unchanged"
