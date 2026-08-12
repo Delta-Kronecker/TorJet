@@ -27,7 +27,8 @@ data\
 
 ## Usage
 
-1. Download the `torjet-win64` artifact from GitHub Actions and unzip.
+1. Download `torjet-win64-vX.Y.Z.zip` from GitHub Releases (or the `torjet-win64`
+   artifact from GitHub Actions) and unzip.
 2. Double-click `TorJet.exe`. The main menu lets you pick:
    - **Connection mode** — Direct (no bridges, when Tor isn't blocked),
      WebTunnel, Obfs4, Vanilla, Snowflake (bridges from `data\bridges\`)
@@ -39,8 +40,9 @@ data\
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
    - **Fragment (xray)** — routes all tor relay TLS through a local
      `xray.exe` SOCKS proxy that fragments the TLS ClientHello (a common
-     circumvention technique against SNI/length-based DPI). Default off;
-     needs `data\xray.exe`. Also settable via `--fragment` / `--no-fragment`.
+     circumvention technique against SNI/length-based DPI). Default on when
+     `data\xray.exe` is present; toggle it in Settings. Also settable via
+     `--fragment` / `--no-fragment`.
    - **Conflux topology** (from the Settings submenu) — how many conflux
      circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
@@ -61,8 +63,9 @@ data\
    test: single-stream over the HTTP proxy, or the *max* test which opens
    several parallel SOCKS5 streams, each authenticated with a unique username
    so tor's isolation gives every stream its own circuit (the true
-    multi-path throughput ceiling). Press **C** to stop Tor (system proxy,
-    TUN mode and the core) and return to the main menu.
+    multi-path throughput ceiling). Press **D** for conflux details, **A** to
+   add a leg to a set, **L** (or **V**) to view the logs, and **C** to stop
+   Tor (system proxy, TUN mode and the core) and return to the main menu.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
 
 ### TUN mode (all traffic through Tor)
@@ -101,10 +104,11 @@ TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
-TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1500)
-TorJet.exe --watch-interval 20 check circuits every N seconds (default 20)
-TorJet.exe --watch-cooldown 60 min seconds between closes (default 60)
-TorJet.exe --warmup 60         tunnel warmup pings per run, 1/s (default 60)
+TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1000)
+TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
+TorJet.exe --watch-min-legs 1  a set is never pruned below this many linked legs (default 1)
+TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
+TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
 TorJet.exe --newcircuit        request a new identity (NEWNYM)
 TorJet.exe --update-bridges    re-download the bridge lists from the
                                   Tor-Bridges-Collector repo and replace them
@@ -112,7 +116,15 @@ TorJet.exe --update-bridges    re-download the bridge lists from the
 TorJet.exe --tun-off           turn TUN mode off (same as pressing T twice)
 TorJet.exe --tun-status        print whether TUN mode is on or off
 TorJet.exe --stop              stop Tor and restore the proxy
+TorJet.exe --bootstrap-only    boot to 100% then stop (no proxy change)
+TorJet.exe --conflux-status    print the conflux set/leg/linked status
+TorJet.exe --conflux-add [set] add a leg to a conflux set
+TorJet.exe --conflux-check     boot, wait for conflux to build, then report
+TorJet.exe --bench             headless throughput benchmark (see scripts\bench.ps1)
 ```
+
+In the background TorJet also checks GitHub for a newer release every 30
+minutes and prints a download link when one exists.
 
 ## How traffic flows
 
@@ -144,8 +156,8 @@ tor.exe
    │  torrc line: Socks5Proxy 127.0.0.1:10808
    ▼
 xray.exe 127.0.0.1:10808      (internal - NOT for the browser)
-   │  splits the TLS ClientHello into 100-200 byte chunks
-   │  at 10-20 ms intervals ("tlshello" fragmentation)
+   │  two stacked fragment passes: first splits the TLS ClientHello
+   │  ("tlshello"), then re-splits the remaining stream in 1-byte pieces
    ▼
 real guard/bridge IP over the Tor network
    ▼
@@ -194,46 +206,49 @@ quality legs so tor rebuilds them with fresh circuits:
   pruned below `--watch-min-legs` (default 1);
 - legs stuck **unlinked** for `--watch-unlinked-strikes` passes (default 4)
   AND older than `--watch-unlinked-grace` seconds (default 120) are closed as
-  dead weight, but never during tunnel warmup when everything is still
-  building;
+  dead weight, but never in the first 90 s after bootstrap while everything is
+  still building;
 - at most `--watch-max-per-pass` legs (default 6) are closed per pass so
   replacement builds don't pile up.
 
 tor launches a replacement leg for every closed leg (sets below the configured
 `ConfluxNumLegs` target are also topped up with `CONFLUX ADD`), and conflux
 migrates streams onto the fresh circuits. A 20 s cooldown between closes keeps
-the circuit set stable (relaxed during tunnel warmup). After every close pass a
+the circuit set stable (relaxed during the first 90 s after bootstrap). After
+every close pass a
 summary report is printed to the console (legs closed, circuit ids, and the
 current conflux set/leg/linked counts). Disable it with
 `--no-circuit-watch`; tune it with `--watch-rtt <ms>`, `--watch-interval
 <seconds>`, `--watch-cooldown <seconds>` and the other `--watch-*` flags.
 
-### Tunnel warmup
+### Keep-alive
 
-Once bootstrap hits 100%, TorJet warms the tunnel immediately with lightweight
-`generate_204` pings sent through the **SOCKS5 proxy (127.0.0.1:9050)** — the
-same port you test — one request dispatched every second for 60 s, each allowed
-up to 5 s for a response (recorded as ok / fail / timeout). Requests overlap, so
-a slow circuit never stalls the 1/s cadence and the whole phase is bounded to
-about 65 s. The old 1 MiB download check was replaced:
-it gave false negatives on cold single-stream circuits and added ~1 MiB of
-padding traffic. The progress line shows a **clock** (elapsed/max, e.g.
-`[00:47/01:05]`) plus live ok/fail/timeout/avg/worst; the run ends with a
-summary (ok/fail/timeouts, average, best and worst latency). The tunnel is
-considered ready after at least 5 successful pings; otherwise Tor is stopped
-and the main menu is shown again. During warmup the monitor's close cooldown is
-relaxed, so weak legs are replaced immediately. Adjust the duration with
-`--warmup <seconds>` (default 60).
+Once bootstrap hits 100%, TorJet starts a permanent keep-alive: a lightweight
+`generate_204` ping is dispatched through the **SOCKS5 proxy (127.0.0.1:9050)**
+— the same port you test — every second, for as long as the session runs. Each
+request is allowed up to 5 s for a response and is recorded as ok / fail /
+timeout. The loop runs in the background while the menu is served (so the menu
+appears immediately) and stops only when you press **C**, tor exits, or the
+app is closed. It keeps circuits warm and honest: if tor dies, the pings start
+failing (details go to `data\data\jet.log`). The old 1 MiB download check was
+replaced: it gave false negatives on cold single-stream circuits and added
+~1 MiB of padding traffic. During the first 90 s after bootstrap the monitor's
+close cooldown is relaxed, so weak legs are replaced immediately.
 
 ## Building
 
 `.github/workflows/build.yml` builds tor + transports and publishes the
 `torjet-win64` artifact on every push.
 
-- `tor-src\` — unmodified official tor 0.4.9.11 source
+- `tor-src\` — official tor 0.4.9.11 source with TorJet's conflux extensions
+  (the `CONFLUX` control command, the `ConfluxNumSets` / `ConfluxNumLegs` /
+  `ConfluxNumLinkedSets` torrc options, and launch-budget refund +
+  auto-relaunch after a leg is closed)
 - `configs\torrc.jet` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `TorJet.exe` (compiled with `scripts\build-start-tor.ps1`)
+- `scripts\bench.ps1` — headless benchmark harness driving `TorJet.exe --bench`
+  (1/4/8 parallel streams, CSV output per run)
 
 ## License
 

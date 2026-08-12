@@ -55,10 +55,11 @@ namespace StartTor
         // Conflux topology set from the settings submenu. 0 = use the consensus
         // default (cfx_num_legs_set / cfx_max_prebuilt_set / cfx_max_linked_set);
         // positive values are written to the generated torrc as ConfluxNumSets /
-        // ConfluxNumLegs / ConfluxNumLinkedSets.
-        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile);
-        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile);
-        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile);
+        // ConfluxNumLegs / ConfluxNumLinkedSets. When no setting file exists the
+        // defaults are 10 sets / 3 legs / 10 linked sets.
+        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 10);
+        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 3);
+        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 10);
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
         {
@@ -168,18 +169,19 @@ namespace StartTor
         private static readonly Dictionary<string, DateTime> unlinkedFirstSeen =
             new Dictionary<string, DateTime>();
 
-        // Guards console output shared between the main thread (warmup progress)
-        // and the circuit monitor thread, so lines never interleave mid-write.
+        // Guards console output shared between the main thread (keep-alive /
+        // menu output) and the circuit monitor thread, so lines never
+        // interleave mid-write.
         private static readonly object consoleLock = new object();
 
         // During tunnel warmup the watch cooldown is relaxed so weak legs are
         // replaced immediately instead of waiting out the normal gap.
         private static volatile bool circuitWatchWarmup;
 
-        // Ping-based tunnel warmup: one generate_204 request dispatched every
-        // second for warmupSeconds, replacing the old 1 MiB download check
-        // (which gave false negatives on cold single-stream circuits).
-        private static int warmupSeconds = 60;
+        // After bootstrap the circuit monitor keeps its relaxed cooldown for a
+        // short window while the first conflux legs build, then enforces the
+        // normal gap between pruning passes.
+        private static int warmupRelaxSeconds = 90;
 
         [DllImport("wininet.dll", SetLastError = true)]
         private static extern bool InternetSetOption(IntPtr h, int option, IntPtr buffer, int length);
@@ -361,6 +363,7 @@ namespace StartTor
         {
             if (cleaned) return;
             cleaned = true;
+            StopKeepAlive();
             circuitWatchStop = true;
             if (TunActive())
             {
@@ -504,7 +507,7 @@ namespace StartTor
             catch { }
         }
 
-        private static int ReadConfluxSetting(string path)
+        private static int ReadConfluxSetting(string path, int fallback)
         {
             try
             {
@@ -516,7 +519,7 @@ namespace StartTor
                 }
             }
             catch { }
-            return 0;
+            return fallback;
         }
 
         private static void WriteConfluxSetting(string path, int value)
@@ -809,10 +812,9 @@ namespace StartTor
                 Console.WriteLine("    1)  Start Tor");
                 Console.WriteLine("    2)  Connection mode   : " + ModeNames[mode]);
                 Console.WriteLine("    3)  Settings");
-                Console.WriteLine("    4)  View log");
-                Console.WriteLine("    5)  Quit");
+                Console.WriteLine("    4)  Quit");
                 Console.WriteLine();
-                Console.Write("  Enter 1-5 (Enter = Start): ");
+                Console.Write("  Enter 1-4 (Enter = Start): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { mode = -1; return; }
@@ -830,8 +832,7 @@ namespace StartTor
                     {
                         ShowSettingsMenu(ref strategy, ref fragment);
                     }
-                    else if (n == 4) { ViewLog(); }
-                    else if (n == 5) { mode = -1; return; }
+                    else if (n == 4) { mode = -1; return; }
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else
@@ -1905,7 +1906,7 @@ namespace StartTor
         }
 
         // Appends a timestamped line to the launcher log (data\jet.log). All the
-        // operational detail (monitor actions, warmup, status snapshots) goes here
+        // operational detail (monitor actions, keep-alive, status snapshots) goes here
         // so the live console stays clean. Logging never blocks or fails the app.
         private static void Log(string msg)
         {
@@ -2123,8 +2124,8 @@ namespace StartTor
             "http://speedtest.tele2.net/10MB.zip"
         };
 
-        // Lightweight endpoints that answer 204 No Content - perfect for
-        // tunnel warmup pings. They are fetched with a plain HTTP GET through a
+        // Lightweight endpoints that answer 204 No Content - perfect for the
+        // keep-alive pings. They are fetched with a plain HTTP GET through a
         // real SOCKS5 CONNECT on 127.0.0.1:9050, i.e. the same port the user
         // tests, so a healthy report is not a false positive.
         private class PingTarget
@@ -2268,199 +2269,79 @@ namespace StartTor
             }
         }
 
-        // Warms the tunnel with real SOCKS5 generate_204 pings (127.0.0.1:9050)
-        // instead of a 1 MiB download, which produced false negatives on cold
-        // single-stream circuits. One request is dispatched every second for
-        // warmupSeconds; each request is allowed up to 5 s to get a response and
-        // is recorded as ok / fail / timeout. Requests overlap: a slow one never
-        // stalls the 1/s cadence (the old loop tried up to 3 hosts sequentially
-        // with 5 s timeouts each, stretching a 60 s warmup to many minutes on a
-        // slow tunnel). The whole phase is therefore bounded to about
-        // warmupSeconds + 5 s (the last request's timeout), i.e. ~65 s. The
-        // tunnel is ready when at least 5 pings succeeded. C aborts (stops tor,
-        // back to the main menu).
-        // The ping loop runs on worker threads while the caller polls for C, so
-        // abort works even when a request is stuck on a slow circuit. After the
-        // loop, conflux linkage is reported honestly: pings succeed on plain
-        // circuits even when no conflux leg has linked yet.
-        private static readonly object warmupLock = new object();
-        private static volatile bool warmupAbort;
-        private static volatile bool warmupRunning;
-        private static volatile int warmupDone, warmupOk, warmupFail, warmupTimeouts;
-        private static long warmupTotalMs, warmupBestMs, warmupWorstMs;
-        private static Stopwatch warmupPhaseSw;
+        // Permanent keep-alive through the real SOCKS proxy (127.0.0.1:9050):
+        // one generate_204 request dispatched every second for as long as the
+        // session runs. Each request is allowed up to 5 s to get a response and
+        // is recorded as ok / fail / timeout. Requests overlap, so a slow one
+        // never stalls the 1/s cadence. The keep-alive keeps the tunnel warm and
+        // honest: if tor dies, the pings start failing. It runs in the
+        // background while the menu is served and stops only when the session is
+        // torn down (C, tor exit or Ctrl+C).
+        private static readonly object keepAliveLock = new object();
+        private static volatile bool keepAliveStop;
+        private static volatile bool keepAliveStarted;
+        private static volatile int keepAliveDone, keepAliveOk, keepAliveFail, keepAliveTimeouts;
+        private static long keepAliveTotalMs, keepAliveBestMs, keepAliveWorstMs;
 
-        private static string FormatClock(long ms)
+        private static void KeepAliveLoop()
         {
-            TimeSpan ts = TimeSpan.FromMilliseconds(ms);
-            return ((int)ts.TotalMinutes).ToString("D2") + ":" + ts.Seconds.ToString("D2");
-        }
-
-        private static void DrawWarmupLine()
-        {
-            int done = 0, ok = 0, fail = 0, timeouts = 0;
-            long total = 0, worst = 0, phase = 0;
-            lock (warmupLock)
+            Stopwatch clock = Stopwatch.StartNew();
+            long tick = 0;
+            while (!keepAliveStop)
             {
-                done = warmupDone; ok = warmupOk; fail = warmupFail; timeouts = warmupTimeouts;
-                total = warmupTotalMs; worst = warmupWorstMs;
-                if (warmupPhaseSw != null) phase = warmupPhaseSw.ElapsedMilliseconds;
-            }
-            long cap = (long)(warmupSeconds + 5) * 1000;
-            string line = "warmup " + done + "/" + warmupSeconds + "  [" +
-                          FormatClock(phase) + "/" + FormatClock(cap) +
-                          "]  ok=" + ok + "  fail=" + fail + "  timeout=" + timeouts +
-                          "  avg=" + (ok > 0 ? total / ok : 0) +
-                          "ms  worst=" + worst + "ms";
-            lock (consoleLock)
-            {
-                if (line.Length < progressLineLen) line = line.PadRight(progressLineLen);
-                Console.Write("\r" + line);
-                progressLineLen = line.Length;
-            }
-        }
-
-        private static void WarmupPingWorker(PingTarget target)
-        {
-            long ems;
-            int r = PingSocks(target.Host, target.Path, out ems);
-            lock (warmupLock)
-            {
-                warmupDone++;
-                if (r == 1)
+                tick++;
+                PingTarget target = PingTargets[(int)((tick - 1) % PingTargets.Length)];
+                long ems;
+                int r = PingSocks(target.Host, target.Path, out ems);
+                lock (keepAliveLock)
                 {
-                    if (ems < 0) ems = 0;
-                    warmupOk++;
-                    warmupTotalMs += ems;
-                    if (ems < warmupBestMs) warmupBestMs = ems;
-                    if (ems > warmupWorstMs) warmupWorstMs = ems;
-                }
-                else if (r == -1) warmupTimeouts++;
-                else warmupFail++;
-            }
-        }
-
-        private static bool WarmupTunnel()
-        {
-            Console.WriteLine("warming tunnel: real delay test via SOCKS 127.0.0.1:9050, " +
-                              "1 request/s for " + warmupSeconds + " s, 5 s timeout " +
-                              "(C = stop Tor)...");
-            warmupAbort = false;
-            warmupRunning = true;
-            warmupDone = 0;
-            warmupOk = 0;
-            warmupFail = 0;
-            warmupTimeouts = 0;
-            warmupTotalMs = 0;
-            warmupBestMs = long.MaxValue;
-            warmupWorstMs = 0;
-            warmupPhaseSw = Stopwatch.StartNew();
-
-            Thread worker = new Thread(delegate ()
-            {
-                var inflight = new List<Thread>();
-                for (int i = 1; i <= warmupSeconds; i++)
-                {
-                    if (warmupAbort) break;
-                    PingTarget target = PingTargets[(i - 1) % PingTargets.Length];
-                    Thread t = new Thread(delegate () { WarmupPingWorker(target); });
-                    t.IsBackground = true;
-                    t.Start();
-                    inflight.Add(t);
-                    long targetMs = (long)i * 1000;
-                    while (!warmupAbort && warmupPhaseSw.ElapsedMilliseconds < targetMs)
-                        Thread.Sleep(50);
-                }
-                if (!warmupAbort)
-                {
-                    foreach (Thread t in inflight) t.Join();
-                }
-                warmupRunning = false;
-            });
-            worker.IsBackground = true;
-            worker.Start();
-
-            while (warmupRunning && !warmupAbort)
-            {
-                DrawWarmupLine();
-                Thread.Sleep(200);
-                try
-                {
-                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    keepAliveDone++;
+                    if (r == 1)
                     {
-                        warmupAbort = true;
-                        break;
+                        if (ems < 0) ems = 0;
+                        keepAliveOk++;
+                        keepAliveTotalMs += ems;
+                        if (ems < keepAliveBestMs) keepAliveBestMs = ems;
+                        if (ems > keepAliveWorstMs) keepAliveWorstMs = ems;
                     }
+                    else if (r == -1) keepAliveTimeouts++;
+                    else keepAliveFail++;
                 }
-                catch { }
+                long targetMs = tick * 1000;
+                while (!keepAliveStop && clock.ElapsedMilliseconds < targetMs)
+                    Thread.Sleep(50);
             }
+        }
 
-            if (warmupAbort)
+        private static void StartKeepAlive()
+        {
+            lock (keepAliveLock)
             {
-                lock (consoleLock)
-                {
-                    ClearProgressLine();
-                    Console.WriteLine("warmup aborted (C) - stopping Tor.");
-                }
-                Log("warmup aborted by user (C)");
-                return false;
+                keepAliveStop = false;
+                keepAliveStarted = true;
+                keepAliveDone = 0;
+                keepAliveOk = 0;
+                keepAliveFail = 0;
+                keepAliveTimeouts = 0;
+                keepAliveTotalMs = 0;
+                keepAliveBestMs = long.MaxValue;
+                keepAliveWorstMs = 0;
             }
+            Thread t = new Thread(KeepAliveLoop) { IsBackground = true };
+            t.Start();
+            Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:9050, 5 s timeout");
+        }
 
-            while (warmupRunning)
+        private static void StopKeepAlive()
+        {
+            if (!keepAliveStarted) return;
+            keepAliveStarted = false;
+            keepAliveStop = true;
+            lock (keepAliveLock)
             {
-                DrawWarmupLine();
-                Thread.Sleep(200);
+                Log("keep-alive: stopped - " + keepAliveOk + " ok / " + keepAliveFail +
+                    " fail / " + keepAliveTimeouts + " timeouts");
             }
-
-            lock (consoleLock)
-            {
-                ClearProgressLine();
-                Console.WriteLine();
-            }
-            int ok = warmupOk, fail = warmupFail, timeouts = warmupTimeouts;
-            long totalMs = warmupTotalMs, bestMs = warmupBestMs, worstMs = warmupWorstMs;
-            long phaseMs = warmupPhaseSw == null ? 0 : warmupPhaseSw.ElapsedMilliseconds;
-            string summary = "warmup done: " + ok + " ok / " + fail + " fail / " + timeouts +
-                             " timeouts in " + FormatClock(phaseMs) + " - avg " +
-                             (ok > 0 ? totalMs / ok : 0) + " ms, best " +
-                             (bestMs == long.MaxValue ? "-" : bestMs.ToString()) +
-                             " ms, worst " + worstMs + " ms.";
-            Console.WriteLine(summary);
-            Log(summary);
-
-            int sets = 0, legs = 0, linked = 0;
-            var legList = ConfluxQuery();
-            if (legList != null)
-            {
-                var setIds = new HashSet<string>();
-                foreach (string[] leg in legList)
-                {
-                    setIds.Add(leg[0]);
-                    if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) linked++;
-                }
-                sets = setIds.Count;
-                legs = legList.Count;
-            }
-            string cfx = "conflux: " + sets + " set(s), " + legs + " leg(s), " +
-                         linked + " linked";
-            Console.WriteLine(cfx);
-            Log(cfx);
-            if (legList != null && legs > 0 && linked == 0)
-                Console.WriteLine("[!] no conflux leg is linked yet - pings ran on plain " +
-                                  "circuits, conflux is not aggregating traffic.");
-            if (ok >= 5)
-            {
-                long avg = ok > 0 ? totalMs / ok : 0;
-                if (avg > 3000)
-                    Console.WriteLine("[!] tunnel is up but average ping is high (" +
-                                      avg + " ms) - circuits may be slow.");
-            }
-            else
-            {
-                Console.WriteLine("[!] tunnel could not be warmed (only " + ok +
-                                  " successful pings) - stopping Tor.");
-            }
-            return ok >= 5;
         }
 
         // Picks the first speed endpoint reachable through the proxy.
@@ -2860,20 +2741,17 @@ namespace StartTor
                     watchCooldownS + " s, relaxed during warmup).");
             }
 
-            // Warm the tunnel while the circuit monitor runs with the close
-            // cooldown relaxed, so weak legs are replaced right away.
-            bool tunnelReady = WarmupTunnel();
-            circuitWatchWarmup = false;
-            if (!tunnelReady)
+            // Start the permanent keep-alive (1 request/s through the real
+            // SOCKS proxy) and show the menu right away. The monitor keeps its
+            // relaxed cooldown for a short window after bootstrap while the
+            // first conflux legs build, then enforces the normal gap.
+            StartKeepAlive();
+            Thread warmupEnd = new Thread(delegate()
             {
-                Console.WriteLine("  Stopping Tor...");
-                Cleanup();
-                cleaned = false;
-                torProc = null;
-                Console.WriteLine("  Tor stopped; system proxy restored.");
-                Console.WriteLine();
-                return 2;
-            }
+                Thread.Sleep(TimeSpan.FromSeconds(warmupRelaxSeconds));
+                circuitWatchWarmup = false;
+            }) { IsBackground = true };
+            warmupEnd.Start();
 
             bool proxyOn = false;
             if (autoMode == "proxy")
@@ -2889,10 +2767,16 @@ namespace StartTor
                 else
                     ToggleTun();
             }
-            Console.WriteLine("  P   toggle system proxy      D   conflux details");
-            Console.WriteLine("  T   toggle TUN mode          L   view log");
-            Console.WriteLine("  S   speed test                A   add a leg to a set");
-            Console.WriteLine("  C   stop Tor, back to menu");
+            Console.WriteLine("  D   conflux details");
+            Console.WriteLine("  L   view log");
+            Console.WriteLine("  S   speed test");
+            Console.WriteLine("  A   add a leg to a set");
+            Console.WriteLine();
+            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
+            Console.WriteLine("  T    :     On / Off  TUN mode");
+            Console.WriteLine("  P    :     On / Off  system proxy");
+            Console.WriteLine("  C    :     Stop Tor, back to menu");
+            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
             Console.WriteLine();
             while (true)
             {
@@ -3037,6 +2921,7 @@ namespace StartTor
         private static int Main(string[] args)
         {
             Console.Title = "TorJet";
+            try { Console.OutputEncoding = Encoding.UTF8; } catch { }
             Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;
@@ -3150,7 +3035,6 @@ namespace StartTor
                 else if (a == "--watch-max-per-pass" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMaxPerPass); }
                 else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
                 else if (a == "--watch-cooldown" && i + 1 < args.Length) { int.TryParse(args[++i], out watchCooldownS); }
-                else if (a == "--warmup" && i + 1 < args.Length) { int.TryParse(args[++i], out warmupSeconds); }
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
                 else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
@@ -3181,7 +3065,7 @@ namespace StartTor
             else
             {
                 if (strategy < 0) strategy = ReadLastStrategy();
-                if (strategy < 0) strategy = 0;
+                if (strategy < 0) strategy = StrategyNames.Length - 1;
                 while (true)
                 {
                     int rc = RunTorSession(mode, strategy, fragment, genOnly, bootstrapOnly, autoMode, true);
