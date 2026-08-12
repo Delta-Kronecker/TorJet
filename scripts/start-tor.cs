@@ -2065,13 +2065,149 @@ namespace StartTor
         };
 
         // Lightweight endpoints that answer 204 No Content - perfect for
-        // tunnel warmup pings through the proxy.
-        private static readonly string[] PingEndpoints =
+        // tunnel warmup pings. They are fetched with a plain HTTP GET through a
+        // real SOCKS5 CONNECT on 127.0.0.1:9050, i.e. the same port the user
+        // tests, so a healthy report is not a false positive.
+        private class PingTarget
         {
-            "https://www.gstatic.com/generate_204",
-            "https://connectivitycheck.gstatic.com/generate_204",
-            "https://cp.cloudflare.com/generate_204"
+            public string Host;
+            public string Path;
+            public PingTarget(string host, string path) { Host = host; Path = path; }
+        }
+        private static readonly PingTarget[] PingTargets =
+        {
+            new PingTarget("connectivitycheck.gstatic.com", "/generate_204"),
+            new PingTarget("cp.cloudflare.com", "/generate_204"),
+            new PingTarget("www.msftconnecttest.com", "/connecttest.txt")
         };
+
+        private static bool IsTimeoutException(Exception ex)
+        {
+            while (ex != null)
+            {
+                SocketException se = ex as SocketException;
+                if (se != null && se.SocketErrorCode == SocketError.TimedOut) return true;
+                ex = ex.InnerException;
+            }
+            return false;
+        }
+
+        // Reads exactly `n` bytes; false on short read or timeout.
+        private static bool ReadExact(NetworkStream ns, byte[] buf, int n)
+        {
+            int got = 0;
+            while (got < n)
+            {
+                int r = ns.Read(buf, got, n - got);
+                if (r <= 0) return false;
+                got += r;
+            }
+            return true;
+        }
+
+        // Reads the HTTP response head (status line + headers) up to CRLFCRLF.
+        private static string ReadHttpHead(NetworkStream ns)
+        {
+            StringBuilder sb = new StringBuilder();
+            byte[] one = new byte[1];
+            while (sb.Length < 8192)
+            {
+                int r = ns.Read(one, 0, 1);
+                if (r <= 0) break;
+                sb.Append((char)one[0]);
+                int len = sb.Length;
+                if (len >= 4 && sb[len - 4] == '\r' && sb[len - 3] == '\n' &&
+                    sb[len - 2] == '\r' && sb[len - 1] == '\n')
+                    break;
+            }
+            return sb.ToString();
+        }
+
+        // One real tunnel probe end to end: TCP connect to tor SOCKS
+        // (127.0.0.1:9050), SOCKS5 CONNECT to the target, then a plain HTTP GET
+        // through the tunnel. Returns 1 = ok (2xx), 0 = failed, -1 = timed out;
+        // `elapsedMs` carries the real round-trip delay of the successful ping.
+        private static int PingSocks(string host, string path, out long elapsedMs)
+        {
+            elapsedMs = 0;
+            Stopwatch sw = Stopwatch.StartNew();
+            TcpClient tc = null;
+            NetworkStream ns = null;
+            try
+            {
+                tc = new TcpClient();
+                IAsyncResult ar = tc.BeginConnect(IPAddress.Loopback, 9050, null, null);
+                if (!ar.AsyncWaitHandle.WaitOne(4000))
+                {
+                    tc.Close();
+                    return -1;
+                }
+                tc.EndConnect(ar);
+                tc.ReceiveTimeout = 5000;
+                tc.SendTimeout = 5000;
+                ns = tc.GetStream();
+                ns.ReadTimeout = 5000;
+                ns.WriteTimeout = 5000;
+
+                byte[] greet = { 0x05, 0x01, 0x00 };
+                ns.Write(greet, 0, 3);
+                byte[] ga = new byte[2];
+                if (!ReadExact(ns, ga, 2)) return 0;
+                if (ga[0] != 0x05 || ga[1] != 0x00) return 0;
+
+                byte[] hostB = Encoding.ASCII.GetBytes(host);
+                byte[] cmd = new byte[5 + hostB.Length + 2];
+                cmd[0] = 0x05; cmd[1] = 0x01; cmd[2] = 0x00; cmd[3] = 0x03;
+                cmd[4] = (byte)hostB.Length;
+                Buffer.BlockCopy(hostB, 0, cmd, 5, hostB.Length);
+                cmd[cmd.Length - 2] = 0x00;
+                cmd[cmd.Length - 1] = 0x50;
+                ns.Write(cmd, 0, cmd.Length);
+
+                byte[] repHdr = new byte[4];
+                if (!ReadExact(ns, repHdr, 4)) return 0;
+                if (repHdr[0] != 0x05 || repHdr[1] != 0x00) return 0;
+                int rest;
+                if (repHdr[3] == 0x01) rest = 6;
+                else if (repHdr[3] == 0x03)
+                {
+                    int dl = ns.ReadByte();
+                    if (dl < 0) return 0;
+                    rest = 1 + dl + 2;
+                }
+                else if (repHdr[3] == 0x04) rest = 18;
+                else return 0;
+                byte[] tail = new byte[rest];
+                if (!ReadExact(ns, tail, rest)) return 0;
+
+                string req = "GET " + path + " HTTP/1.1\r\n" +
+                             "Host: " + host + "\r\n" +
+                             "User-Agent: torjet-warmup/1.0\r\n" +
+                             "Connection: close\r\n\r\n";
+                byte[] reqB = Encoding.ASCII.GetBytes(req);
+                ns.Write(reqB, 0, reqB.Length);
+
+                string head = ReadHttpHead(ns);
+                sw.Stop();
+                elapsedMs = sw.ElapsedMilliseconds;
+                if (head.Length == 0) return 0;
+                int sp = head.IndexOf(' ');
+                if (sp < 0 || head.Length < sp + 4) return 0;
+                int code;
+                if (!int.TryParse(head.Substring(sp + 1, 3), out code)) return 0;
+                return (code >= 200 && code < 300) ? 1 : 0;
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                return IsTimeoutException(ex) ? -1 : 0;
+            }
+            finally
+            {
+                if (ns != null) try { ns.Close(); } catch { }
+                if (tc != null) try { tc.Close(); } catch { }
+            }
+        }
 
         // Warms the tunnel with generate_204 pings through the HTTP proxy
         // (127.0.0.1:8118) instead of a 1 MiB download, which produced false
@@ -2104,10 +2240,8 @@ namespace StartTor
 
         private static bool WarmupTunnel()
         {
-            try { ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12; }
-            catch { }
-            Console.WriteLine("warming tunnel: pinging generate_204 every second for " +
-                              warmupSeconds + " s (C = stop Tor)...");
+            Console.WriteLine("warming tunnel: real delay test via SOCKS 127.0.0.1:9050 " +
+                              "every second for " + warmupSeconds + " s (C = stop Tor)...");
             warmupAbort = false;
             warmupRunning = true;
             warmupDone = 0;
@@ -2125,30 +2259,22 @@ namespace StartTor
                     if (warmupAbort) break;
                     bool success = false;
                     bool anyTimeout = false;
+                    long okMs = -1;
                     Stopwatch sw = Stopwatch.StartNew();
-                    foreach (string u in PingEndpoints)
+                    foreach (PingTarget t in PingTargets)
                     {
-                        try
+                        long ems;
+                        int r = PingSocks(t.Host, t.Path, out ems);
+                        if (r == 1)
                         {
-                            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
-                            req.Proxy = new WebProxy("127.0.0.1", 8118);
-                            req.Method = "GET";
-                            req.Timeout = 5000;
-                            req.ReadWriteTimeout = 5000;
-                            req.UserAgent = "torjet-warmup/1.0";
-                            using (WebResponse resp = req.GetResponse())
-                            {
-                                if ((int)((HttpWebResponse)resp).StatusCode < 400) { success = true; break; }
-                            }
+                            success = true;
+                            okMs = ems >= 0 ? ems : sw.ElapsedMilliseconds;
+                            break;
                         }
-                        catch (WebException wex)
-                        {
-                            if (wex.Status == WebExceptionStatus.Timeout) anyTimeout = true;
-                        }
-                        catch { }
+                        if (r == -1) anyTimeout = true;
                     }
                     sw.Stop();
-                    long elapsedMs = sw.ElapsedMilliseconds;
+                    long elapsedMs = okMs >= 0 ? okMs : sw.ElapsedMilliseconds;
                     if (success)
                     {
                         warmupOk++;
