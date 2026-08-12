@@ -170,10 +170,12 @@ jobs:
           Copy-Item "transports\*.dll" -Destination "dist\data\" -Force
           Get-ChildItem "dist" -Recurse -File | Select-Object FullName, Length
 
-      - name: Copy config template, bridges, README
+      - name: Copy config template, xray config, bridges, README
         shell: pwsh
         run: |
           Copy-Item "configs\torrc.jet" "dist\data\torrc.template" -Force
+          New-Item -ItemType Directory -Path "dist\data\xray" -Force | Out-Null
+          Copy-Item "configs\xray-config.json" "dist\data\xray\config.json" -Force
           Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
 

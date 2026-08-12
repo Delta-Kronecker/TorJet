@@ -21,7 +21,7 @@ data\
   wintun.dll           Wintun driver used by tun2socks
   xray.exe             optional: TLS fragment proxy (see Fragment toggle)
   xray\config.json     xray config - edit freely, TorJet just runs it as-is
-                       (a default is written only when the file is missing)
+                       (ships with the release; source: configs\xray-config.json)
   data\                runtime state (cached consensus, keys, tor.log)
 ```
 
