@@ -44,13 +44,14 @@ data\
    - **Conflux topology** (from the Settings submenu) — how many conflux
      circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
-       sets to prebuild/keep alive. Each set is one exit path.
+       sets to keep alive. The total (linked + building) is held exactly at
+       this many, so the count matches what you set. Each set is one exit
+       path.
      - **Conflux legs** (`ConfluxNumLegs`, 0=consensus default) — legs per
        set; more legs = more parallel bandwidth per set.
      - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
-       default) — hard cap on linked sets. Set it equal to *Conflux sets*
-       to keep exactly that many alive even while some are in use; a larger
-       value lets tor build extra sets on top of in-use ones.
+       default) — ceiling on *linked* sets; it only binds when set below
+       *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
    Your choices are remembered for next time (`data\mode.txt`,
    `data\strategy.txt`, `data\conflux-sets.txt`,
    `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).

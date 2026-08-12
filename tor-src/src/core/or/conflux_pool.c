@@ -1351,31 +1351,6 @@ conflux_add_middles_to_exclude_list(const origin_circuit_t *orig_circ,
   }
 }
 
-/** Return the number of unused client linked set. */
-static int
-count_client_usable_sets(void)
-{
-  int count = 0;
-
-  DIGEST256MAP_FOREACH(client_linked_pool, key, conflux_t *, cfx) {
-    conflux_leg_t *leg = smartlist_get(cfx->legs, 0);
-    if (BUG(!leg->circ)) {
-      log_warn(LD_BUG, "Client conflux linked set leg without a circuit");
-      continue;
-    }
-
-    /* The maze marks circuits used several different ways. If any of
-     * them are marked for this leg, launch a new one. */
-    if (!CONST_TO_ORIGIN_CIRCUIT(leg->circ)->unusable_for_new_conns &&
-        !CONST_TO_ORIGIN_CIRCUIT(leg->circ)->isolation_values_set &&
-        !leg->circ->timestamp_dirty) {
-      count++;
-    }
-  } DIGEST256MAP_FOREACH_END;
-
-  return count;
-}
-
 /** Determine if we need to launch new conflux circuits for our preemptive
  * pool.
  *
@@ -1401,8 +1376,13 @@ conflux_predict_new(time_t now)
   }
 
   /* Count the linked and unlinked to get the total number of sets we have
-   * (will have). */
-  int num_linked = count_client_usable_sets();
+   * (will have). Every linked set counts, used or not: upstream only counted
+   * "usable" linked sets, so a set that had served a stream was treated as
+   * missing and replaced even while still healthy, letting the pool grow past
+   * the prebuilt target (a set currently in use still serves new streams via
+   * conflux multiplexing, so it does not need a replacement). Counting all
+   * linked sets is what keeps the total bounded at the prebuilt target. */
+  int num_linked = digest256map_size(client_linked_pool);
   int num_unlinked = digest256map_size(client_unlinked_pool);
   int num_set = num_unlinked + num_linked;
   int max_prebuilt = conflux_params_get_max_prebuilt();
