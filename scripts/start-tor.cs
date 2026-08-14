@@ -2287,9 +2287,10 @@ namespace StartTor
         // i.e. the same tor instance the user tests, so a healthy report is not
         // a false positive. The port is configured with NoIsolateSOCKSAuth, so
         // the marker username below does not push the pings onto their own
-        // circuits; tor recognizes the username and routes the stream
-        // round-robin across every conflux set regardless of the configured
-        // selection policy and RTT filters.
+        // circuits; tor recognizes the username and routes each ping to the
+        // least-loaded conflux set regardless of the configured selection
+        // policy and RTT filters, keeping the pings spread evenly across all
+        // sets.
         private class PingTarget
         {
             public string Host;

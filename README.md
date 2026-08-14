@@ -246,9 +246,11 @@ SOCKS5 port (127.0.0.1:9052, `NoIsolateSOCKSAuth`)** on the same tor instance yo
 test, so a healthy report is not a false positive. Each request is allowed up to
 5 s for a response and is recorded as ok / fail / timeout. Because the pings use
 a fixed SOCKS5 auth username, tor recognizes them and **always spreads them
-round-robin across every conflux set**, bypassing the set-selection policy and
-the RTT filters (settings items 7-9) — so keep-alive traffic keeps exercising
-all sets even when the slow-set filters would normally skip them. The loop runs
+evenly across every conflux set** (each ping lands on the set that has seen the
+fewest streams, so the spread stays balanced even while sets are being rebuilt),
+bypassing the set-selection policy and the RTT filters (settings items 7-9) — so
+keep-alive traffic keeps exercising all sets even when the slow-set filters
+would normally skip them. The loop runs
 in the background while the menu is served (so the menu appears immediately) and
 stops only when you press **C**, tor exits, or the app is closed. It keeps
 circuits warm and honest: if tor dies, the pings start failing (details go to

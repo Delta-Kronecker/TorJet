@@ -1414,6 +1414,8 @@ typedef struct conflux_set_candidate_t {
   uint64_t best_rtt_usec;
   /** Number of streams currently attached to the set. */
   size_t num_streams;
+  /** Total number of streams the set has had since it was created. */
+  uint64_t total_streams;
 } conflux_set_candidate_t;
 
 /** TorJet extension: return the best (lowest) valid leg RTT in usec for the
@@ -1491,11 +1493,15 @@ conflux_conn_is_keepalive(const entry_connection_t *conn)
 }
 
 /** Torjet extension: pick the set to attach a new stream to, honoring the
- * configured selection policy. If force_round_robin is true, the sets are
- * always rotated through (keep-alive streams), ignoring the configured policy.
+ * configured selection policy. If keepalive_balance is true (TorJet keep-alive
+ * streams), pick the set with the fewest cumulative streams: a stable,
+ * self-balancing rotation that keeps keep-alive pings spread evenly across
+ * every set even while sets are being rebuilt and drop in and out of the
+ * candidate list (a plain round-robin counter would drift because the list is
+ * hash-ordered and its membership/order changes between calls).
  * Returns NULL if the list is empty. */
 static origin_circuit_t *
-conflux_pick_set_from_candidates(smartlist_t *cands, bool force_round_robin)
+conflux_pick_set_from_candidates(smartlist_t *cands, bool keepalive_balance)
 {
   const int n = smartlist_len(cands);
   if (n == 0) {
@@ -1505,7 +1511,15 @@ conflux_pick_set_from_candidates(smartlist_t *cands, bool force_round_robin)
   const int policy = conflux_params_get_set_selection();
   int picked = 0;
 
-  if (force_round_robin || policy == CONFLUX_SET_SELECT_ROUND_ROBIN) {
+  if (keepalive_balance) {
+    uint64_t least = UINT64_MAX;
+    SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+      if (c->total_streams < least) {
+        least = c->total_streams;
+        picked = c_sl_idx;
+      }
+    } SMARTLIST_FOREACH_END(c);
+  } else if (policy == CONFLUX_SET_SELECT_ROUND_ROBIN) {
       /* Rotate across the candidate sets so each request goes to a different
        * one when several are available. */
       static uint64_t counter = 0;
@@ -1590,13 +1604,14 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
     cand->ocirc = ocirc;
     cand->best_rtt_usec = conflux_set_best_rtt(cfx);
     cand->num_streams = conflux_set_stream_count(cfx);
+    cand->total_streams = cfx->total_streams;
     smartlist_add(cands, cand);
   } DIGEST256MAP_FOREACH_END;
 
   /* TorJet: keep-alive streams bypass the RTT-based set filters (ConfluxSetRttMax
-   * and ConfluxSetRttPct) and are always spread round-robin across every
-   * acceptable set, so keep-alive traffic keeps exercising all sets no matter
-   * what the user's selection policy and filters are. */
+   * and ConfluxSetRttPct) and are spread evenly across every acceptable set
+   * (picking the least-loaded one), so keep-alive traffic keeps exercising all
+   * sets no matter what the user's selection policy and filters are. */
   const bool keepalive = conflux_conn_is_keepalive(conn);
 
   origin_circuit_t *picked = NULL;
