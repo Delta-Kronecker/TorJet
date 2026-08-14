@@ -1797,7 +1797,23 @@ linked_circuit_closed(circuit_t *circ)
       /* This was the last leg and the set is gone. Unless a recovery unlinked
        * set shared the conflux object (that case handed ownership over above,
        * nullifying circ->conflux) or the close was part of a genuine teardown,
-       * rebuild the set with the same nonce. */
+       * rebuild the set with the same nonce.
+       *
+       * The fresh unlinked set adopts this circuit's conflux object and the
+       * dying circuit is detached from it, mirroring the recovery-leg handoff
+       * above. This keeps a single owner for the conflux object: were the new
+       * set to keep its own fresh object, linked_circuit_free() would find an
+       * unlinked set for the same nonce that does not share this conflux object
+       * (is_for_linked_set == false) and abort on its assertion, or end up with
+       * two owners of the old object and double-free it. */
+      unlinked_circuits_t *new_unlinked =
+        unlinked_get_or_create(nonce, is_client);
+      if (new_unlinked && smartlist_len(new_unlinked->legs) == 0) {
+        conflux_free(new_unlinked->cfx);
+        new_unlinked->cfx = circ->conflux;
+        new_unlinked->is_for_linked_set = false;
+      }
+      circ->conflux = NULL;
       conflux_launch_leg(nonce);
     }
   }
