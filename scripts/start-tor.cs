@@ -48,6 +48,7 @@ namespace StartTor
         private static readonly string ConfluxSetsFile = Path.Combine(DataDir, "conflux-sets.txt");
         private static readonly string ConfluxLegsFile = Path.Combine(DataDir, "conflux-legs.txt");
         private static readonly string ConfluxLinkedSetsFile = Path.Combine(DataDir, "conflux-linked-sets.txt");
+        private static readonly string KeepAliveFile = Path.Combine(DataDir, "keepalive.txt");
         private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
         private static readonly string XrayConfig = Path.Combine(DataDir, "xray", "config.json");
         private const int FragmentSocksPort = 10808;
@@ -528,6 +529,23 @@ namespace StartTor
             catch { }
         }
 
+        private static bool ReadKeepAliveSetting()
+        {
+            try
+            {
+                if (File.Exists(KeepAliveFile))
+                    return File.ReadAllText(KeepAliveFile).Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { }
+            return true;
+        }
+
+        private static void WriteKeepAliveFile(bool on)
+        {
+            try { File.WriteAllText(KeepAliveFile, on ? "on" : "off", new UTF8Encoding(false)); }
+            catch { }
+        }
+
         private static void PromptConfluxSets()
         {
             Console.WriteLine("  ConfluxNumSets = how many conflux sets to keep alive");
@@ -810,9 +828,10 @@ namespace StartTor
                 Console.WriteLine("       3)  Conflux sets        : " + (confluxSets == 0 ? "consensus" : confluxSets.ToString()));
                 Console.WriteLine("       4)  Conflux legs        : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
                 Console.WriteLine("       5)  Conflux linked (cap): " + (confluxLinkedSets == 0 ? "consensus" : confluxLinkedSets.ToString()));
-                Console.WriteLine("       6)  Back");
+                Console.WriteLine("       6)  Keep-alive          : " + (keepAliveEnabled ? "on" : "off"));
+                Console.WriteLine("       7)  Back");
                 Console.WriteLine();
-                Console.Write("  Enter 1-6 (Enter = Back): ");
+                Console.Write("  Enter 1-7 (Enter = Back): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return; }
@@ -833,7 +852,12 @@ namespace StartTor
                     else if (n == 3) { PromptConfluxSets(); }
                     else if (n == 4) { PromptConfluxLegs(); }
                     else if (n == 5) { PromptConfluxLinkedSets(); }
-                    else if (n == 6) return;
+                    else if (n == 6)
+                    {
+                        keepAliveEnabled = !keepAliveEnabled;
+                        WriteKeepAliveFile(keepAliveEnabled);
+                    }
+                    else if (n == 7) return;
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else Console.WriteLine("  Invalid choice, try again.");
@@ -2238,6 +2262,8 @@ namespace StartTor
         private static volatile bool keepAliveStarted;
         private static volatile int keepAliveDone, keepAliveOk, keepAliveFail, keepAliveTimeouts;
         private static long keepAliveTotalMs, keepAliveBestMs, keepAliveWorstMs;
+        private static Thread keepAliveThread;
+        private static bool keepAliveEnabled = ReadKeepAliveSetting();
 
         private static void KeepAliveLoop()
         {
@@ -2283,8 +2309,8 @@ namespace StartTor
                 keepAliveBestMs = long.MaxValue;
                 keepAliveWorstMs = 0;
             }
-            Thread t = new Thread(KeepAliveLoop) { IsBackground = true };
-            t.Start();
+            keepAliveThread = new Thread(KeepAliveLoop) { IsBackground = true };
+            keepAliveThread.Start();
             Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:9050, 5 s timeout");
         }
 
@@ -2293,10 +2319,57 @@ namespace StartTor
             if (!keepAliveStarted) return;
             keepAliveStarted = false;
             keepAliveStop = true;
+            if (keepAliveThread != null)
+            {
+                try { keepAliveThread.Join(2000); } catch { }
+                keepAliveThread = null;
+            }
             lock (keepAliveLock)
             {
                 Log("keep-alive: stopped - " + keepAliveOk + " ok / " + keepAliveFail +
                     " fail / " + keepAliveTimeouts + " timeouts");
+            }
+        }
+
+        private static void ShowKeepAliveReport()
+        {
+            lock (keepAliveLock)
+            {
+                Console.WriteLine();
+                Console.WriteLine("  --- keep-alive report ---");
+                if (!keepAliveStarted)
+                {
+                    Console.WriteLine("  keep-alive is OFF (toggle with J, or enable in Settings)");
+                    Console.WriteLine();
+                    return;
+                }
+                double avg = keepAliveOk > 0 ? (double)keepAliveTotalMs / keepAliveOk : 0;
+                Console.WriteLine("  sent     : " + keepAliveDone);
+                Console.WriteLine("  ok       : " + keepAliveOk);
+                Console.WriteLine("  fail     : " + keepAliveFail);
+                Console.WriteLine("  timeouts : " + keepAliveTimeouts);
+                Console.WriteLine("  RTT      : avg " + Math.Round(avg) + " ms, best " +
+                                  (keepAliveBestMs == long.MaxValue ? "-" : keepAliveBestMs.ToString()) +
+                                  " ms, worst " + keepAliveWorstMs + " ms");
+                Console.WriteLine();
+            }
+        }
+
+        private static void ToggleKeepAlive()
+        {
+            if (keepAliveStarted)
+            {
+                StopKeepAlive();
+                keepAliveEnabled = false;
+                WriteKeepAliveFile(false);
+                Console.WriteLine("  keep-alive OFF");
+            }
+            else
+            {
+                keepAliveEnabled = true;
+                WriteKeepAliveFile(true);
+                StartKeepAlive();
+                Console.WriteLine("  keep-alive ON (1 request/s)");
             }
         }
 
@@ -2701,7 +2774,10 @@ namespace StartTor
             // SOCKS proxy) and show the menu right away. The monitor keeps its
             // relaxed cooldown for a short window after bootstrap while the
             // first conflux legs build, then enforces the normal gap.
-            StartKeepAlive();
+            if (keepAliveEnabled)
+                StartKeepAlive();
+            else
+                Log("keep-alive: disabled by setting (data\\keepalive.txt)");
             Thread warmupEnd = new Thread(delegate()
             {
                 Thread.Sleep(TimeSpan.FromSeconds(warmupRelaxSeconds));
@@ -2727,6 +2803,8 @@ namespace StartTor
             Console.WriteLine("  L   view log");
             Console.WriteLine("  S   speed test");
             Console.WriteLine("  A   add a leg to a set");
+            Console.WriteLine("  K   keep-alive report");
+            Console.WriteLine("  J   keep-alive on/off");
             Console.WriteLine();
             Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
             Console.WriteLine("  T    :     On / Off  TUN mode");
@@ -2773,6 +2851,14 @@ namespace StartTor
                         else if (ki.Key == ConsoleKey.D)
                         {
                             lock (consoleLock) ConfluxStatus(true);
+                        }
+                        else if (ki.Key == ConsoleKey.K)
+                        {
+                            lock (consoleLock) ShowKeepAliveReport();
+                        }
+                        else if (ki.Key == ConsoleKey.J)
+                        {
+                            lock (consoleLock) ToggleKeepAlive();
                         }
                         else if (ki.Key == ConsoleKey.V)
                         {
