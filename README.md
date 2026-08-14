@@ -62,10 +62,10 @@ data\
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
       - **Weak legs (top %)** (`--watch-rtt-pct`, default 30) — the circuit
-        health monitor closes, per set, the top this-many percent of linked
-        legs with the highest RTT (fully relative, no absolute ms threshold);
-        the best leg of a set is never closed and a sole leg is never pruned.
-        0 = off.
+        health monitor closes the top this-many percent of linked legs with the
+        highest RTT compared **globally across every set** (fully relative, no
+        absolute ms threshold); the single best leg in the pool is never closed
+        and the pool is never fully pruned. 0 = off.
     Your choices are remembered for next time (`data\mode.txt`,
     `data\strategy.txt`, `data\conflux-sets.txt`,
     `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
@@ -208,15 +208,15 @@ While Tor is up, TorJet watches the conflux legs via the control port. Every
 10 s it asks tor for the conflux set list (`CONFLUX QUERY`) and prunes low
 quality legs so tor rebuilds them with fresh circuits:
 
-- a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of its
-  own set's linked legs by RTT (i.e. the slowest legs of each set; default 30%),
-  so the pruning is fully relative and adapts to each set's conditions with no
-  absolute ms threshold;
+- a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of ALL
+  linked legs across every set by RTT (the slowest legs of the whole pool;
+  default 30%), so the pruning is fully relative and adapts to the network with
+  no absolute ms threshold — a set with a single slow leg is pruned just like
+  the weak legs of a multi-leg set;
 - a leg must stay weak for `--watch-strikes` consecutive passes (default 1)
   before it is closed, so a single bad measurement closes it right away;
-- the best (lowest RTT) leg of each set is never closed, and a set with a
-  single linked leg is never pruned at all (a sole leg is always the best of
-  its set);
+- the single best (lowest RTT) leg in the whole pool is never closed, and the
+  pool is never fully pruned;
 - legs stuck **unlinked** for `--watch-unlinked-strikes` passes (default 4)
   AND older than `--watch-unlinked-grace` seconds (default 120) are closed as
   dead weight, but never in the first 90 s after bootstrap while everything is

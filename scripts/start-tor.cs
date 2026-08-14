@@ -149,15 +149,16 @@ namespace StartTor
         // Circuit health monitor: a background thread that periodically closes
         // weak conflux legs so tor rebuilds them with fresh, higher-quality
         // circuits. Disabled with --no-circuit-watch. Weakness is judged purely
-        // relative to each set's own legs: the top watchRttPct% of a set's
-        // linked legs by RTT are weak candidates, so the pruning adapts to each
-        // set's conditions instead of using absolute thresholds. A leg must stay
-        // weak for --watch-strikes consecutive passes before a close (default
-        // 1), and the best (lowest RTT) leg of a set is never a candidate. The
-        // percentage is settable from the settings menu (data\circuit-watch-pct.txt)
-        // or via --watch-rtt-pct. Other knobs: --watch-unlinked-strikes
-        // (consecutive unlinked passes before a stuck leg is closed), plus
-        // --watch-interval, --watch-cooldown and --watch-max-per-pass.
+        // relative and GLOBALLY: the top watchRttPct% of all linked legs across
+        // every set by RTT are weak candidates, so a single slow leg of any set
+        // is pruned just like the weak legs of a large set, with no absolute
+        // thresholds. A leg must stay weak for --watch-strikes consecutive
+        // passes before a close (default 1), and the single best (lowest RTT)
+        // leg in the pool is never a candidate. The percentage is settable from
+        // the settings menu (data\circuit-watch-pct.txt) or via --watch-rtt-pct.
+        // Other knobs: --watch-unlinked-strikes (consecutive unlinked passes
+        // before a stuck leg is closed), plus --watch-interval, --watch-cooldown
+        // and --watch-max-per-pass.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
         private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 30);
@@ -692,11 +693,11 @@ namespace StartTor
 
         private static void PromptWatchRttPct()
         {
-            Console.WriteLine("  Weak legs (top %) = the this-many percent of a set's");
-            Console.WriteLine("    linked legs with the highest RTT are weak and get closed");
-            Console.WriteLine("    (fully relative: no absolute ms threshold, e.g. 30 = the");
-            Console.WriteLine("    slowest 30% of each set's legs). The best leg of a set is");
-            Console.WriteLine("    never closed. 0 = off.");
+            Console.WriteLine("  Weak legs (top %) = the this-many percent of all linked legs");
+            Console.WriteLine("    (across EVERY set, compared globally) with the highest RTT");
+            Console.WriteLine("    are weak and get closed. Fully relative: no absolute ms");
+            Console.WriteLine("    threshold, e.g. 30 = the slowest 30% of the whole linked pool.");
+            Console.WriteLine("    The single best leg in the pool is never closed. 0 = off.");
             Console.Write("  New value (Enter = keep " + watchRttPct + "): ");
             string input;
             try { input = Console.ReadLine(); }
@@ -1699,10 +1700,10 @@ namespace StartTor
         }
 
         // Background circuit health monitor. Every watchIntervalS seconds it
-        // asks tor (CONFLUX QUERY) and closes, per set, the top watchRttPct%
-        // of linked legs with the highest RTT (a purely relative weak-leg rule;
-        // the best leg of a set is never closed and a sole leg is left alone).
-        // tor then builds
+        // asks tor (CONFLUX QUERY) and closes the top watchRttPct% of linked
+        // legs with the highest RTT across the WHOLE linked pool (a purely
+        // relative, global weak-leg rule; the single best leg in the pool is
+        // never closed and the pool is never fully pruned). tor then builds
         // replacement legs and conflux migrates any streams off the closed
         // ones. Non-conflux circuits are left alone. A watchCooldownS-second
         // gap between closes prevents circuit churn (relaxed during warmup).
@@ -1736,15 +1737,15 @@ namespace StartTor
                 foreach (string k in unlinkedFirstSeen.Keys) if (!liveIds.Contains(k)) staleKeys.Add(k);
                 foreach (string k in staleKeys) unlinkedFirstSeen.Remove(k);
 
-                // Quality-based pruning (fully relative). Within each set, the
-                // linked legs with the highest RTT -- the top watchRttPct% of
-                // that set's legs -- are weak candidates, so pruning adapts to
-                // each set's conditions with no absolute ms threshold. A leg
-                // must stay weak for --watch-strikes consecutive passes before
-                // it is closed. Legs stuck UNLINKED for --watch-unlinked-strikes
-                // passes are closed as dead weight. The best (lowest RTT) leg of
-                // each set is never a candidate and a sole leg is never pruned,
-                // so a 1-leg set is always left alone.
+                // Quality-based pruning (fully relative, global). The linked
+                // legs with the highest RTT -- the top watchRttPct% of ALL
+                // linked legs across every set -- are weak candidates, so a
+                // slow single-leg set is pruned just like the weak legs of a
+                // multi-leg set, with no absolute ms threshold. A leg must stay
+                // weak for --watch-strikes consecutive passes before it is
+                // closed. Legs stuck UNLINKED for --watch-unlinked-strikes
+                // passes are closed as dead weight. The single best (lowest
+                // RTT) leg in the whole pool is never a candidate.
 
                 // Top up: sets with fewer legs than the configured target get
                 // one CONFLUX ADD (capped per pass) so a set that never
@@ -1792,21 +1793,25 @@ namespace StartTor
                     lst.Add(new[] { leg[1], rttUs.ToString() });
                 }
 
-                // Pass 1.5: relative weak-leg rule. Within each set, the linked
-                // legs with the highest RTT -- the top watchRttPct% of that
-                // set's legs -- are weak candidates. The count is rounded up to
-                // at least one and capped at n-1, so the best (lowest RTT) leg
-                // of a set is never a candidate and a set with a single linked
-                // leg is never pruned. watchRttPct = 0 turns the rule off.
+                // Pass 1.5: relative weak-leg rule. Across ALL linked legs of ALL
+                // sets, the legs with the highest RTT -- the top watchRttPct% of
+                // the whole linked pool -- are weak candidates (so a set with a
+                // single slow leg is pruned just like the weak legs of a large
+                // set; the comparison is global, not within each set). The count
+                // is rounded up to at least one and capped at n-1, so the single
+                // best (lowest RTT) leg in the pool is never a candidate and the
+                // pool is never fully pruned. watchRttPct = 0 turns the rule off.
                 var pctWeak = new HashSet<string>();
                 if (watchRttPct > 0)
                 {
+                    var allRtts = new List<string[]>();
                     foreach (var kv in setLegs)
+                        foreach (string[] leg in kv.Value)
+                            allRtts.Add(new[] { leg[0], leg[1] }); // circ, rtt
+                    int n = allRtts.Count;
+                    if (n >= 2)
                     {
-                        List<string[]> legs = kv.Value;
-                        int n = legs.Count;
-                        if (n < 2) continue;
-                        legs.Sort(delegate(string[] a, string[] b)
+                        allRtts.Sort(delegate(string[] a, string[] b)
                         {
                             return int.Parse(b[1]) - int.Parse(a[1]);
                         });
@@ -1814,7 +1819,7 @@ namespace StartTor
                         if (keep < 1) keep = 1;
                         if (keep > n - 1) keep = n - 1;
                         for (int i = 0; i < keep; i++)
-                            pctWeak.Add(legs[i][0]);
+                            pctWeak.Add(allRtts[i][0]);
                     }
                 }
 
@@ -1881,8 +1886,8 @@ namespace StartTor
 
                 // Never close more than --watch-max-per-pass legs total in a
                 // single pass so replacement builds don't pile up at once.
-                // setLinked is decremented as legs are picked so a set loses at
-                // most its flagged weak legs (sole legs are never flagged).
+                // setLinked is decremented as legs are picked so each set loses
+                // at most its flagged weak legs, even a sole leg.
                 // setLinked was filled in Pass 1 above.
                 var toRemove = new List<string[]>();
                 var toRemoveReasons = new Dictionary<string, string>();
@@ -2962,8 +2967,9 @@ namespace StartTor
                 Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
                 watcher.Start();
                 Log("circuit monitor: watching every " + watchIntervalS +
-                    " s; weak legs (top " + watchRttPct + "% of each set by RTT) " +
-                    "are closed after " + watchStrikes + " strikes; " +
+                    " s; weak legs (top " + watchRttPct + "% of all linked legs by RTT, " +
+                    "globally across every set) are closed after " + watchStrikes +
+                    " strikes; " +
                     "stuck-unlinked after " + watchUnlinkedStrikes +
                     " passes and " + watchUnlinkedGraceS + " s old; " +
                     "max " + watchMaxPerPass + " close(s)/pass (cooldown " +
