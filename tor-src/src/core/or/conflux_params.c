@@ -273,6 +273,19 @@ conflux_params_get_set_rtt_max(void)
   return 0;
 }
 
+/** TorJet extension: return the "best sets" percentage filter. 0 means no
+ * percentage filter; > 0 keeps only that percent of candidate sets with the
+ * lowest best-leg RTT before the selection policy runs. */
+int
+conflux_params_get_set_rtt_pct(void)
+{
+  const or_options_t *opts = get_options();
+  if (opts && opts->ConfluxSetRttPct > 0) {
+    return opts->ConfluxSetRttPct;
+  }
+  return 0;
+}
+
 /** Return the maximum number of legs per set. */
 uint8_t
 conflux_params_get_max_legs_set(void)

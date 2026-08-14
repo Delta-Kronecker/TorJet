@@ -51,12 +51,19 @@ data\
        path.
      - **Conflux legs** (`ConfluxNumLegs`, 0=consensus default) — legs per
        set; more legs = more parallel bandwidth per set.
-     - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
-       default) — ceiling on *linked* sets; it only binds when set below
-       *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
-   Your choices are remembered for next time (`data\mode.txt`,
-   `data\strategy.txt`, `data\conflux-sets.txt`,
-   `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
+      - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
+        default) — ceiling on *linked* sets; it only binds when set below
+        *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
+      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, 0=off) — when a new
+        stream is attached, sets whose best-leg RTT is at/above this many
+        milliseconds are skipped (a slow-set failover).
+      - **Best % of sets (RTT)** (`ConfluxSetRttPct`, 0=off) — when a new
+        stream is attached, only the best (lowest-RTT) this-many percent of
+        sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
+        skip above, and always keeps at least one set.
+    Your choices are remembered for next time (`data\mode.txt`,
+    `data\strategy.txt`, `data\conflux-sets.txt`,
+    `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
    automatically — press **P** to toggle it on/off (HTTP 127.0.0.1:8118).
    Press **T** to toggle **TUN mode** (see below). Press **S** to run a speed
@@ -244,8 +251,8 @@ close cooldown is relaxed, so weak legs are replaced immediately.
 
 - `tor-src\` — official tor 0.4.9.11 source with TorJet's conflux extensions
   (the `CONFLUX` control command, the `ConfluxNumSets` / `ConfluxNumLegs` /
-  `ConfluxNumLinkedSets` torrc options, and launch-budget refund +
-  auto-relaunch after a leg is closed)
+  `ConfluxNumLinkedSets` / `ConfluxSetRttMax` / `ConfluxSetRttPct` torrc
+  options, and launch-budget refund + auto-relaunch after a leg is closed)
 - `configs\torrc.jet` — speed-optimized portable config template (becomes `data\torrc.template`)
 - `bridges\` — tested bridge lists shipped with the release
 - `scripts\start-tor.cs` — source of `TorJet.exe` (compiled with `scripts\build-start-tor.ps1`)

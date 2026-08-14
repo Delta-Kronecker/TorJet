@@ -1429,6 +1429,25 @@ conflux_set_best_rtt(const conflux_t *cfx)
   return best;
 }
 
+/** TorJet extension: comparator for sorting set candidates by best-leg RTT
+ * ascending (lowest RTT first). Sets without a measured RTT sort last so the
+ * percentage filter never starves known-good sets. */
+static int
+conflux_cand_rtt_asc_cmp(const void **a, const void **b)
+{
+  const conflux_set_candidate_t *ca =
+    *(const conflux_set_candidate_t *const *)a;
+  const conflux_set_candidate_t *cb =
+    *(const conflux_set_candidate_t *const *)b;
+  if (ca->best_rtt_usec < cb->best_rtt_usec) {
+    return -1;
+  }
+  if (ca->best_rtt_usec > cb->best_rtt_usec) {
+    return 1;
+  }
+  return 0;
+}
+
 /** Torjet extension: count the streams currently attached to the set. The
  * stream list head (p_streams) is mirrored on every leg, so inspecting the
  * first leg is enough. */
@@ -1570,6 +1589,23 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
         tor_free(c);
       }
     } SMARTLIST_FOREACH_END(c);
+  }
+
+  /* TorJet: optionally prune the candidate list down to the best RTT_PCT% of
+   * sets (lowest best-leg RTT) before the selection policy runs. Like the
+   * absolute threshold, this never empties the list: at least one set is kept
+   * so a new stream can always attach somewhere. */
+  const int rtt_pct = conflux_params_get_set_rtt_pct();
+  if (rtt_pct > 0 && smartlist_len(cands) > 1) {
+    smartlist_sort(cands, conflux_cand_rtt_asc_cmp);
+    size_t keep = (size_t)(((int64_t)smartlist_len(cands) * rtt_pct) / 100);
+    if (keep == 0) {
+      keep = 1;
+    }
+    while ((size_t)smartlist_len(cands) > keep) {
+      conflux_set_candidate_t *c = smartlist_pop_last(cands);
+      tor_free(c);
+    }
   }
 
   picked = conflux_pick_set_from_candidates(cands);

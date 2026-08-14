@@ -782,6 +782,13 @@ struct or_options_t {
    * the health filter so every acceptable set is a candidate. */
   int ConfluxSetRttMax;
 
+  /** TorJet extension: when choosing a set for a new stream, only keep the
+   * best RTT_PCT% of candidate sets (those with the lowest best-leg RTT) and
+   * let the selection policy pick among them. 0 (default) disables the
+   * percentage filter. Applied after ConfluxSetRttMax when both are set, and
+   * always keeps at least one candidate so streams can still attach. */
+  int ConfluxSetRttPct;
+
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;
   /** The length of time we think it will take to distribute votes. */

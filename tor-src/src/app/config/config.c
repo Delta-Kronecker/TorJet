@@ -389,6 +389,7 @@ static const config_var_t option_vars_[] = {
   V(ConfluxNumLinkedSets,        INT,      "0"),
   V(ConfluxSetSelection,         INT,      "1"),
   V(ConfluxSetRttMax,            INT,      "0"),
+  V(ConfluxSetRttPct,            INT,      "0"),
   V(ConnLimit,                   POSINT,     "1000"),
   V(ConnDirectionStatistics,     BOOL,     "0"),
   V(ConstrainedSockets,          BOOL,     "0"),
@@ -3610,6 +3611,11 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
 
   if (options->ConfluxSetRttMax < 0) {
     REJECT("ConfluxSetRttMax must be >= 0 (milliseconds; 0 disables the filter)");
+  }
+
+  if (options->ConfluxSetRttPct < 0 || options->ConfluxSetRttPct > 100) {
+    REJECT("ConfluxSetRttPct must be between 0 and 100 "
+           "(percent of lowest-RTT sets to keep; 0 disables the filter)");
   }
 
   if (options_validate_publish_server(old_options, options, msg) < 0)
