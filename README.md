@@ -61,6 +61,11 @@ data\
         stream is attached, only the best (lowest-RTT) this-many percent of
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
+      - **Weak legs (top %)** (`--watch-rtt-pct`, default 30) — the circuit
+        health monitor closes, per set, the top this-many percent of linked
+        legs with the highest RTT (fully relative, no absolute ms threshold);
+        the best leg of a set is never closed and a sole leg is never pruned.
+        0 = off.
     Your choices are remembered for next time (`data\mode.txt`,
     `data\strategy.txt`, `data\conflux-sets.txt`,
     `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
@@ -111,7 +116,7 @@ TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
-TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1000)
+TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default 30)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
 TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
 TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
@@ -202,15 +207,15 @@ While Tor is up, TorJet watches the conflux legs via the control port. Every
 10 s it asks tor for the conflux set list (`CONFLUX QUERY`) and prunes low
 quality legs so tor rebuilds them with fresh circuits:
 
-- a linked leg is **weak** when its RTT is at/above an absolute threshold
-  (`--watch-rtt`, default 1000 ms) or it is clearly slower than the best leg of
-  its own set (`>= --watch-rtt-floor` ms and `>= --watch-factor` times the set
-  best, defaults 400 ms and 2.0x);
+- a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of its
+  own set's linked legs by RTT (i.e. the slowest legs of each set; default 30%),
+  so the pruning is fully relative and adapts to each set's conditions with no
+  absolute ms threshold;
 - a leg must stay weak for `--watch-strikes` consecutive passes (default 1)
   before it is closed, so a single bad measurement closes it right away;
-- the best (lowest RTT) leg of each set is normally never closed; the exception
-  is a set's sole weak leg, which is still pruned on an absolute `--watch-rtt`
-  breach and immediately rebuilt by tor with a fresh leg for the same set;
+- the best (lowest RTT) leg of each set is never closed, and a set with a
+  single linked leg is never pruned at all (a sole leg is always the best of
+  its set);
 - legs stuck **unlinked** for `--watch-unlinked-strikes` passes (default 4)
   AND older than `--watch-unlinked-grace` seconds (default 120) are closed as
   dead weight, but never in the first 90 s after bootstrap while everything is
@@ -227,8 +232,10 @@ the circuit set stable (relaxed during the first 90 s after bootstrap). After
 every close pass a
 summary report is printed to the console (legs closed, circuit ids, and the
 current conflux set/leg/linked counts). Disable it with
-`--no-circuit-watch`; tune it with `--watch-rtt <ms>`, `--watch-interval
-<seconds>`, `--watch-cooldown <seconds>` and the other `--watch-*` flags.
+`--no-circuit-watch`; tune it with `--watch-rtt-pct <percent>`,
+`--watch-interval <seconds>`, `--watch-cooldown <seconds>` and the other
+`--watch-*` flags. The weak-leg percentage can also be changed from the
+settings menu (item 10), saved to `data\circuit-watch-pct.txt`.
 
 ### Keep-alive
 
