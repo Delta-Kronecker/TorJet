@@ -1404,13 +1404,113 @@ conflux_predict_new(time_t now)
   }
 }
 
-/** Return the first circuit from the linked pool that will work with the conn.
+/** TorJet extension: candidate set gathered while choosing where to attach a
+ * new stream. */
+typedef struct conflux_set_candidate_t {
+  origin_circuit_t *ocirc;
+  /** Best (lowest) leg RTT in usec, or UINT64_MAX when unknown. */
+  uint64_t best_rtt_usec;
+  /** Number of streams currently attached to the set. */
+  size_t num_streams;
+} conflux_set_candidate_t;
+
+/** TorJet extension: return the best (lowest) valid leg RTT in usec for the
+ * set, or UINT64_MAX if no leg has a measured RTT yet. */
+static uint64_t
+conflux_set_best_rtt(const conflux_t *cfx)
+{
+  uint64_t best = UINT64_MAX;
+  conflux_leg_t *leg;
+  CONFLUX_FOR_EACH_LEG_BEGIN(cfx, leg) {
+    if (leg->circ_rtts_usec > 0 && leg->circ_rtts_usec < best) {
+      best = leg->circ_rtts_usec;
+    }
+  } CONFLUX_FOR_EACH_LEG_END(leg);
+  return best;
+}
+
+/** Torjet extension: count the streams currently attached to the set. The
+ * stream list head (p_streams) is mirrored on every leg, so inspecting the
+ * first leg is enough. */
+static size_t
+conflux_set_stream_count(const conflux_t *cfx)
+{
+  const conflux_leg_t *leg = smartlist_get(cfx->legs, 0);
+  if (BUG(!leg) || BUG(!leg->circ) || !CIRCUIT_IS_ORIGIN(leg->circ)) {
+    return 0;
+  }
+  size_t count = 0;
+  for (const edge_connection_t *stream =
+           TO_ORIGIN_CIRCUIT(leg->circ)->p_streams;
+       stream; stream = stream->next_stream) {
+    count++;
+  }
+  return count;
+}
+
+/** Torjet extension: pick the set to attach a new stream to, honoring the
+ * configured selection policy. Returns NULL if the list is empty. */
+static origin_circuit_t *
+conflux_pick_set_from_candidates(smartlist_t *cands)
+{
+  const int n = smartlist_len(cands);
+  if (n == 0) {
+    return NULL;
+  }
+
+  const int policy = conflux_params_get_set_selection();
+  int picked = 0;
+
+  switch (policy) {
+    case CONFLUX_SET_SELECT_ROUND_ROBIN: {
+      /* Rotate across the candidate sets so each request goes to a different
+       * one when several are available. */
+      static uint64_t counter = 0;
+      picked = (int)(counter++ % n);
+      break;
+    }
+    case CONFLUX_SET_SELECT_LEAST_STREAMS: {
+      size_t least = SIZE_MAX;
+      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+        if (c->num_streams < least) {
+          least = c->num_streams;
+          picked = c_sl_idx;
+        }
+      } SMARTLIST_FOREACH_END(c);
+      break;
+    }
+    case CONFLUX_SET_SELECT_FASTEST: {
+      uint64_t best = UINT64_MAX;
+      SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+        if (c->best_rtt_usec < best) {
+          best = c->best_rtt_usec;
+          picked = c_sl_idx;
+        }
+      } SMARTLIST_FOREACH_END(c);
+      break;
+    }
+    case CONFLUX_SET_SELECT_FIRST:
+    default:
+      picked = 0;
+      break;
+  }
+
+  conflux_set_candidate_t *cand = smartlist_get(cands, picked);
+  return cand->ocirc;
+}
+
+/** Return a circuit from the linked pool that will work with the conn.
  * If no such circuit exists, return NULL.
  *
  * The need_internal argument must match the caller's stream requirement. When
  * it is true (for example, for anonymized directory requests), non-internal
  * conflux circuits are excluded by circuit_is_acceptable(). At present,
  * conflux circuits in this pool are non-internal.
+ *
+ * TorJet extension: instead of always returning the first acceptable set, we
+ * gather every acceptable set and let the configured policy (ConfluxSetSelection)
+ * pick one, so new streams are spread across the linked sets (load-balancing)
+ * and slow sets can be skipped for failover when ConfluxSetRttMax is set.
  */
 origin_circuit_t *
 conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
@@ -1419,6 +1519,8 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
   /* Use conn to check the exit policy of the first circuit
    * of each set in the linked pool. */
   tor_assert(conn);
+
+  smartlist_t *cands = smartlist_new();
 
   DIGEST256MAP_FOREACH(client_linked_pool, key, conflux_t *, cfx) {
     /* Get the first circuit of the set. */
@@ -1448,11 +1550,36 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
       continue;
     }
 
-    /* Found a circuit that works. */
-    return ocirc;
+    conflux_set_candidate_t *cand = tor_malloc_zero(sizeof(*cand));
+    cand->ocirc = ocirc;
+    cand->best_rtt_usec = conflux_set_best_rtt(cfx);
+    cand->num_streams = conflux_set_stream_count(cfx);
+    smartlist_add(cands, cand);
   } DIGEST256MAP_FOREACH_END;
 
-  return NULL;
+  origin_circuit_t *picked = NULL;
+
+  /* Apply the slow-set RTT filter for failover, but never empty the list: if
+   * every set is slow we still have to attach somewhere. */
+  const int rtt_max_ms = conflux_params_get_set_rtt_max();
+  if (rtt_max_ms > 0 && smartlist_len(cands) > 1) {
+    const uint64_t rtt_max_usec = (uint64_t)rtt_max_ms * 1000;
+    SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+      if (c->best_rtt_usec >= rtt_max_usec) {
+        SMARTLIST_DEL_CURRENT(cands, c);
+        tor_free(c);
+      }
+    } SMARTLIST_FOREACH_END(c);
+  }
+
+  picked = conflux_pick_set_from_candidates(cands);
+
+  SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
+    tor_free(c);
+  } SMARTLIST_FOREACH_END(c);
+  smartlist_free(cands);
+
+  return picked;
 }
 
 /** The given circuit is conflux pending and has closed. This deletes the leg

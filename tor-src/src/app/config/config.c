@@ -387,6 +387,8 @@ static const config_var_t option_vars_[] = {
   V(ConfluxNumLegs,              INT,      "0"),
   V(ConfluxNumSets,              INT,      "0"),
   V(ConfluxNumLinkedSets,        INT,      "0"),
+  V(ConfluxSetSelection,         INT,      "1"),
+  V(ConfluxSetRttMax,            INT,      "0"),
   V(ConnLimit,                   POSINT,     "1000"),
   V(ConnDirectionStatistics,     BOOL,     "0"),
   V(ConstrainedSockets,          BOOL,     "0"),
@@ -3599,6 +3601,15 @@ options_validate_cb(const void *old_options_, void *options_, char **msg)
 
   if (options->ConfluxNumLinkedSets < 0 || options->ConfluxNumLinkedSets > 32) {
     REJECT("ConfluxNumLinkedSets must be between 0 (consensus default) and 32");
+  }
+
+  if (options->ConfluxSetSelection < 0 || options->ConfluxSetSelection > 3) {
+    REJECT("ConfluxSetSelection must be between 0 and 3 "
+           "(0=first, 1=round-robin, 2=least-streams, 3=fastest)");
+  }
+
+  if (options->ConfluxSetRttMax < 0) {
+    REJECT("ConfluxSetRttMax must be >= 0 (milliseconds; 0 disables the filter)");
   }
 
   if (options_validate_publish_server(old_options, options, msg) < 0)

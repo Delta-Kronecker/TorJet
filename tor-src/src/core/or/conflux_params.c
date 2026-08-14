@@ -249,6 +249,30 @@ conflux_params_set_num_legs(uint8_t n)
   }
 }
 
+/** TorJet extension: return the set-selection policy for new streams.
+ * 0 = first acceptable, 1 = round-robin, 2 = least-streams, 3 = fastest. */
+int
+conflux_params_get_set_selection(void)
+{
+  const or_options_t *opts = get_options();
+  if (opts && opts->ConfluxSetSelection >= 0) {
+    return opts->ConfluxSetSelection;
+  }
+  return 0;
+}
+
+/** TorJet extension: return the slow-set RTT filter in milliseconds. 0 means
+ * no filter (every acceptable set is a candidate). */
+int
+conflux_params_get_set_rtt_max(void)
+{
+  const or_options_t *opts = get_options();
+  if (opts && opts->ConfluxSetRttMax > 0) {
+    return opts->ConfluxSetRttMax;
+  }
+  return 0;
+}
+
 /** Return the maximum number of legs per set. */
 uint8_t
 conflux_params_get_max_legs_set(void)

@@ -771,6 +771,17 @@ struct or_options_t {
    * use; a larger value allows extra sets on top so that many stay ready. */
   int ConfluxNumLinkedSets;
 
+  /** TorJet extension: how to pick the conflux set a new stream is attached
+   * to. 0 = first acceptable (stock behavior), 1 = round-robin across the
+   * acceptable sets, 2 = the set with the fewest attached streams,
+   * 3 = the set with the lowest best-leg RTT. */
+  int ConfluxSetSelection;
+
+  /** TorJet extension: skip a conflux set when choosing one for a new stream
+   * if its best-leg RTT is at/above this many milliseconds. 0 (default) disables
+   * the health filter so every acceptable set is a candidate. */
+  int ConfluxSetRttMax;
+
   /** The length of time that we think a consensus should be fresh. */
   int V3AuthVotingInterval;
   /** The length of time we think it will take to distribute votes. */

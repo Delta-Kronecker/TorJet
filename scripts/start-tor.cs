@@ -48,6 +48,8 @@ namespace StartTor
         private static readonly string ConfluxSetsFile = Path.Combine(DataDir, "conflux-sets.txt");
         private static readonly string ConfluxLegsFile = Path.Combine(DataDir, "conflux-legs.txt");
         private static readonly string ConfluxLinkedSetsFile = Path.Combine(DataDir, "conflux-linked-sets.txt");
+        private static readonly string ConfluxSelectionFile = Path.Combine(DataDir, "conflux-selection.txt");
+        private static readonly string ConfluxRttMaxFile = Path.Combine(DataDir, "conflux-set-rtt.txt");
         private static readonly string KeepAliveFile = Path.Combine(DataDir, "keepalive.txt");
         private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
         private static readonly string XrayConfig = Path.Combine(DataDir, "xray", "config.json");
@@ -61,6 +63,9 @@ namespace StartTor
         private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 10);
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 3);
         private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 10);
+        private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
+        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
+        private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
         {
@@ -613,6 +618,51 @@ namespace StartTor
             }
         }
 
+        private static void PromptConfluxSelection()
+        {
+            Console.WriteLine("  ConfluxSetSelection = how new streams pick a conflux set");
+            Console.WriteLine("    (0 = first acceptable, 1 = round-robin across sets,");
+            Console.WriteLine("     2 = set with fewest streams, 3 = set with lowest RTT).");
+            Console.Write("  New value (Enter = keep " + confluxSelection + "): ");
+            string input;
+            try { input = Console.ReadLine(); }
+            catch { return; }
+            if (string.IsNullOrWhiteSpace(input)) return;
+            int v;
+            if (int.TryParse(input.Trim(), out v) && v >= 0 && v <= 3)
+            {
+                confluxSelection = v;
+                WriteConfluxSetting(ConfluxSelectionFile, v);
+                Console.WriteLine("  Set selection set to " + SetSelectionNames[v] + ".");
+            }
+            else
+            {
+                Console.WriteLine("  Invalid value (0-3).");
+            }
+        }
+
+        private static void PromptConfluxRttMax()
+        {
+            Console.WriteLine("  ConfluxSetRttMax = skip sets whose best-leg RTT is at/above");
+            Console.WriteLine("    this many milliseconds when choosing a set (0 = never skip).");
+            Console.Write("  New value (Enter = keep " + confluxRttMax + "): ");
+            string input;
+            try { input = Console.ReadLine(); }
+            catch { return; }
+            if (string.IsNullOrWhiteSpace(input)) return;
+            int v;
+            if (int.TryParse(input.Trim(), out v) && v >= 0)
+            {
+                confluxRttMax = v;
+                WriteConfluxSetting(ConfluxRttMaxFile, v);
+                Console.WriteLine("  Slow-set skip set to " + (v == 0 ? "off" : v + " ms") + ".");
+            }
+            else
+            {
+                Console.WriteLine("  Invalid value (>= 0).");
+            }
+        }
+
         private static Process FindXray()
         {
             foreach (Process p in Process.GetProcessesByName("xray"))
@@ -829,9 +879,11 @@ namespace StartTor
                 Console.WriteLine("       4)  Conflux legs        : " + (confluxLegs == 0 ? "consensus" : confluxLegs.ToString()));
                 Console.WriteLine("       5)  Conflux linked (cap): " + (confluxLinkedSets == 0 ? "consensus" : confluxLinkedSets.ToString()));
                 Console.WriteLine("       6)  Keep-alive          : " + (keepAliveEnabled ? "on" : "off"));
-                Console.WriteLine("       7)  Back");
+                Console.WriteLine("       7)  Set select          : " + (confluxSelection >= 0 && confluxSelection < SetSelectionNames.Length ? SetSelectionNames[confluxSelection] : confluxSelection.ToString()));
+                Console.WriteLine("       8)  Skip slow sets (RTT): " + (confluxRttMax == 0 ? "off" : confluxRttMax + " ms"));
+                Console.WriteLine("       9)  Back");
                 Console.WriteLine();
-                Console.Write("  Enter 1-7 (Enter = Back): ");
+                Console.Write("  Enter 1-9 (Enter = Back): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return; }
@@ -857,7 +909,9 @@ namespace StartTor
                         keepAliveEnabled = !keepAliveEnabled;
                         WriteKeepAliveFile(keepAliveEnabled);
                     }
-                    else if (n == 7) return;
+                    else if (n == 7) { PromptConfluxSelection(); }
+                    else if (n == 8) { PromptConfluxRttMax(); }
+                    else if (n == 9) return;
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else Console.WriteLine("  Invalid choice, try again.");
@@ -936,6 +990,20 @@ namespace StartTor
                 sb.AppendLine("# --- conflux: " + confluxLegs + " leg(s) per set ---");
                 sb.AppendLine("ConfluxNumLegs " + confluxLegs);
             }
+            if (confluxSelection >= 0 && confluxSelection < SetSelectionNames.Length)
+            {
+                sb.AppendLine();
+                sb.AppendLine();
+                sb.AppendLine("# --- conflux: set selection " + SetSelectionNames[confluxSelection] + " ---");
+                sb.AppendLine("ConfluxSetSelection " + confluxSelection);
+            }
+            if (confluxRttMax > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine();
+                sb.AppendLine("# --- conflux: skip sets slower than " + confluxRttMax + " ms ---");
+                sb.AppendLine("ConfluxSetRttMax " + confluxRttMax);
+            }
             File.WriteAllText(Torrc, sb.ToString(), new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
             catch { }
@@ -947,11 +1015,14 @@ namespace StartTor
                               (fragment ? ", fragment on" : "") +
                               (confluxSets > 0 ? ", " + confluxSets + " sets" : "") +
                               (confluxLinkedSets > 0 ? ", cap " + confluxLinkedSets : "") +
-                              (confluxLegs > 0 ? ", " + confluxLegs + " legs/set" : "") + ")");
+                              (confluxLegs > 0 ? ", " + confluxLegs + " legs/set" : "") +
+                              (confluxSelection > 0 ? ", select " + SetSelectionNames[confluxSelection] : "") +
+                              (confluxRttMax > 0 ? ", skip " + confluxRttMax + "ms" : "") + ")");
             Log("torrc written (" + ModeNames[mode] + ", strategy " +
                 StrategyNames[strategy] + ", " + bridgeCount + " bridges, fragment " +
                 (fragment ? "on" : "off") + ", " + confluxSets + " sets, cap " +
-                confluxLinkedSets + ", " + confluxLegs + " legs/set)");
+                confluxLinkedSets + ", " + confluxLegs + " legs/set, select " +
+                SetSelectionNames[confluxSelection] + ", skip " + confluxRttMax + "ms)");
             return true;
         }
 
@@ -1499,7 +1570,9 @@ namespace StartTor
             foreach (string[] leg in legList)
                 if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) linkedTotal++;
             Console.WriteLine("  sets: " + sets.Count + "   legs: " + legs +
-                              " (" + linkedTotal + " linked)");
+                              " (" + linkedTotal + " linked)" +
+                              "   select: " + (confluxSelection >= 0 && confluxSelection < SetSelectionNames.Length ? SetSelectionNames[confluxSelection] : confluxSelection.ToString()) +
+                              (confluxRttMax > 0 ? "   skip-slow: " + confluxRttMax + " ms" : ""));
             int idx = 1;
             foreach (var kv in sets)
             {
@@ -1535,7 +1608,8 @@ namespace StartTor
                 idx++;
             }
             Log("conflux status: " + sets.Count + " set(s), " + legs +
-                " leg(s), " + linkedTotal + " linked");
+                " leg(s), " + linkedTotal + " linked, select " +
+                SetSelectionNames[confluxSelection] + ", skip " + confluxRttMax + "ms");
             return 0;
         }
 

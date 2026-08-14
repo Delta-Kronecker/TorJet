@@ -11,6 +11,14 @@
 
 #include "core/or/or.h"
 
+/** TorJet extension: conflux set-selection policies (ConfluxSetSelection). */
+typedef enum conflux_set_select_t {
+  CONFLUX_SET_SELECT_FIRST = 0,
+  CONFLUX_SET_SELECT_ROUND_ROBIN = 1,
+  CONFLUX_SET_SELECT_LEAST_STREAMS = 2,
+  CONFLUX_SET_SELECT_FASTEST = 3,
+} conflux_set_select_t;
+
 bool conflux_is_enabled(const struct circuit_t *circ);
 uint8_t conflux_params_get_max_linked_set(void);
 uint8_t conflux_params_get_max_prebuilt(void);
@@ -18,6 +26,8 @@ uint8_t conflux_params_get_max_unlinked_leg_retry(void);
 uint8_t conflux_params_get_num_legs_set(void);
 uint8_t conflux_params_get_max_legs_set(void);
 void conflux_params_set_num_legs(uint8_t n);
+int conflux_params_get_set_selection(void);
+int conflux_params_get_set_rtt_max(void);
 uint8_t conflux_params_get_drain_pct(void);
 uint8_t conflux_params_get_send_pct(void);
 uint32_t conflux_params_get_max_oooq(void);
