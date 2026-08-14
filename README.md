@@ -144,6 +144,7 @@ TorJet exposes three local entry points, all bound to 127.0.0.1:
 | Port | Purpose | Who uses it |
 |------|---------|-------------|
 | 9050 | SOCKS5 proxy | your browser / apps |
+| 9052 | keep-alive SOCKS5 (internal) | TorJet's background pings |
 | 8118 | HTTP proxy | Windows system proxy (pressed **P**) |
 | 53530 | DNS | system DNS resolver (TUN mode) |
 
@@ -240,16 +241,21 @@ settings menu (item 10), saved to `data\circuit-watch-pct.txt`.
 ### Keep-alive
 
 Once bootstrap hits 100%, TorJet starts a permanent keep-alive: a lightweight
-`generate_204` ping is dispatched through the **SOCKS5 proxy (127.0.0.1:9050)**
-— the same port you test — every second, for as long as the session runs. Each
-request is allowed up to 5 s for a response and is recorded as ok / fail /
-timeout. The loop runs in the background while the menu is served (so the menu
-appears immediately) and stops only when you press **C**, tor exits, or the
-app is closed. It keeps circuits warm and honest: if tor dies, the pings start
-failing (details go to `data\data\jet.log`). The old 1 MiB download check was
-replaced: it gave false negatives on cold single-stream circuits and added
-~1 MiB of padding traffic. During the first 90 s after bootstrap the monitor's
-close cooldown is relaxed, so weak legs are replaced immediately.
+`generate_204` ping is dispatched every second through a **dedicated keep-alive
+SOCKS5 port (127.0.0.1:9052, `NoIsolateSOCKSAuth`)** on the same tor instance you
+test, so a healthy report is not a false positive. Each request is allowed up to
+5 s for a response and is recorded as ok / fail / timeout. Because the pings use
+a fixed SOCKS5 auth username, tor recognizes them and **always spreads them
+round-robin across every conflux set**, bypassing the set-selection policy and
+the RTT filters (settings items 7-9) — so keep-alive traffic keeps exercising
+all sets even when the slow-set filters would normally skip them. The loop runs
+in the background while the menu is served (so the menu appears immediately) and
+stops only when you press **C**, tor exits, or the app is closed. It keeps
+circuits warm and honest: if tor dies, the pings start failing (details go to
+`data\data\jet.log`). The old 1 MiB download check was replaced: it gave false
+negatives on cold single-stream circuits and added ~1 MiB of padding traffic.
+During the first 90 s after bootstrap the monitor's close cooldown is relaxed,
+so weak legs are replaced immediately.
 
 ## Building
 

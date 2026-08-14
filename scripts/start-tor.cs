@@ -56,6 +56,8 @@ namespace StartTor
         private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
         private static readonly string XrayConfig = Path.Combine(DataDir, "xray", "config.json");
         private const int FragmentSocksPort = 10808;
+        private const int KeepAliveSocksPort = 9052;
+        private const string KeepAliveUsername = "torjet-keepalive";
 
         // Conflux topology set from the settings submenu. 0 = use the consensus
         // default (cfx_num_legs_set / cfx_max_prebuilt_set / cfx_max_linked_set);
@@ -135,7 +137,7 @@ namespace StartTor
 
         // Ports used by this program's tor (torrc.template / torrc.jet).
         // Occupied ports at startup mean a previous tor instance is still alive.
-        private static readonly int[] TcpPorts = { 9050, 9051, 8118 };
+        private static readonly int[] TcpPorts = { 9050, 9051, 8118, 9052 };
         private const int UdpDnsPort = 53530;
 
         private static Process torProc;
@@ -2281,8 +2283,13 @@ namespace StartTor
 
         // Lightweight endpoints that answer 204 No Content - perfect for the
         // keep-alive pings. They are fetched with a plain HTTP GET through a
-        // real SOCKS5 CONNECT on 127.0.0.1:9050, i.e. the same port the user
-        // tests, so a healthy report is not a false positive.
+        // real SOCKS5 CONNECT on the dedicated keep-alive port 127.0.0.1:9052,
+        // i.e. the same tor instance the user tests, so a healthy report is not
+        // a false positive. The port is configured with NoIsolateSOCKSAuth, so
+        // the marker username below does not push the pings onto their own
+        // circuits; tor recognizes the username and routes the stream
+        // round-robin across every conflux set regardless of the configured
+        // selection policy and RTT filters.
         private class PingTarget
         {
             public string Host;
@@ -2338,10 +2345,12 @@ namespace StartTor
             return sb.ToString();
         }
 
-        // One real tunnel probe end to end: TCP connect to tor SOCKS
-        // (127.0.0.1:9050), SOCKS5 CONNECT to the target, then a plain HTTP GET
-        // through the tunnel. Returns 1 = ok (2xx), 0 = failed, -1 = timed out;
-        // `elapsedMs` carries the real round-trip delay of the successful ping.
+        // One real tunnel probe end to end: TCP connect to tor's dedicated
+        // keep-alive SOCKS port (127.0.0.1:9052), SOCKS5 username/password auth
+        // with the marker username, SOCKS5 CONNECT to the target, then a plain
+        // HTTP GET through the tunnel. Returns 1 = ok (2xx), 0 = failed,
+        // -1 = timed out; `elapsedMs` carries the real round-trip delay of the
+        // successful ping.
         private static int PingSocks(string host, string path, out long elapsedMs)
         {
             elapsedMs = 0;
@@ -2351,7 +2360,7 @@ namespace StartTor
             try
             {
                 tc = new TcpClient();
-                IAsyncResult ar = tc.BeginConnect(IPAddress.Loopback, 9050, null, null);
+                IAsyncResult ar = tc.BeginConnect(IPAddress.Loopback, KeepAliveSocksPort, null, null);
                 if (!ar.AsyncWaitHandle.WaitOne(4000))
                 {
                     tc.Close();
@@ -2364,11 +2373,27 @@ namespace StartTor
                 ns.ReadTimeout = 5000;
                 ns.WriteTimeout = 5000;
 
-                byte[] greet = { 0x05, 0x01, 0x00 };
+                // Only offer username/password auth (0x02). The tor side of
+                // 9052 is NoIsolateSOCKSAuth but still accepts it; the username
+                // marks the stream as a keep-alive ping for conflux set spread.
+                byte[] greet = { 0x05, 0x01, 0x02 };
                 ns.Write(greet, 0, 3);
                 byte[] ga = new byte[2];
                 if (!ReadExact(ns, ga, 2)) return 0;
-                if (ga[0] != 0x05 || ga[1] != 0x00) return 0;
+                if (ga[0] != 0x05 || ga[1] != 0x02) return 0;
+
+                byte[] userB = Encoding.ASCII.GetBytes(KeepAliveUsername);
+                byte[] passB = Encoding.ASCII.GetBytes("torjet");
+                byte[] auth = new byte[1 + 1 + userB.Length + 1 + passB.Length];
+                auth[0] = 0x01;
+                auth[1] = (byte)userB.Length;
+                Buffer.BlockCopy(userB, 0, auth, 2, userB.Length);
+                auth[2 + userB.Length] = (byte)passB.Length;
+                Buffer.BlockCopy(passB, 0, auth, 3 + userB.Length, passB.Length);
+                ns.Write(auth, 0, auth.Length);
+                byte[] ar2 = new byte[2];
+                if (!ReadExact(ns, ar2, 2)) return 0;
+                if (ar2[0] != 0x01 || ar2[1] != 0x00) return 0;
 
                 byte[] hostB = Encoding.ASCII.GetBytes(host);
                 byte[] cmd = new byte[5 + hostB.Length + 2];
@@ -2424,7 +2449,8 @@ namespace StartTor
             }
         }
 
-        // Permanent keep-alive through the real SOCKS proxy (127.0.0.1:9050):
+        // Permanent keep-alive through the real SOCKS proxy
+        // (dedicated keep-alive port 127.0.0.1:9052):
         // one generate_204 request dispatched every second for as long as the
         // session runs. Each request is allowed up to 5 s to get a response and
         // is recorded as ok / fail / timeout. Requests overlap, so a slow one
@@ -2486,7 +2512,7 @@ namespace StartTor
             }
             keepAliveThread = new Thread(KeepAliveLoop) { IsBackground = true };
             keepAliveThread.Start();
-            Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:9050, 5 s timeout");
+            Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:9052, 5 s timeout");
         }
 
         private static void StopKeepAlive()

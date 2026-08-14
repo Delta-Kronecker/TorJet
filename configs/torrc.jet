@@ -5,6 +5,7 @@
 
 # --- Local proxies (Windows system proxy uses HTTP 8118) ---
 SocksPort 127.0.0.1:9050 IsolateSOCKSAuth
+SocksPort 127.0.0.1:9052 NoIsolateSOCKSAuth
 HTTPTunnelPort 127.0.0.1:8118
 DNSPort 127.0.0.1:53530
 ControlPort 127.0.0.1:9051

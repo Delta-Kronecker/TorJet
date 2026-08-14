@@ -27,6 +27,8 @@
 #include "core/or/relay.h"
 #include "core/or/connection_edge.h"
 #include "core/or/edge_connection_st.h"
+#include "core/or/entry_connection_st.h"
+#include "core/or/socks_request_st.h"
 
 #include "core/or/crypt_path_st.h"
 #include "core/or/or_circuit_st.h"
@@ -1467,10 +1469,33 @@ conflux_set_stream_count(const conflux_t *cfx)
   return count;
 }
 
+/** TorJet extension: SOCKS5 username used by TorJet's keep-alive streams. They
+ * arrive on the dedicated keep-alive SocksPort (9052, NoIsolateSOCKSAuth so the
+ * marker does not isolate them off the shared circuits) and must always reach
+ * every set, so they bypass the RTT-based set filters and are spread
+ * round-robin regardless of the configured ConfluxSetSelection policy. */
+#define CONFLUX_KEEPALIVE_USERNAME "torjet-keepalive"
+
+/** Return true iff the given connection is one of TorJet's keep-alive streams,
+ * identified by its SOCKS5 auth username. */
+static bool
+conflux_conn_is_keepalive(const entry_connection_t *conn)
+{
+  if (!conn || !conn->socks_request) {
+    return false;
+  }
+  const socks_request_t *socks = conn->socks_request;
+  const size_t len = strlen(CONFLUX_KEEPALIVE_USERNAME);
+  return socks->username && socks->usernamelen == len &&
+         !strncmp(socks->username, CONFLUX_KEEPALIVE_USERNAME, len);
+}
+
 /** Torjet extension: pick the set to attach a new stream to, honoring the
- * configured selection policy. Returns NULL if the list is empty. */
+ * configured selection policy. If force_round_robin is true, the sets are
+ * always rotated through (keep-alive streams), ignoring the configured policy.
+ * Returns NULL if the list is empty. */
 static origin_circuit_t *
-conflux_pick_set_from_candidates(smartlist_t *cands)
+conflux_pick_set_from_candidates(smartlist_t *cands, bool force_round_robin)
 {
   const int n = smartlist_len(cands);
   if (n == 0) {
@@ -1480,15 +1505,12 @@ conflux_pick_set_from_candidates(smartlist_t *cands)
   const int policy = conflux_params_get_set_selection();
   int picked = 0;
 
-  switch (policy) {
-    case CONFLUX_SET_SELECT_ROUND_ROBIN: {
+  if (force_round_robin || policy == CONFLUX_SET_SELECT_ROUND_ROBIN) {
       /* Rotate across the candidate sets so each request goes to a different
        * one when several are available. */
       static uint64_t counter = 0;
       picked = (int)(counter++ % n);
-      break;
-    }
-    case CONFLUX_SET_SELECT_LEAST_STREAMS: {
+    } else if (policy == CONFLUX_SET_SELECT_LEAST_STREAMS) {
       size_t least = SIZE_MAX;
       SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
         if (c->num_streams < least) {
@@ -1496,9 +1518,7 @@ conflux_pick_set_from_candidates(smartlist_t *cands)
           picked = c_sl_idx;
         }
       } SMARTLIST_FOREACH_END(c);
-      break;
-    }
-    case CONFLUX_SET_SELECT_FASTEST: {
+    } else if (policy == CONFLUX_SET_SELECT_FASTEST) {
       uint64_t best = UINT64_MAX;
       SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
         if (c->best_rtt_usec < best) {
@@ -1506,13 +1526,10 @@ conflux_pick_set_from_candidates(smartlist_t *cands)
           picked = c_sl_idx;
         }
       } SMARTLIST_FOREACH_END(c);
-      break;
-    }
-    case CONFLUX_SET_SELECT_FIRST:
-    default:
+    } else {
+      /* CONFLUX_SET_SELECT_FIRST and anything unknown: first candidate. */
       picked = 0;
-      break;
-  }
+    }
 
   conflux_set_candidate_t *cand = smartlist_get(cands, picked);
   return cand->ocirc;
@@ -1576,12 +1593,18 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
     smartlist_add(cands, cand);
   } DIGEST256MAP_FOREACH_END;
 
+  /* TorJet: keep-alive streams bypass the RTT-based set filters (ConfluxSetRttMax
+   * and ConfluxSetRttPct) and are always spread round-robin across every
+   * acceptable set, so keep-alive traffic keeps exercising all sets no matter
+   * what the user's selection policy and filters are. */
+  const bool keepalive = conflux_conn_is_keepalive(conn);
+
   origin_circuit_t *picked = NULL;
 
   /* Apply the slow-set RTT filter for failover, but never empty the list: if
    * every set is slow we still have to attach somewhere. */
   const int rtt_max_ms = conflux_params_get_set_rtt_max();
-  if (rtt_max_ms > 0 && smartlist_len(cands) > 1) {
+  if (!keepalive && rtt_max_ms > 0 && smartlist_len(cands) > 1) {
     const uint64_t rtt_max_usec = (uint64_t)rtt_max_ms * 1000;
     SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
       if (c->best_rtt_usec >= rtt_max_usec) {
@@ -1596,7 +1619,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
    * absolute threshold, this never empties the list: at least one set is kept
    * so a new stream can always attach somewhere. */
   const int rtt_pct = conflux_params_get_set_rtt_pct();
-  if (rtt_pct > 0 && smartlist_len(cands) > 1) {
+  if (!keepalive && rtt_pct > 0 && smartlist_len(cands) > 1) {
     smartlist_sort(cands, conflux_cand_rtt_asc_cmp);
     size_t keep = (size_t)(((int64_t)smartlist_len(cands) * rtt_pct) / 100);
     if (keep == 0) {
@@ -1608,7 +1631,7 @@ conflux_get_circ_for_conn(const entry_connection_t *conn, time_t now,
     }
   }
 
-  picked = conflux_pick_set_from_candidates(cands);
+  picked = conflux_pick_set_from_candidates(cands, keepalive);
 
   SMARTLIST_FOREACH_BEGIN(cands, conflux_set_candidate_t *, c) {
     tor_free(c);
