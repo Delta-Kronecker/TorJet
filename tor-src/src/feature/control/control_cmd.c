@@ -1450,6 +1450,9 @@ static const control_cmd_syntax_t conflux_syntax = {
  *   CONFLUX QUERY
  *      Print one line for every leg circuit of every conflux set, using the
  *      same (truncated) set id as the CONFLUX_ID= field of circuit-status.
+ *      LINKED lines also carry STREAMS= (number of streams the set has had
+ *      since it was created) and BYTES= (total payload bytes exchanged by the
+ *      set so far). These are set-wide and identical across the set's legs.
  *
  *   CONFLUX ADD <set-id>
  *      Launch a new leg for the conflux set identified by <set-id>, which is
@@ -1493,12 +1496,15 @@ handle_control_conflux(control_connection_t *conn,
           strlcpy(exit_hex, "?", sizeof(exit_hex));
         }
         smartlist_add_asprintf(reply,
-            "SET=%s CIRC=%lu EXIT=%s LEGS=%u STATE=LINKED RTT_US=%" PRIu64,
+            "SET=%s CIRC=%lu EXIT=%s LEGS=%u STATE=LINKED RTT_US=%" PRIu64
+            " STREAMS=%" PRIu64 " BYTES=%" PRIu64,
             hex_str((const char *)nonce, DIGEST256_LEN/2),
             (unsigned long)circ->global_identifier,
             exit_hex,
             CONFLUX_NUM_LEGS(cfx),
-            conflux_get_circ_rtt(&circ->base_));
+            conflux_get_circ_rtt(&circ->base_),
+            cfx->total_streams,
+            cfx->bytes_sent + cfx->bytes_recv);
       } else {
         smartlist_add_asprintf(reply, "SET=%s CIRC=%lu EXIT=? STATE=UNLINKED",
             hex_str((const char *)nonce, DIGEST256_LEN/2),

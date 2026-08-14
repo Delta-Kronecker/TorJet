@@ -106,7 +106,6 @@ TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
 TorJet.exe --watch-rtt 1000    close conflux legs whose RTT exceeds N ms (default 1000)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
-TorJet.exe --watch-min-legs 1  a set is never pruned below this many linked legs (default 1)
 TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
 TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
 TorJet.exe --newcircuit        request a new identity (NEWNYM)
@@ -202,8 +201,9 @@ quality legs so tor rebuilds them with fresh circuits:
   best, defaults 400 ms and 2.0x);
 - a leg must stay weak for `--watch-strikes` consecutive passes (default 1)
   before it is closed, so a single bad measurement closes it right away;
-- the best (lowest RTT) leg of each set is never closed, and a set is never
-  pruned below `--watch-min-legs` (default 1);
+- the best (lowest RTT) leg of each set is normally never closed; the exception
+  is a set's sole weak leg, which is still pruned on an absolute `--watch-rtt`
+  breach and immediately rebuilt by tor with a fresh leg for the same set;
 - legs stuck **unlinked** for `--watch-unlinked-strikes` passes (default 4)
   AND older than `--watch-unlinked-grace` seconds (default 120) are closed as
   dead weight, but never in the first 90 s after bootstrap while everything is
@@ -213,7 +213,9 @@ quality legs so tor rebuilds them with fresh circuits:
 
 tor launches a replacement leg for every closed leg (sets below the configured
 `ConfluxNumLegs` target are also topped up with `CONFLUX ADD`), and conflux
-migrates streams onto the fresh circuits. A 20 s cooldown between closes keeps
+migrates streams onto the fresh circuits. When a weak leg was the last (sole)
+leg of its set, tor rebuilds the set itself with a fresh leg for the same set
+id, so even 1-leg sets keep recovering. A 20 s cooldown between closes keeps
 the circuit set stable (relaxed during the first 90 s after bootstrap). After
 every close pass a
 summary report is printed to the console (legs closed, circuit ids, and the

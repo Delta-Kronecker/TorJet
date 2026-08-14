@@ -1778,11 +1778,26 @@ linked_circuit_closed(circuit_t *circ)
    * launcher's quality monitor), launch a replacement so the set can refill
    * toward its target leg count. The budget refund in cfx_del_leg() keeps
    * this sustainable for long sessions. Mirrors the unlinked recovery logic
-   * in unlinked_circuit_closed(). */
-  if (!full_teardown && !shutting_down &&
-      !have_been_under_memory_pressure() && CIRCUIT_IS_ORIGIN(circ)) {
+   * in unlinked_circuit_closed().
+   *
+   * TorJet: the same applies when the closed leg was the last one of the set,
+   * so the set was removed from the linked pool above. A genuine teardown is
+   * told apart from a deliberate close (such as the launcher removing a weak
+   * sole leg) by in_full_teardown: conflux_mark_all_for_close() only sets it
+   * while the linked set still exists in the pool, which never happens here
+   * for a deliberate sole-leg close. If the close was deliberate, rebuild the
+   * set with the same nonce so a new leg is immediately requested. */
+  if (!shutting_down && !have_been_under_memory_pressure() &&
+      CIRCUIT_IS_ORIGIN(circ)) {
     conflux_t *cfx = linked_pool_get(nonce, is_client);
     if (cfx && CONFLUX_NUM_LEGS(cfx) > 0 && !cfx->in_full_teardown) {
+      /* Set survived the close. Refill toward the target leg count. */
+      conflux_launch_leg(nonce);
+    } else if (!cfx && circ->conflux && !circ->conflux->in_full_teardown) {
+      /* This was the last leg and the set is gone. Unless a recovery unlinked
+       * set shared the conflux object (that case handed ownership over above,
+       * nullifying circ->conflux) or the close was part of a genuine teardown,
+       * rebuild the set with the same nonce. */
       conflux_launch_leg(nonce);
     }
   }

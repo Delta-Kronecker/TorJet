@@ -147,17 +147,16 @@ namespace StartTor
         // CLI): --watch-rtt (absolute weak threshold, ms), --watch-rtt-floor
         // (ms floor for the relative rule), --watch-factor (how much slower
         // than the set's best leg counts as weak), --watch-strikes (consecutive
-        // weak passes before a close), --watch-min-legs (a set is never pruned
-        // below this many linked legs), --watch-unlinked-strikes (consecutive
+        // weak passes before a close), --watch-unlinked-strikes (consecutive
         // unlinked passes before a stuck leg is closed), plus --watch-interval
-        // and --watch-cooldown.
+        // and --watch-cooldown. A set's sole weak leg is pruned too: tor
+        // immediately rebuilds the set with a fresh leg.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
         private static int watchRttMs = 1000;
         private static int watchRttFloorMs = 400;
         private static double watchFactor = 2.0;
         private static int watchStrikes = 1;
-        private static int watchMinLegs = 1;
         private static int watchUnlinkedStrikes = 4;
         private static int watchUnlinkedGraceS = 120;
         private static int watchMaxPerPass = 6;
@@ -1402,6 +1401,15 @@ namespace StartTor
             return null;
         }
 
+        // Formats a byte count as B/KB/MB/GB for the set volume display.
+        private static string FormatBytes(long b)
+        {
+            if (b < 1024) return b + " B";
+            if (b < 1024L * 1024) return (b / 1024.0).ToString("0.#") + " KB";
+            if (b < 1024L * 1024 * 1024) return (b / (1024.0 * 1024)).ToString("0.##") + " MB";
+            return (b / (1024.0 * 1024 * 1024)).ToString("0.##") + " GB";
+        }
+
         // Advertised bandwidth (bytes/s) of an exit, from GETINFO ns/id/<fp>.
         private static string ExitBandwidth(string fpHex)
         {
@@ -1426,8 +1434,8 @@ namespace StartTor
         }
 
         // Reads the CONFLUX QUERY output, one entry per leg circuit. Every entry
-        // is { set, circ, exit, legs, state, rttUs }. Returns null when the tor
-        // control port can't be reached.
+        // is { set, circ, exit, legs, state, rttUs, streams, bytes }. Returns
+        // null when the tor control port can't be reached.
         private static List<string[]> ConfluxQuery()
         {
             var lines = ControlCommand("CONFLUX QUERY");
@@ -1443,11 +1451,15 @@ namespace StartTor
                 string exit = Token(line, "EXIT");
                 string state = Token(line, "STATE");
                 int legsN = 0, rttUs = 0;
+                long streams = 0, bytes = 0;
                 int.TryParse(Token(line, "LEGS"), out legsN);
                 int.TryParse(Token(line, "RTT_US"), out rttUs);
+                long.TryParse(Token(line, "STREAMS"), out streams);
+                long.TryParse(Token(line, "BYTES"), out bytes);
                 legs.Add(new[] { set, Token(line, "CIRC") == null ? "?" : Token(line, "CIRC"),
                                  exit == null ? "?" : exit, legsN.ToString(),
-                                 state == null ? "?" : state, rttUs.ToString() });
+                                 state == null ? "?" : state, rttUs.ToString(),
+                                 streams.ToString(), bytes.ToString() });
             }
             return legs;
         }
@@ -1579,8 +1591,12 @@ namespace StartTor
                 int bestUs = int.MaxValue;
                 string exit = "?";
                 int linked = 0;
+                long streams = 0, bytes = 0;
                 foreach (string[] leg in kv.Value)
                 {
+                    long s, b;
+                    if (long.TryParse(leg[6], out s) && s > streams) streams = s;
+                    if (long.TryParse(leg[7], out b) && b > bytes) bytes = b;
                     if (leg[2] != "?") exit = leg[2];
                     if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
                     {
@@ -1592,7 +1608,8 @@ namespace StartTor
                 }
                 string rtt = bestUs == int.MaxValue ? "?" : (bestUs / 1000) + " ms";
                 Console.WriteLine("  set " + idx + ": " + kv.Value.Count + " legs (" + linked +
-                                  " linked)  best " + rtt + "  exit " + exit);
+                                  " linked)  best " + rtt + "  exit " + exit +
+                                  "  streams " + streams + "  " + FormatBytes(bytes));
                 if (debug)
                 {
                     foreach (string[] leg in kv.Value)
@@ -1657,8 +1674,9 @@ namespace StartTor
                 // A leg must stay weak for --watch-strikes consecutive passes
                 // before it is closed. Legs stuck UNLINKED for --watch-unlinked-strikes
                 // passes are closed as dead weight. The best (lowest RTT) leg of
-                // each set is never closed, and a set is never pruned below
-                // --watch-min-legs.
+                // each set is normally never closed; the exception is the sole
+                // weak leg of a 1-leg set, which is still pruned on an absolute
+                // RTT breach and immediately rebuilt by tor for the same set.
 
                 // Top up: sets with fewer legs than the configured target get
                 // one CONFLUX ADD (capped per pass) so a set that never
@@ -1689,11 +1707,17 @@ namespace StartTor
                     }
                 }
 
-                // Pass 1: best RTT per set (linked legs with a real RTT only).
+                // Pass 1: best RTT per set (linked legs with a real RTT only),
+                // and the number of linked legs per set (used to detect a sole
+                // weak leg, which may be pruned and rebuilt by tor).
                 var setBest = new Dictionary<string, long>();
+                var setLinked = new Dictionary<string, int>();
                 foreach (string[] leg in legList)
                 {
                     if (!leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase)) continue;
+                    int ln;
+                    if (!setLinked.TryGetValue(leg[0], out ln)) ln = 0;
+                    setLinked[leg[0]] = ln + 1;
                     int rttUs;
                     if (!int.TryParse(leg[5], out rttUs) || rttUs <= 0) continue;
                     long cur;
@@ -1718,10 +1742,19 @@ namespace StartTor
                         long best;
                         bool isBestLeg = setBest.TryGetValue(set, out best) &&
                                          best > 0 && rttUs <= best;
+                        int linkedN;
+                        bool isSoleLeg = setLinked.TryGetValue(set, out linkedN) &&
+                                         linkedN == 1;
                         bool absBad = rttUs >= watchRttMs * 1000L;
                         bool relBad = rttUs >= watchRttFloorMs * 1000L &&
                                       (double)rttUs >= (double)best * watchFactor;
-                        if ((absBad || relBad) && !isBestLeg)
+                        // The best leg of a set is normally never pruned. The
+                        // exception is a sole leg: when it is the only linked
+                        // leg, an absolute RTT breach still flags it as weak
+                        // (relBad can never fire for it, since best == its own
+                        // RTT), so even a 1-leg set loses its weak leg and tor
+                        // immediately rebuilds it with a fresh leg.
+                        if ((absBad || relBad) && (!isBestLeg || isSoleLeg))
                         {
                             strike++;
                             weakStrikes[circ] = strike;
@@ -1768,26 +1801,19 @@ namespace StartTor
                     return int.Parse(b[1]) - int.Parse(a[1]);
                 });
 
-                // Never prune a set below --watch-min-legs linked legs, and
-                // never close more than --watch-max-per-pass legs total in a
-                // single pass so replacement builds don't pile up at once.
-                var setLinked = new Dictionary<string, int>();
-                foreach (string[] leg in legList)
-                {
-                    if (leg[4].Equals("LINKED", StringComparison.OrdinalIgnoreCase))
-                    {
-                        int n;
-                        if (!setLinked.TryGetValue(leg[0], out n)) n = 0;
-                        setLinked[leg[0]] = n + 1;
-                    }
-                }
+                // Even a set's sole weak leg is pruned (a set can never go
+                // below zero linked legs this way, and tor rebuilds it with a
+                // fresh leg for the same set), but never close more than
+                // --watch-max-per-pass legs total in a single pass so
+                // replacement builds don't pile up at once. setLinked was
+                // filled in Pass 1 above.
                 var toRemove = new List<string[]>();
                 var toRemoveReasons = new Dictionary<string, string>();
                 foreach (string[] leg in weak)
                 {
                     if (toRemove.Count >= watchMaxPerPass) break;
                     int n;
-                    if (setLinked.TryGetValue(leg[2], out n) && n > watchMinLegs)
+                    if (setLinked.TryGetValue(leg[2], out n) && n > 0)
                     {
                         setLinked[leg[2]] = n - 1;
                         toRemove.Add(leg);
@@ -2839,8 +2865,7 @@ namespace StartTor
                     " ms) are closed after " + watchStrikes + " strikes; " +
                     "stuck-unlinked after " + watchUnlinkedStrikes +
                     " passes and " + watchUnlinkedGraceS + " s old; " +
-                    "never below " + watchMinLegs + " leg(s)/set, max " +
-                    watchMaxPerPass + " close(s)/pass (cooldown " +
+                    "max " + watchMaxPerPass + " close(s)/pass (cooldown " +
                     watchCooldownS + " s, relaxed during warmup).");
             }
 
@@ -2880,11 +2905,10 @@ namespace StartTor
             Console.WriteLine("  K   keep-alive report");
             Console.WriteLine("  J   keep-alive on/off");
             Console.WriteLine();
-            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
+            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
             Console.WriteLine("  T    :     On / Off  TUN mode");
             Console.WriteLine("  P    :     On / Off  system proxy");
             Console.WriteLine("  C    :     Stop Tor, back to menu");
-            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
             Console.WriteLine();
             while (true)
             {
@@ -3145,7 +3169,6 @@ namespace StartTor
                 else if (a == "--watch-rtt-floor" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttFloorMs); }
                 else if (a == "--watch-factor" && i + 1 < args.Length) { double.TryParse(args[++i], out watchFactor); }
                 else if (a == "--watch-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchStrikes); }
-                else if (a == "--watch-min-legs" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMinLegs); }
                 else if (a == "--watch-unlinked-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedStrikes); }
                 else if (a == "--watch-unlinked-grace" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedGraceS); }
                 else if (a == "--watch-max-per-pass" && i + 1 < args.Length) { int.TryParse(args[++i], out watchMaxPerPass); }
