@@ -1262,11 +1262,20 @@ namespace StartTor
             var raw = ControlRaw(cmd);
             if (raw == null) return null;
             var lines = new List<string>();
+            bool inData = false;
             foreach (string line in raw)
             {
+                if (inData)
+                {
+                    // Data-reply body (e.g. GETINFO ns/id/<fp>): lines arrive
+                    // unprefixed until a lone "." terminator.
+                    if (line == ".") { inData = false; continue; }
+                    lines.Add(line);
+                    continue;
+                }
                 if (line.StartsWith("250 ")) break;
                 if (line.StartsWith("250-")) lines.Add(line.Substring(4));
-                else if (line.StartsWith("250+")) lines.Add(line.Substring(4));
+                else if (line.StartsWith("250+")) { inData = true; lines.Add(line.Substring(4)); }
             }
             return lines;
         }
