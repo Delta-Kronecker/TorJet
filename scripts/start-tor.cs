@@ -64,12 +64,12 @@ namespace StartTor
         // positive values are written to the generated torrc as ConfluxNumSets /
         // ConfluxNumLegs / ConfluxNumLinkedSets. When no setting file exists the
         // defaults are 10 sets / 3 legs / 10 linked sets.
-        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 10);
-        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 3);
-        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 10);
+        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 32);
+        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 2);
+        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 32);
         private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
         private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
-        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 0);
+        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 25);
         private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
         private static readonly string[] StrategyDesc =
@@ -161,7 +161,7 @@ namespace StartTor
         // and --watch-max-per-pass.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
-        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 30);
+        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 0);
         private static int watchStrikes = 1;
         private static int watchUnlinkedStrikes = 4;
         private static int watchUnlinkedGraceS = 120;
@@ -454,6 +454,7 @@ namespace StartTor
                 using (TcpClient c = new TcpClient("127.0.0.1", 9051))
                 {
                     NetworkStream s = c.GetStream();
+                    s.ReadTimeout = 5000;
                     StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
                     StreamReader r = new StreamReader(s);
                     w.WriteLine("AUTHENTICATE " + hex);
@@ -1391,6 +1392,7 @@ namespace StartTor
                 using (TcpClient c = new TcpClient("127.0.0.1", 9051))
                 {
                     NetworkStream s = c.GetStream();
+                    s.ReadTimeout = 5000;
                     StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
                     StreamReader r = new StreamReader(s);
                     w.WriteLine("AUTHENTICATE " + hex);
@@ -1822,6 +1824,11 @@ namespace StartTor
                             pctWeak.Add(allRtts[i][0]);
                     }
                 }
+
+                // When weak-leg pruning is off (item 10 = 0), skip all
+                // closures: the monitor still runs to keep strike state clean
+                // and log the status, but no legs are touched.
+                if (watchRttPct <= 0) continue;
 
                 // Pass 2: classify every leg.
                 var weak = new List<string[]>();
@@ -3174,6 +3181,10 @@ namespace StartTor
                 e.Cancel = true;
                 Cleanup();
                 Environment.Exit(0);
+            };
+            AppDomain.CurrentDomain.ProcessExit += delegate(object sender, EventArgs e)
+            {
+                Cleanup();
             };
 
             Thread updater = new Thread(UpdateCheckLoop) { IsBackground = true };
