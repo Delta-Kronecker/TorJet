@@ -119,6 +119,11 @@ namespace StartTor
         private static readonly string LockFile = Path.Combine(DataDir, "data", "lock");
         private static readonly string ProxyKey =
             @"Software\Microsoft\Windows\CurrentVersion\Internet Settings";
+        // Persists the user's pre-TorJet system-proxy settings. Without this
+        // file a crash while the TorJet proxy is ON would lose them forever:
+        // the next restore would write empty strings over the registry.
+        private static readonly string ProxyBackupFile =
+            Path.Combine(DataDir, "proxy-backup.txt");
 
         private const int InternetOptionSettingsChanged = 39;
         private const int InternetOptionRefresh = 37;
@@ -218,6 +223,58 @@ namespace StartTor
         private static string savedProxyOverride;
         private static bool savedProxyOn;
 
+        // Writes the captured pre-TorJet proxy settings to disk so a crash
+        // mid-session cannot lose them. Called only when the registry did NOT
+        // point at our own proxy (i.e. these are genuinely the user's values).
+        private static void SaveProxyBackup()
+        {
+            try
+            {
+                File.WriteAllText(ProxyBackupFile,
+                    "server=" + savedProxy + "\n" +
+                    "override=" + savedProxyOverride + "\n" +
+                    "enabled=" + (savedProxyOn ? "1" : "0") + "\n",
+                    new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        // Reloads the persisted backup at startup. Only trusted while the
+        // registry still points at our proxy (the crash scenario); a stale
+        // file must never overwrite settings the user changed afterwards.
+        private static void LoadProxyBackup()
+        {
+            try
+            {
+                if (!File.Exists(ProxyBackupFile)) return;
+                string server = null, overrideStr = null;
+                bool enabled = false;
+                foreach (string raw in File.ReadAllLines(ProxyBackupFile))
+                {
+                    string line = raw.Trim();
+                    if (line.StartsWith("server=", StringComparison.Ordinal))
+                        server = line.Substring(7);
+                    else if (line.StartsWith("override=", StringComparison.Ordinal))
+                        overrideStr = line.Substring(9);
+                    else if (line.StartsWith("enabled=", StringComparison.Ordinal))
+                        enabled = line.Substring(8) == "1";
+                }
+                if (server != null && overrideStr != null && ProxyIsOurs())
+                {
+                    savedProxy = server;
+                    savedProxyOverride = overrideStr;
+                    savedProxyOn = enabled;
+                }
+            }
+            catch { }
+        }
+
+        private static void DeleteProxyBackup()
+        {
+            try { if (File.Exists(ProxyBackupFile)) File.Delete(ProxyBackupFile); }
+            catch { }
+        }
+
         private static void SetSystemProxy(bool on)
         {
             if (!on && !ProxyIsOurs()) return;
@@ -233,6 +290,7 @@ namespace StartTor
                             savedProxyOverride = k.GetValue("ProxyOverride") as string ?? "";
                             object en = k.GetValue("ProxyEnable");
                             savedProxyOn = en is int && (int)en == 1;
+                            SaveProxyBackup();
                         }
                         k.SetValue("ProxyEnable", 1, RegistryValueKind.DWord);
                         k.SetValue("ProxyServer", "127.0.0.1:8118", RegistryValueKind.String);
@@ -243,6 +301,7 @@ namespace StartTor
                         k.SetValue("ProxyEnable", savedProxyOn ? 1 : 0, RegistryValueKind.DWord);
                         k.SetValue("ProxyServer", savedProxy ?? "", RegistryValueKind.String);
                         k.SetValue("ProxyOverride", savedProxyOverride ?? "", RegistryValueKind.String);
+                        DeleteProxyBackup();
                     }
                 }
             }
@@ -3176,6 +3235,9 @@ namespace StartTor
         {
             Console.Title = "TorJet";
             try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            // Recover the user's pre-TorJet proxy settings if a previous run
+            // crashed while the TorJet system proxy was still enabled.
+            LoadProxyBackup();
             Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;
