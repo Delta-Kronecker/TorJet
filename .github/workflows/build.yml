@@ -120,13 +120,13 @@ jobs:
       # together whenever you intentionally want a newer toolchain. If a pin
       # ever disappears from repo.msys2.org, pacman fails with "target not
       # found": raise the pin to the current version then.
-      - uses: msys2/setup-msys2@f84a36b4009b96413f91c01441130855db9392e5 # v2.9.0
+      - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0 (node24)
         with:
           msystem: MINGW64
           update: false
           # No environment caching: every run must resolve the exact pins
           # below fresh, so a restored (older) cache can never shadow them.
-          cache-disabled: true
+          cache: false
           install: >-
             mingw-w64-x86_64-gcc=16.2.0-3
             mingw-w64-x86_64-binutils=2.47-3
