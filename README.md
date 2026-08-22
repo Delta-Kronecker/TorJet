@@ -19,9 +19,6 @@ data\
   bridges\             obfs4_tested.txt, webtunnel_tested.txt, vanilla_tested.txt, snowflake_tested.txt
   tun2socks.exe        TUN mode: routes system traffic through the tor SOCKS proxy
   wintun.dll           Wintun driver used by tun2socks
-  xray.exe             optional: TLS fragment proxy (see Fragment toggle)
-  xray\config.json     xray config - edit freely, TorJet just runs it as-is
-                       (ships with the release; source: configs\xray-config.json)
   data\                runtime state (cached consensus, keys, tor.log)
 ```
 
@@ -38,13 +35,8 @@ data\
       2. **balanced** — long-lived reused circuits (fewer handshakes)
       3. **aggressive** — more guards + faster scheduler + deeper reuse
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
-   - **Fragment (xray)** — routes all tor relay TLS through a local
-     `xray.exe` SOCKS proxy that fragments the TLS ClientHello (a common
-     circumvention technique against SNI/length-based DPI). Default on when
-     `data\xray.exe` is present; toggle it in Settings. Also settable via
-     `--fragment` / `--no-fragment`.
-   - **Conflux topology** (from the Settings submenu) — how many conflux
-     circuit sets tor keeps:
+    - **Conflux topology** (from the Settings submenu) — how many conflux
+      circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
        sets to keep alive. The total (linked + building) is held exactly at
        this many, so the count matches what you set. Each set is one exit
@@ -67,7 +59,7 @@ data\
         absolute ms threshold); the single best leg in the pool is never closed
         and the pool is never fully pruned. 0 = off.
     Your choices are remembered for next time (`data\mode.txt`,
-    `data\strategy.txt`, `data\fragment.txt`, `data\keepalive.txt`,
+    `data\strategy.txt`, `data\keepalive.txt`,
     `data\conflux-sets.txt`, `data\conflux-linked-sets.txt`,
     `data\conflux-legs.txt`, `data\conflux-selection.txt`,
     `data\conflux-set-rtt.txt`, `data\conflux-set-rtt-pct.txt`,
@@ -120,7 +112,6 @@ TorJet.exe obfs4 aggressive    start in obfs4 mode + strategy level
 TorJet.exe --strategy ultimate start with the ultimate strategy
 TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
-TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
 TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default off)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
@@ -158,25 +149,13 @@ Point your browser (or any app) at the **SOCKS5 proxy 127.0.0.1:9050**, or press
 **P** to set Windows' system proxy to the HTTP CONNECT tunnel on
 127.0.0.1:8118. These ports
 belong to **tor itself** — they are the front door. Everything you send there
-enters the Tor circuit.
-
-Port **10808** is *internal*: it is xray's SOCKS listener and you must **not**
-connect your browser to it.
-
-When **Fragment (xray)** is on, tor's own relay connections are routed through
-xray:
+enters the Tor circuit:
 
 ```
 your browser
    │  SOCKS5 127.0.0.1:9050   (tor's SocksPort)
    ▼
-tor.exe
-   │  tor wants to open TLS to a guard/bridge
-   │  torrc line: Socks5Proxy 127.0.0.1:10808
-   ▼
-xray.exe 127.0.0.1:10808      (internal - NOT for the browser)
-   │  two stacked fragment passes: first splits the TLS ClientHello
-   │  ("tlshello"), then re-splits the remaining stream in 1-byte pieces
+tor.exe  ->  TLS to guard/bridge
    ▼
 real guard/bridge IP over the Tor network
    ▼
@@ -184,12 +163,6 @@ circuit  guard -> middle -> exit
    ▼
 destination
 ```
-
-So xray sits **between tor and the Tor network**, never between your browser
-and tor. Without `data\xray.exe` the `Socks5Proxy` line is simply not written
-and tor connects directly. With it, the first TLS handshake to your guard/bridge
-no longer reveals Tor's distinctive ClientHello (SNI, length pattern), which is
-how some ISPs detect and block Tor.
 
 ### TUN mode traffic
 
@@ -203,7 +176,7 @@ all apps
 tun2socks.exe  (transparent TCP -> SOCKS5)
    │  SOCKS5 127.0.0.1:9050
    ▼
-tor.exe -> (xray fragment if enabled) -> Tor network -> exit -> destination
+tor.exe -> Tor network -> exit -> destination
 ```
 
 tor's own relay connections are exempted with per-relay /32 host routes on the
@@ -217,7 +190,7 @@ quality legs so tor rebuilds them with fresh circuits:
 
 - a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of ALL
   linked legs across every set by RTT (the slowest legs of the whole pool;
-  default off — set it in Settings item 10 or with `--watch-rtt-pct`), so the
+  default off — set it in Settings item 9 or with `--watch-rtt-pct`), so the
   pruning is fully relative and adapts to the network with
   no absolute ms threshold — a set with a single slow leg is pruned just like
   the weak legs of a multi-leg set;
@@ -244,7 +217,7 @@ current conflux set/leg/linked counts). Disable it with
 `--no-circuit-watch`; tune it with `--watch-rtt-pct <percent>`,
 `--watch-interval <seconds>`, `--watch-cooldown <seconds>` and the other
 `--watch-*` flags. The weak-leg percentage can also be changed from the
-settings menu (item 10), saved to `data\circuit-watch-pct.txt`.
+settings menu (item 9), saved to `data\circuit-watch-pct.txt`.
 
 ### Keep-alive
 
@@ -256,7 +229,7 @@ test, so a healthy report is not a false positive. Each request is allowed up to
 a fixed SOCKS5 auth username, tor recognizes them and **always spreads them
 evenly across every conflux set** (each ping lands on the set that has seen the
 fewest streams, so the spread stays balanced even while sets are being rebuilt),
-bypassing the set-selection policy and the RTT filters (settings items 7-9) — so
+bypassing the set-selection policy and the RTT filters (settings items 6-8) — so
 keep-alive traffic keeps exercising all sets even when the slow-set filters
 would normally skip them. The loop runs
 in the background while the menu is served (so the menu appears immediately) and
@@ -299,4 +272,4 @@ Derivatives must be released under the same license (share-alike, including
 network/SaaS use), and any breach terminates the license automatically.
 
 Third-party components shipped with TorJet (tor, pluggable transports,
-tun2socks, wintun, xray) keep their own licenses.
+tun2socks, wintun) keep their own licenses.

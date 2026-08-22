@@ -36,9 +36,8 @@ jobs:
 
       - name: Build pluggable transports
         env:
-          # SHA256 pins for the two binary downloads below (computed once from
-          # the vendor files; CI fails loudly if either ever changes).
-          XRAY_ZIP_SHA256: d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad
+          # SHA256 pin for the binary download below (computed once from
+          # the vendor file; CI fails loudly if it ever changes).
           WINTUN_ZIP_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
         run: |
           set -e
@@ -64,12 +63,6 @@ jobs:
           GOOS=windows GOARCH=amd64 \
             go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
           cp "$GOPATH_BIN/tun2socks.exe" out/tun2socks.exe
-
-          echo "=== xray (tlshello fragment) ==="
-          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip
-          echo "$XRAY_ZIP_SHA256  xray.zip" | sha256sum -c -
-          unzip -o xray.zip xray.exe
-          cp xray.exe out/xray.exe
 
           echo "=== wintun driver ==="
           curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
@@ -221,12 +214,10 @@ jobs:
           Copy-Item "transports\*.dll" -Destination "dist\data\" -Force
           Get-ChildItem "dist" -Recurse -File | Select-Object FullName, Length
 
-      - name: Copy config template, xray config, bridges, README
+      - name: Copy config template, bridges, README
         shell: pwsh
         run: |
           Copy-Item "configs\torrc.jet" "dist\data\torrc.template" -Force
-          New-Item -ItemType Directory -Path "dist\data\xray" -Force | Out-Null
-          Copy-Item "configs\xray-config.json" "dist\data\xray\config.json" -Force
           Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
 
@@ -306,7 +297,7 @@ jobs:
             echo "**Download:** \`torjet-win64-$TAG.zip\` — unzip anywhere and double-click \`TorJet.exe\`."
             echo ""
             echo "Built in CI from official tor 0.4.9.11 sources plus obfs4, webtunnel,"
-            echo "snowflake, tun2socks, xray and wintun."
+            echo "snowflake, tun2socks and wintun."
             echo ""
             echo "| Endpoint | Address |"
             echo "|---|---|"
