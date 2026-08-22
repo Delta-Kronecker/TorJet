@@ -124,6 +124,9 @@ jobs:
         with:
           msystem: MINGW64
           update: false
+          # No environment caching: every run must resolve the exact pins
+          # below fresh, so a restored (older) cache can never shadow them.
+          cache-disabled: true
           install: >-
             mingw-w64-x86_64-gcc=16.2.0-3
             mingw-w64-x86_64-binutils=2.47-3
