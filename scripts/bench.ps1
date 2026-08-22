@@ -109,17 +109,30 @@ function Invoke-Bench {
 }
 
 if ($ConfluxModes.Trim().Length -gt 0) {
-    $modes = $ConfluxModes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
-    foreach ($m in $modes) {
-        Write-Host "`n=== conflux check: $m ===" -ForegroundColor Cyan
-        & (Join-Path $WorkDir "TorJet.exe") --conflux-check $m
+    try {
+        $modes = $ConfluxModes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
+        foreach ($m in $modes) {
+            Write-Host "`n=== conflux check: $m ===" -ForegroundColor Cyan
+            & (Join-Path $WorkDir "TorJet.exe") --conflux-check $m
+        }
+    } finally {
+        if (Test-Path $torrcBackup) { Copy-Item $torrcBackup $torrcTemplate -Force }
+        Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
     }
-    Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
     exit 0
 }
 
-Invoke-Bench -Name $VariantName -Extra $ExtraTorrc
-Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
-
-Write-Host "`n=== last rows of $OutCSV ===" -ForegroundColor Green
-if (Test-Path $OutCSV) { Get-Content $OutCSV | Select-Object -Last ($Iters * (@($Streams -split ",").Count) + 1) }
+try {
+    Invoke-Bench -Name $VariantName -Extra $ExtraTorrc
+    Write-Host "`n=== last rows of $OutCSV ===" -ForegroundColor Green
+    if (Test-Path $OutCSV) { Get-Content $OutCSV | Select-Object -Last ($Iters * (@($Streams -split ",").Count) + 1) }
+} finally {
+    # Always restore the pristine template (and drop the backup) even when a
+    # run dies mid-variant, so a later run never augments an already-modified
+    # template.
+    if (Test-Path $torrcBackup) {
+        Copy-Item $torrcBackup $torrcTemplate -Force
+        Remove-Item $torrcBackup -Force -ErrorAction SilentlyContinue
+    }
+    Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
+}
