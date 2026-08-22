@@ -61,16 +61,22 @@ data\
         stream is attached, only the best (lowest-RTT) this-many percent of
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
-      - **Weak legs (top %)** (`--watch-rtt-pct`, default 30) — the circuit
+      - **Weak legs (top %)** (`--watch-rtt-pct`, default off) — the circuit
         health monitor closes the top this-many percent of linked legs with the
         highest RTT compared **globally across every set** (fully relative, no
         absolute ms threshold); the single best leg in the pool is never closed
         and the pool is never fully pruned. 0 = off.
     Your choices are remembered for next time (`data\mode.txt`,
-    `data\strategy.txt`, `data\conflux-sets.txt`,
-    `data\conflux-linked-sets.txt`, `data\conflux-legs.txt`).
+    `data\strategy.txt`, `data\fragment.txt`, `data\keepalive.txt`,
+    `data\conflux-sets.txt`, `data\conflux-linked-sets.txt`,
+    `data\conflux-legs.txt`, `data\conflux-selection.txt`,
+    `data\conflux-set-rtt.txt`, `data\conflux-set-rtt-pct.txt`,
+    `data\circuit-watch-pct.txt`). The user's pre-TorJet system-proxy
+    settings are saved to `data\proxy-backup.txt` while the proxy is on
+    and restored from there even after a crash.
 3. On 100% bootstrap Tor is running. The system proxy is NOT changed
-   automatically — press **P** to toggle it on/off (HTTP 127.0.0.1:8118).
+   automatically — press **P** to toggle it on/off (HTTP CONNECT tunnel,
+   127.0.0.1:8118).
    Press **T** to toggle **TUN mode** (see below). Press **S** to run a speed
    test: single-stream over the HTTP proxy, or the *max* test which opens
    several parallel SOCKS5 streams, each authenticated with a unique username
@@ -116,7 +122,7 @@ TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --fragment          enable the tlshello fragment (xray)
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
-TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default 30)
+TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default off)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
 TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
 TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
@@ -145,11 +151,12 @@ TorJet exposes three local entry points, all bound to 127.0.0.1:
 |------|---------|-------------|
 | 9050 | SOCKS5 proxy | your browser / apps |
 | 9052 | keep-alive SOCKS5 (internal) | TorJet's background pings |
-| 8118 | HTTP proxy | Windows system proxy (pressed **P**) |
+| 8118 | HTTP CONNECT tunnel proxy (HTTPTunnelPort — CONNECT only, not a full HTTP proxy) | Windows system proxy (pressed **P**) |
 | 53530 | DNS | system DNS resolver (TUN mode) |
 
 Point your browser (or any app) at the **SOCKS5 proxy 127.0.0.1:9050**, or press
-**P** to set Windows' system proxy to the HTTP proxy 127.0.0.1:8118. These ports
+**P** to set Windows' system proxy to the HTTP CONNECT tunnel on
+127.0.0.1:8118. These ports
 belong to **tor itself** — they are the front door. Everything you send there
 enters the Tor circuit.
 
@@ -210,7 +217,8 @@ quality legs so tor rebuilds them with fresh circuits:
 
 - a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of ALL
   linked legs across every set by RTT (the slowest legs of the whole pool;
-  default 30%), so the pruning is fully relative and adapts to the network with
+  default off — set it in Settings item 10 or with `--watch-rtt-pct`), so the
+  pruning is fully relative and adapts to the network with
   no absolute ms threshold — a set with a single slow leg is pruned just like
   the weak legs of a multi-leg set;
 - a leg must stay weak for `--watch-strikes` consecutive passes (default 1)
