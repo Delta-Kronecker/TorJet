@@ -166,7 +166,8 @@ jobs:
           sleep 1
           touch aclocal.m4
           sleep 1
-          touch configure config.h.in
+          touch configure
+          find . -name '*.h.in' | xargs touch
           find . -name 'Makefile.in' | xargs touch
           make -j$(nproc) 2>&1 | tee build-win.log
           exit ${PIPESTATUS[0]}
