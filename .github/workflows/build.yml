@@ -158,6 +158,16 @@ jobs:
         shell: msys2 {0}
         run: |
           cd "$GITHUB_WORKSPACE/tor-src"
+          # No autotools are installed (the workflow never regenerates), so
+          # stop make's maintainer-mode rules from trying: restamp generated
+          # files strictly NEWER than their inputs (sources -> aclocal.m4 ->
+          # configure/config.h.in/Makefile.in).
+          find . -name '*.m4' -o -name 'Makefile.am' | xargs touch
+          sleep 1
+          touch aclocal.m4
+          sleep 1
+          touch configure config.h.in
+          find . -name 'Makefile.in' | xargs touch
           make -j$(nproc) 2>&1 | tee build-win.log
           exit ${PIPESTATUS[0]}
 
