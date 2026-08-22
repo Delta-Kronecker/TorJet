@@ -114,34 +114,30 @@ jobs:
           fi
           echo "Building exactly $ACTUAL"
 
-      # Package versions are pinned (pkg=ver-rel) so the toolchain — and with
-      # it tor.exe's binary output — stays identical between runs. The MSYS2
-      # BASE system still floats with the runner image; bump these pins
-      # together whenever you intentionally want a newer toolchain. If a pin
-      # ever disappears from repo.msys2.org, pacman fails with "target not
-      # found": raise the pin to the current version then.
+      # Package versions are pinned (pkg=ver-rel) against the CURRENT MSYS2
+      # sync databases (verify with: tar -xOf <pkg>.db.tar <pkg-dir>/desc |
+      # grep -A1 %VERSION%). update:true is REQUIRED: without a fresh
+      # `pacman -Sy` the preinstalled image's stale database cannot see the
+      # pinned versions and every target resolves as "target not found".
+      # Bump pins together whenever you want a newer toolchain; if pacman
+      # ever reports "target not found", re-check the .db and adjust.
       - uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2.32.0 (node24)
         with:
           msystem: MINGW64
-          update: false
-          # No environment caching: every run must resolve the exact pins
-          # below fresh, so a restored (older) cache can never shadow them.
+          update: true
           cache: false
           install: >-
             mingw-w64-x86_64-gcc=16.2.0-3
             mingw-w64-x86_64-binutils=2.47-3
-            make=9.03.01-2
+            make=4.4.1-3
             mingw-w64-x86_64-pkgconf=1~3.0.5-1
             mingw-w64-x86_64-libevent=2.1.12-14
             mingw-w64-x86_64-openssl=3.6.3-1
             mingw-w64-x86_64-zlib=1.3.2-2
             mingw-w64-x86_64-zstd=1.5.7-2
-            mingw-w64-x86_64-gettext=0.22.4-3
+            mingw-w64-x86_64-gettext-runtime=1.0-1
+            mingw-w64-x86_64-gettext-tools=1.0-1
             perl=5.42.3-1
-            autoconf=2.71-3
-            automake
-            libtool=2.6.2-1
-            m4=1.4.21-1
 
       - name: Configure
         shell: msys2 {0}
