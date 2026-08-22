@@ -24,9 +24,15 @@ jobs:
     name: pluggable-transports (Windows x86_64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-go@v5
+      # Actions are pinned to commit SHAs (version in comment) for
+      # reproducible, supply-chain-safe builds. To bump: verify the new tag,
+      # then swap SHA + comment together.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0 (node24)
         with:
           go-version: "1.24"
+          # This repo has no go.sum; the built-in module cache would just warn
+          # and skip. The whole job runs in under a minute anyway.
+          cache: false
 
       - name: Build pluggable transports
         env:
@@ -74,7 +80,7 @@ jobs:
           ls -la out/
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: transports-win64
           path: out/
@@ -86,7 +92,7 @@ jobs:
     steps:
       # On workflow_dispatch with a tag input, check out EXACTLY that tag so
       # the published binary always matches its tagged source.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (node24)
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag || github.ref }}
           fetch-depth: 0
@@ -108,25 +114,31 @@ jobs:
           fi
           echo "Building exactly $ACTUAL"
 
-      - uses: msys2/setup-msys2@v2
+      # Package versions are pinned (pkg=ver-rel) so the toolchain — and with
+      # it tor.exe's binary output — stays identical between runs. The MSYS2
+      # BASE system still floats with the runner image; bump these pins
+      # together whenever you intentionally want a newer toolchain. If a pin
+      # ever disappears from repo.msys2.org, pacman fails with "target not
+      # found": raise the pin to the current version then.
+      - uses: msys2/setup-msys2@f84a36b4009b96413f91c01441130855db9392e5 # v2.9.0
         with:
           msystem: MINGW64
           update: false
           install: >-
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-binutils
-            make
-            mingw-w64-x86_64-pkgconf
-            mingw-w64-x86_64-libevent
-            mingw-w64-x86_64-openssl
-            mingw-w64-x86_64-zlib
-            mingw-w64-x86_64-zstd
-            mingw-w64-x86_64-gettext
-            perl
-            autoconf
+            mingw-w64-x86_64-gcc=16.2.0-3
+            mingw-w64-x86_64-binutils=2.47-3
+            make=9.03.01-2
+            mingw-w64-x86_64-pkgconf=1~3.0.5-1
+            mingw-w64-x86_64-libevent=2.1.12-14
+            mingw-w64-x86_64-openssl=3.6.3-1
+            mingw-w64-x86_64-zlib=1.3.2-2
+            mingw-w64-x86_64-zstd=1.5.7-2
+            mingw-w64-x86_64-gettext=0.22.4-3
+            perl=5.42.3-1
+            autoconf=2.71-3
             automake
-            libtool
-            m4
+            libtool=2.6.2-1
+            m4=1.4.21-1
 
       - name: Configure
         shell: msys2 {0}
@@ -138,7 +150,7 @@ jobs:
 
       - name: Upload configure log (on failure)
         if: failure() && hashFiles('tor-src/config.log') != ''
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: config-log
           path: tor-src/config.log
@@ -187,7 +199,7 @@ jobs:
           ls ../dist/data/
 
       - name: Download transports
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
           name: transports-win64
           path: transports/
@@ -219,14 +231,14 @@ jobs:
           & "scripts\build-start-tor.ps1" -OutFile "dist\TorJet.exe" -Version $ver
 
       - name: Upload single release artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: torjet-win64
           path: dist/
 
       - name: Upload build log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: build-log-win
           path: tor-src/build-win.log
@@ -262,7 +274,7 @@ jobs:
           echo "Publishing release tag: $TAG"
 
       # Full history so the release notes can list commits since the previous tag.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (node24)
         with:
           ref: ${{ steps.tag.outputs.TAG }}
           fetch-depth: 0
@@ -312,7 +324,7 @@ jobs:
           echo "--- release-notes.md ---"
           cat "$GITHUB_WORKSPACE/release-notes.md"
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
           name: torjet-win64
           path: release

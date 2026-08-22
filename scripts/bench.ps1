@@ -71,20 +71,24 @@ if (-not (Test-Path (Join-Path $Release "data\tor.exe"))) { Write-Host "[x] inva
 if (-not (Test-Path (Join-Path $WorkDir "data\tor.exe"))) {
     Write-Host "creating scratch bench folder: $WorkDir"
     New-Item -ItemType Directory -Path $WorkDir -Force | Out-Null
+    # Recursive "*" already copies the data\ subtree; no second copy needed.
     Copy-Item (Join-Path $Release "*") -Destination $WorkDir -Recurse -Force
-    Copy-Item (Join-Path $Release "data\*") -Destination (Join-Path $WorkDir "data") -Recurse -Force
 }
 # always refresh the freshly compiled launcher into the scratch folder
 Copy-Item $newExe -Destination $WorkDir -Force
 
-# pre-flight: kill any tor leaked from this workdir and drop a stale lock file
+# pre-flight: kill any tor leaked from this workdir and drop a stale lock file.
+# A tor whose path cannot be queried is LEFT ALONE: killing it might hit the
+# user's unrelated tor instance, and TorJet.exe itself stops previous runs
+# holding our ports at startup anyway.
 Get-Process tor -ErrorAction SilentlyContinue | Where-Object {
-    try { $_.Path -like "$WorkDir*" } catch { $true }
+    try { $_.Path -like "$WorkDir*" } catch { $false }
 } | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 600
 Remove-Item (Join-Path $WorkDir "data\data\lock") -Force -ErrorAction SilentlyContinue
 
-if ($OutCSV -notmatch '^\w:\\') { $OutCSV = Join-Path $repoRoot $OutCSV }
+# Absolute paths: drive-lettered AND UNC (\\server\share) are both left as-is.
+if ($OutCSV -notmatch '^[A-Za-z]:\\|^\\\\') { $OutCSV = Join-Path $repoRoot $OutCSV }
 New-Item -ItemType Directory -Path (Split-Path $OutCSV) -Force | Out-Null
 
 $torrcTemplate = Join-Path $WorkDir "data\torrc.template"
@@ -98,7 +102,8 @@ function Invoke-Bench {
     if ($Extra.Trim().Length -gt 0) {
         $base = Get-Content $torrcBackup -Raw
         $augmented = $base.TrimEnd() + "`r`n`r`n# --- bench variant: $Name ---`r`n" + ($Extra -replace "`n", "`r`n") + "`r`n"
-        Set-Content -Path $torrcTemplate -Value $augmented -Encoding UTF8
+        # BOM-free UTF-8 (Set-Content -Encoding UTF8 writes a BOM on PS5).
+        [IO.File]::WriteAllText($torrcTemplate, $augmented, (New-Object System.Text.UTF8Encoding($false)))
     } else {
         Copy-Item $torrcBackup $torrcTemplate -Force
     }
@@ -109,17 +114,21 @@ function Invoke-Bench {
 }
 
 if ($ConfluxModes.Trim().Length -gt 0) {
+    $worst = 0
     try {
         $modes = $ConfluxModes -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne "" }
         foreach ($m in $modes) {
             Write-Host "`n=== conflux check: $m ===" -ForegroundColor Cyan
             & (Join-Path $WorkDir "TorJet.exe") --conflux-check $m
+            # Propagate the child's exit code (0 = engaged, 1 = failed) instead
+            # of always exiting 0 and masking failures.
+            if ($LASTEXITCODE -gt $worst) { $worst = $LASTEXITCODE }
         }
     } finally {
         if (Test-Path $torrcBackup) { Copy-Item $torrcBackup $torrcTemplate -Force }
         Remove-Item Env:BENCH_VARIANT, Env:BENCH_STRATEGY -ErrorAction SilentlyContinue
     }
-    exit 0
+    exit $worst
 }
 
 try {
