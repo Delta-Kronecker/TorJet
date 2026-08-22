@@ -58,12 +58,13 @@ namespace StartTor
         private const int FragmentSocksPort = 10808;
         private const int KeepAliveSocksPort = 9052;
         private const string KeepAliveUsername = "torjet-keepalive";
+        private const int MaxSpeedTestStreams = 4;
 
         // Conflux topology set from the settings submenu. 0 = use the consensus
         // default (cfx_num_legs_set / cfx_max_prebuilt_set / cfx_max_linked_set);
         // positive values are written to the generated torrc as ConfluxNumSets /
         // ConfluxNumLegs / ConfluxNumLinkedSets. When no setting file exists the
-        // defaults are 10 sets / 3 legs / 10 linked sets.
+        // defaults are 32 sets / 2 legs / 32 linked sets.
         private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 32);
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 2);
         private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 32);
@@ -97,8 +98,7 @@ namespace StartTor
                 "NumPrimaryGuards 15",
                 "Schedulers KISTLite,Vanilla",
                 "KISTSchedRunInterval 5 msec",
-                "MaxClientCircuitsPending 96",
-                "TokenBucketRefillInterval 2 msec"
+                "MaxClientCircuitsPending 96"
             },
             /* ultimate */ new[]
             {
@@ -109,7 +109,6 @@ namespace StartTor
                 "NumPrimaryGuards 20",
                 "Schedulers Vanilla",
                 "MaxClientCircuitsPending 128",
-                "TokenBucketRefillInterval 1 msec",
                 "CircuitPriorityHalflife 5",
                 "SocksTimeout 120"
             }
@@ -1358,7 +1357,8 @@ namespace StartTor
             Console.WriteLine();
             Console.WriteLine("  Speed test:");
             Console.WriteLine("    1) Single stream (HTTP 8118)");
-            Console.WriteLine("    2) Max: " + StrategyNames.Length + "+ parallel SOCKS5 streams, each own circuit");
+            Console.WriteLine("    2) Max: " + MaxSpeedTestStreams +
+                              " parallel SOCKS5 streams, each own circuit");
             Console.Write("  Choose 1-2 (Enter = 2): ");
             string input;
             try { input = Console.ReadLine(); }
@@ -1367,7 +1367,7 @@ namespace StartTor
             int n;
             if (!int.TryParse(input.Trim(), out n)) n = 2;
             if (n == 1) SpeedTest();
-            else MultiSpeedTest(4);
+            else MultiSpeedTest(MaxSpeedTestStreams);
         }
 
         // --- benchmark / conflux diagnostics (step 0 harness) --------------
@@ -3277,7 +3277,6 @@ namespace StartTor
                 if (a == "--bootstrap-only" || a == "-t") bootstrapOnly = true;
                 else if (a == "--gen-torrc-only") genOnly = true;
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
-                else if (a == "--strategy") strategy = ParseStrategy(a);
                 else if (a == "--newcircuit") newCircuit = true;
                 else if (a == "--fragment") fragment = true;
                 else if (a == "--no-fragment") fragment = false;

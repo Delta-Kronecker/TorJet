@@ -37,7 +37,6 @@ NumEntryGuards 15
 NumDirectoryGuards 6
 MaxClientCircuitsPending 64
 SocksTimeout 60
-TokenBucketRefillInterval 5 msec
 KeepalivePeriod 3600
 
 # --- Faster start from a clean state (lower directory download delays) ---
