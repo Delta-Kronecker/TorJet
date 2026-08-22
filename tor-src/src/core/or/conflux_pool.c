@@ -581,15 +581,6 @@ cfx_del_leg(conflux_t *cfx, const circuit_t *circ)
   /* Remove it from the cfx. */
   smartlist_remove(cfx->legs, leg);
 
-  /* TorJet: only linked legs end up here, so a leg closed on purpose (e.g.
-   * by the launcher's quality monitor) frees one launch-budget slot. This
-   * lets tor keep refilling the set toward its target leg count without
-   * permanently exhausting the per-set retry cap. Legs that fail to link
-   * never reach this point, so the anti-churn protection stays intact. */
-  if (cfx->num_leg_launch > 0) {
-    cfx->num_leg_launch--;
-  }
-
   /* After removal, if this leg had the highest sent (or recv)
    * sequence number, it was in active use by us (or the other side).
    * We need to tear down the entire set. */
@@ -612,6 +603,19 @@ cfx_del_leg(conflux_t *cfx, const circuit_t *circ)
   }
   if (cfx->prev_leg == leg) {
     cfx->prev_leg = NULL;
+  }
+
+  /* TorJet: refund one launch-budget slot ONLY when a healthy linked leg was
+   * closed on purpose (e.g. by the launcher's quality monitor). This lets tor
+   * keep refilling the set toward its target leg count for the whole session
+   * without permanently exhausting the per-set retry cap. A genuine teardown
+   * (in-flight data above, sequence breakage, or this being the current leg)
+   * keeps its slot consumed so a persistently broken path cannot churn
+   * launches forever; such a set dies anyway, and any replacement set starts
+   * with a fresh nonce and thus a fresh budget. Legs that fail to link never
+   * reach this point, so the anti-churn protection stays intact. */
+  if (!full_teardown && cfx->num_leg_launch > 0) {
+    cfx->num_leg_launch--;
   }
 
   tor_free(leg);
