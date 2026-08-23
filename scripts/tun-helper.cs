@@ -670,10 +670,15 @@ namespace TunHelper
 
             try
             {
+                // Larger netstack TCP buffers + receive autotuning: the small
+                // defaults cap TUN-mode throughput on high-bandwidth paths.
                 var psi = new ProcessStartInfo
                 {
                     FileName = TunExe,
-                    Arguments = "-device tun://" + TunName + " -proxy socks5://127.0.0.1:" + SocksPort + " -mtu 1500 -loglevel error",
+                    Arguments = "-device tun://" + TunName +
+                                " -proxy socks5://127.0.0.1:" + SocksPort +
+                                " -mtu 1500 -loglevel error" +
+                                " -tcp-auto-tuning -tcp-rcvbuf 4194304 -tcp-sndbuf 4194304",
                     WorkingDirectory = DataDir,
                     UseShellExecute = false,
                     CreateNoWindow = true,
