@@ -32,6 +32,7 @@ $csc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $csc) { Write-Host "[x] csc.exe ('.NET Framework 4.x') not found."; exit 1 }
 
 $src = Join-Path $PSScriptRoot "start-tor.cs"
+$srcUi = Join-Path $PSScriptRoot "TorJetUi.cs"
 $versionSrc = Join-Path $env:TEMP "torjet-version.g.cs"
 $versionCode = @"
 namespace StartTor
@@ -44,7 +45,9 @@ namespace StartTor
 "@
 Set-Content -Path $versionSrc -Value $versionCode -Encoding UTF8
 try {
-    & $csc -nologo -optimize+ -target:exe -out:$OutFile $src $versionSrc
+    & $csc -nologo -optimize+ -target:exe `
+        -r:System.Windows.Forms.dll -r:System.Drawing.dll `
+        -out:$OutFile $src $srcUi $versionSrc
     if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
     Write-Host "[ok] built $OutFile (version $Version)"
 } finally {

@@ -33,7 +33,7 @@ using Microsoft.Win32;
 
 namespace StartTor
 {
-    internal static class Program
+    internal static partial class Program
     {
         private static readonly string AppDir =
             Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
@@ -1361,6 +1361,9 @@ namespace StartTor
 
         private const string SpeedHost = "speed.cloudflare.com";
         private const long SpeedBytesPerStream = 10L * 1024 * 1024;
+        // Last measured aggregate averages, for the GUI stats panel.
+        private static double lastDownBps;
+        private static double lastUpBps;
 
         // Runs `streams` parallel isolated-circuit transfers (download or
         // upload) of SpeedBytesPerStream each and prints the aggregate result.
@@ -1396,6 +1399,7 @@ namespace StartTor
             foreach (Thread th in threads) th.Join();
             sw.Stop();
             double avg = total / sw.Elapsed.TotalSeconds;
+            if (upload) lastUpBps = avg; else lastDownBps = avg;
             Console.WriteLine("Done (" + dir + "): " + total.ToString("#,0") + " bytes in " +
                               sw.Elapsed.TotalSeconds.ToString("0.0") + " s");
             Console.WriteLine("  aggregate average : " + FormatSpeed(avg));
@@ -2200,7 +2204,10 @@ namespace StartTor
         // Starts tor for the given mode, writes torrc, stops any previous run,
         // and waits until bootstrap reaches 100%. Returns the process or null.
         // `aborted` is set when the user pressed C to stop during bootstrap.
+        // interactive=false (GUI) skips all console drawing; progress is
+        // reported through the callback instead (pct, tag).
         private static Process StartTorAndWait(int mode, int strategy,
+                                               bool interactive, Action<int, string> progress,
                                                out string errorMessage, out bool aborted)
         {
             errorMessage = null;
@@ -2297,7 +2304,8 @@ namespace StartTor
                     }
                     try
                     {
-                        if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                        if (interactive && Console.KeyAvailable &&
+                            Console.ReadKey(true).Key == ConsoleKey.C)
                         {
                             ClearProgressLine();
                             try { proc.Kill(); } catch { }
@@ -2313,9 +2321,13 @@ namespace StartTor
                     {
                         if (pct >= 100)
                         {
-                            DrawProgress(100, tag);
-                            Console.WriteLine();
-                            progressLineLen = 0;
+                            if (interactive)
+                            {
+                                DrawProgress(100, tag);
+                                Console.WriteLine();
+                                progressLineLen = 0;
+                            }
+                            else if (progress != null) progress(100, tag);
                             return proc;
                         }
                         if (pct != lastPct)
@@ -2323,15 +2335,16 @@ namespace StartTor
                             lastPct = pct;
                             lastTag = tag;
                             stuckSince = DateTime.UtcNow;
-                            DrawProgress(pct, tag);
+                            if (interactive) DrawProgress(pct, tag);
+                            else if (progress != null) progress(pct, tag);
                         }
                         else if (DateTime.UtcNow - stuckSince > TimeSpan.FromMinutes(3))
                         {
-                            DrawProgress(pct, tag + "  (still waiting...)");
+                            if (interactive) DrawProgress(pct, tag + "  (still waiting...)");
                         }
                         else
                         {
-                            DrawProgress(pct, tag);
+                            if (interactive) DrawProgress(pct, tag);
                         }
                     }
                     Thread.Sleep(1500);
@@ -2343,7 +2356,7 @@ namespace StartTor
                     try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
                     continue;
                 }
-                ClearProgressLine();
+                if (interactive) ClearProgressLine();
                 if (!proc.HasExited)
                 {
                     errorMessage = "bootstrap did not reach 100% in 10 minutes (last seen: " +
@@ -3047,7 +3060,7 @@ namespace StartTor
         {
             string err;
             bool aborted = false;
-            Process proc = StartTorAndWait(mode, ResolveStrategy(), out err, out aborted);
+            Process proc = StartTorAndWait(mode, ResolveStrategy(), true, null, out err, out aborted);
             if (proc == null)
             {
                 if (aborted) { Cleanup(); return; }
@@ -3324,7 +3337,7 @@ namespace StartTor
             for (int attempt = 1; ; attempt++)
             {
                 watchdogStop = true;   // no probing while bootstrapping
-                torProc = StartTorAndWait(mode, strategy, out startErr, out aborted);
+                torProc = StartTorAndWait(mode, strategy, true, null, out startErr, out aborted);
                 if (torProc == null)
                 {
                     if (aborted)
@@ -3622,6 +3635,18 @@ namespace StartTor
 
         private static int Main(string[] args)
         {
+            // GUI when launched bare (double-click) or with --gui; the classic
+            // console flows stay available for every other invocation and via
+            // --cli. The console window is hidden in GUI mode.
+            bool wantGui = args.Length == 0 || Array.Exists(args, delegate(string a) { return a == "--gui"; });
+            bool forceCli = Array.Exists(args, delegate(string a) { return a == "--cli"; });
+            if (wantGui && !forceCli)
+            {
+                HideOwnConsoleWindow();
+                RunGui();
+                return 0;
+            }
+
             Console.Title = "TorJet";
             try { Console.OutputEncoding = Encoding.UTF8; } catch { }
             // Recover the user's pre-TorJet proxy settings if a previous run
@@ -3657,7 +3682,7 @@ namespace StartTor
                 if (m < 0) { Console.WriteLine("[x] no mode selected."); return 1; }
                 string err;
                 bool aborted = false;
-                Process p = StartTorAndWait(m, ResolveStrategy(), out err, out aborted);
+                Process p = StartTorAndWait(m, ResolveStrategy(), true, null, out err, out aborted);
                 if (p == null) { if (aborted) { Cleanup(); return 1; } Console.WriteLine("[x] " + err); Cleanup(); return 1; }
                 Console.WriteLine("bootstrap OK. Waiting 30s for conflux sets to build...");
                 Thread.Sleep(30000);
