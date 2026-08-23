@@ -45,7 +45,7 @@ namespace StartTor
 "@
 Set-Content -Path $versionSrc -Value $versionCode -Encoding UTF8
 try {
-    & $csc -nologo -optimize+ -target:exe `
+    & $csc -nologo -optimize+ -target:winexe `
         -r:System.Windows.Forms.dll -r:System.Drawing.dll `
         -out:$OutFile $src $srcUi $versionSrc
     if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }

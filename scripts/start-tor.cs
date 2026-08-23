@@ -3633,21 +3633,65 @@ namespace StartTor
             }
         }
 
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool AttachConsole(int pid);
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool AllocConsole();
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        private static extern bool FreeConsole();
+        private static bool consoleAttached;
+
+        // The launcher is built as a windowed exe (no console flash on GUI
+        // launch). CLI invocations attach to the parent terminal; when there
+        // is none (e.g. mintty), a fresh console is allocated so output and
+        // the interactive menus still work.
+        private static void AttachParentConsole()
+        {
+            try
+            {
+                if (AttachConsole(-1)) { consoleAttached = true; return; }
+                if (AllocConsole()) { consoleAttached = true; }
+            }
+            catch { }
+        }
+
+        private static void DetachConsole()
+        {
+            try
+            {
+                Console.Out.Flush();
+                Console.Error.Flush();
+            }
+            catch { }
+            if (consoleAttached)
+            {
+                try { FreeConsole(); } catch { }
+                Thread.Sleep(60);
+            }
+        }
+
         private static int Main(string[] args)
         {
             // GUI when launched bare (double-click) or with --gui; the classic
             // console flows stay available for every other invocation and via
-            // --cli. The console window is hidden in GUI mode.
-            bool wantGui = args.Length == 0 || Array.Exists(args, delegate(string a) { return a == "--gui"; });
+            // --cli. A bare GUI launch never shows a console window.
             bool forceCli = Array.Exists(args, delegate(string a) { return a == "--cli"; });
-            if (wantGui && !forceCli)
+            bool wantGui = !forceCli &&
+                           (args.Length == 0 || Array.Exists(args, delegate(string a) { return a == "--gui"; }));
+            if (wantGui)
             {
-                HideOwnConsoleWindow();
                 RunGui();
                 return 0;
             }
+            AttachParentConsole();
+            int rc = MainCli(args);
+            DetachConsole();
+            return rc;
+        }
 
-            Console.Title = "TorJet";
+        private static int MainCli(string[] args)
+        {
+            try { Console.Title = "TorJet"; } catch { }
             try { Console.OutputEncoding = Encoding.UTF8; } catch { }
             // Recover the user's pre-TorJet proxy settings if a previous run
             // crashed while the TorJet system proxy was still enabled.

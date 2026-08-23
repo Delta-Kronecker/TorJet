@@ -246,6 +246,13 @@ namespace StartTor
 
                 string forced = Environment.GetEnvironmentVariable("TORJET_UI_PAGE");
                 if (forced == "settings") page = Page.Settings;
+                try
+                {
+                    if (forced != null)
+                        File.WriteAllText(Path.Combine(Path.GetTempPath(), "torjet-uipage.txt"),
+                            forced + " -> page=" + page);
+                }
+                catch { }
 
                 Resize += delegate { LayoutPass(); };
                 Paint += OnPaintAll;
@@ -281,7 +288,7 @@ namespace StartTor
 
                 rcSettings = new Rectangle(24, 332, w - 48, 38);
 
-                int ry = 66;
+                int ry = 78;
                 for (int i = 0; i < 9; i++)
                 {
                     rcRowBody[i] = new Rectangle(18, ry, w - 36, 36);
@@ -289,9 +296,9 @@ namespace StartTor
                     rcRowVal[i] = new Rectangle(w - 18 - valW, ry + 3, valW, 30);
                     rcRowPrev[i] = new Rectangle(rcRowVal[i].Left, ry + 3, 26, 30);
                     rcRowNext[i] = new Rectangle(rcRowVal[i].Right - 26, ry + 3, 26, 30);
-                    ry += 38;
+                    ry += 37;
                 }
-                rcBack = new Rectangle(12, 4, 84, 28);
+                rcBack = new Rectangle(14, 42, 96, 26);
                 Invalidate();
             }
 
@@ -683,6 +690,7 @@ namespace StartTor
                 {
                     case 1: CloseApp(); break;
                     case 2: WindowState = FormWindowState.Minimized; break;
+                    case 5: OnConnectButton(); break;
                     case 10: CycleMode(-1); break;
                     case 11: CycleMode(1); break;
                     case 20: ApplyProxyToggle(!ProxyIsOurs()); break;
@@ -767,6 +775,7 @@ namespace StartTor
             {
                 if (rcClose.Contains(p)) return 1;
                 if (rcMin.Contains(p)) return 2;
+                if (page == Page.Main && rcPower.Contains(p)) return 5;
                 if (page == Page.Main)
                 {
                     if (rcModePrev.Contains(p)) return 10;
