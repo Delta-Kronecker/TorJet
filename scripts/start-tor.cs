@@ -430,12 +430,15 @@ namespace StartTor
                     if (last.StartsWith("on:") || last.StartsWith("error:")) break;
                 }
                 Console.WriteLine("  " + last);
+                if (last.StartsWith("on:"))
+                    DnsCacheStart();   // system DNS now points at our caching stub
             }
         }
 
         private static void TurnTunOff()
         {
             Console.WriteLine("  Turning TUN OFF...");
+            DnsCacheStop();
             try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
             for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
             if (!TunActive()) { Console.WriteLine("  TUN OFF"); return; }
@@ -452,6 +455,7 @@ namespace StartTor
             cleaned = true;
             StopKeepAlive();
             circuitWatchStop = true;
+            DnsCacheStop();
             if (TunActive())
             {
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
@@ -2627,6 +2631,214 @@ namespace StartTor
                 StartKeepAlive();
                 Console.WriteLine("  keep-alive ON (1 request/s)");
             }
+        }
+
+        // --- DNS cache for TUN mode ------------------------------------------
+        // While TUN routes all traffic through tor, system DNS points at
+        // 127.0.0.1:53. This tiny stub answers from an in-memory TTL cache and
+        // otherwise forwards the raw UDP datagram to tor's DNSPort
+        // (127.0.0.1:53530), cutting the full-circuit latency of repeated
+        // lookups. Started when TUN comes up, stopped on TUN off / cleanup.
+        private const int DnsCachePort = 53;
+        private const int DnsUpstreamPort = 53530;
+        private const int DnsCacheMaxEntries = 4096;
+        private static volatile bool dnsCacheStop;
+        private static Thread dnsCacheThread;
+        private static UdpClient dnsListener;
+        private static readonly object dnsLock = new object();
+
+        private sealed class DnsEntry { public byte[] Reply; public DateTime Expires; }
+        private static readonly Dictionary<string, DnsEntry> dnsCache =
+            new Dictionary<string, DnsEntry>(StringComparer.Ordinal);
+
+        // Key for the question section: lowercased qname + qtype (transaction
+        // ID excluded - it is rewritten per reply).
+        private static string DnsQuestionKey(byte[] q, int len)
+        {
+            try
+            {
+                if (len < 13) return null;
+                int idx = 12;
+                var sb = new StringBuilder();
+                while (idx < len && q[idx] != 0)
+                {
+                    int l = q[idx];
+                    if ((l & 0xC0) != 0 || idx + 1 + l > len) return null;
+                    sb.Append(Encoding.ASCII.GetString(q, idx + 1, l).ToLowerInvariant());
+                    sb.Append('.');
+                    idx += l + 1;
+                }
+                if (idx + 5 > len) return null;
+                int qtype = (q[idx + 1] << 8) | q[idx + 2];
+                return sb.ToString() + "|" + qtype;
+            }
+            catch { return null; }
+        }
+
+        // Skips a (possibly compressed) DNS name; returns index after it.
+        private static int DnsSkipName(byte[] r, int idx, int len)
+        {
+            while (idx < len)
+            {
+                int l = r[idx];
+                if (l == 0) return idx + 1;
+                if ((l & 0xC0) == 0xC0) return idx + 2;
+                idx += l + 1;
+            }
+            return idx;
+        }
+
+        // Smallest TTL across all answer records, or -1 when unparsable.
+        private static int DnsMinTtl(byte[] r, int len)
+        {
+            try
+            {
+                if (len < 12) return -1;
+                int qd = (r[4] << 8) | r[5];
+                int an = (r[6] << 8) | r[7];
+                int idx = 12;
+                for (int i = 0; i < qd && idx < len; i++)
+                {
+                    idx = DnsSkipName(r, idx, len);
+                    idx += 4;
+                }
+                int best = -1;
+                for (int i = 0; i < an && idx + 10 <= len; i++)
+                {
+                    idx = DnsSkipName(r, idx, len);
+                    if (idx + 10 > len) break;
+                    int ttl = (r[idx + 4] << 24) | (r[idx + 5] << 16) |
+                              (r[idx + 6] << 8) | r[idx + 7];
+                    if (ttl < 0) ttl = 0;
+                    if (best < 0 || ttl < best) best = ttl;
+                    int rdlen = (r[idx + 8] << 8) | r[idx + 9];
+                    idx += 10 + rdlen;
+                }
+                return best;
+            }
+            catch { return -1; }
+        }
+
+        private static void DnsCacheLoop()
+        {
+            UdpClient listener = null;
+            try { listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, DnsCachePort)); }
+            catch (Exception ex)
+            {
+                Log("dns-cache: cannot bind 127.0.0.1:" + DnsCachePort +
+                    " (" + ex.Message + ") - DNS will bypass the cache.");
+                lock (dnsLock) { dnsCacheThread = null; }
+                return;
+            }
+            lock (dnsLock)
+            {
+                if (dnsCacheStop) { try { listener.Close(); } catch { } return; }
+                dnsListener = listener;
+            }
+            Log("dns-cache: listening on 127.0.0.1:" + DnsCachePort +
+                " -> tor 127.0.0.1:" + DnsUpstreamPort);
+            while (!dnsCacheStop)
+            {
+                IPEndPoint from = new IPEndPoint(IPAddress.Loopback, 0);
+                byte[] query;
+                try { query = listener.Receive(ref from); }
+                catch { break; } // closed by Stop()
+                ThreadPool.QueueUserWorkItem(delegate(object o)
+                {
+                    object[] a = (object[])o;
+                    HandleDnsQuery(listener, (byte[])a[0], (IPEndPoint)a[1]);
+                }, new object[] { query, from });
+            }
+            lock (dnsLock) { if (dnsListener == listener) dnsListener = null; }
+            try { listener.Close(); } catch { }
+        }
+
+        private static void HandleDnsQuery(UdpClient listener, byte[] query, IPEndPoint from)
+        {
+            try
+            {
+                string key = DnsQuestionKey(query, query.Length);
+                DnsEntry hit = null;
+                if (key != null)
+                    lock (dnsLock)
+                    {
+                        DnsEntry e;
+                        if (dnsCache.TryGetValue(key, out e))
+                        {
+                            if (e.Expires > DateTime.UtcNow) hit = e;
+                            else dnsCache.Remove(key);
+                        }
+                    }
+                if (hit != null)
+                {
+                    byte[] reply = new byte[hit.Reply.Length];   // patch in THIS query's ID
+                    Buffer.BlockCopy(hit.Reply, 0, reply, 0, reply.Length);
+                    reply[0] = query[0];
+                    reply[1] = query[1];
+                    listener.Send(reply, reply.Length, from);
+                    Interlocked.Increment(ref dnsCacheHits);
+                    return;
+                }
+                using (UdpClient up = new UdpClient())
+                {
+                    up.Client.ReceiveTimeout = 5000;
+                    up.Connect(IPAddress.Loopback, DnsUpstreamPort);
+                    up.Send(query, query.Length);
+                    IPEndPoint any = new IPEndPoint(IPAddress.Any, 0);
+                    byte[] resp = up.Receive(ref any);
+                    listener.Send(resp, resp.Length, from);
+                    // Cache only successful answers with a parsable positive TTL.
+                    if (key != null && resp.Length > 3 && (resp[3] & 0x0F) == 0)
+                    {
+                        int ttl = DnsMinTtl(resp, resp.Length);
+                        if (ttl > 0)
+                        {
+                            if (ttl < 10) ttl = 10;
+                            if (ttl > 3600) ttl = 3600;
+                            lock (dnsLock)
+                            {
+                                if (dnsCache.Count >= DnsCacheMaxEntries) dnsCache.Clear();
+                                dnsCache[key] = new DnsEntry
+                                {
+                                    Reply = resp,
+                                    Expires = DateTime.UtcNow.AddSeconds(ttl)
+                                };
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private static long dnsCacheHits;
+
+        private static void DnsCacheStart()
+        {
+            lock (dnsLock)
+            {
+                if (dnsCacheThread != null) return;
+                dnsCacheStop = false;
+                dnsCacheThread = new Thread(DnsCacheLoop) { IsBackground = true };
+                dnsCacheThread.Start();
+            }
+        }
+
+        private static void DnsCacheStop()
+        {
+            Thread t;
+            lock (dnsLock)
+            {
+                t = dnsCacheThread;
+                dnsCacheThread = null;
+                dnsCacheStop = true;
+                if (dnsListener != null)
+                {
+                    try { dnsListener.Close(); } catch { }
+                    dnsListener = null;
+                }
+            }
+            if (t != null) { try { t.Join(2000); } catch { } }
         }
 
         // Picks the first speed endpoint reachable through the proxy.

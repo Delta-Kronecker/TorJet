@@ -79,7 +79,6 @@ namespace TunHelper
         private const string TunName = "TorJetTun";
         private const string TunAddr = "10.0.0.1";
         private const string TunMask = "255.255.255.0";
-        private const string DnsMarker = "DNSPort 127.0.0.1:53";
 
         private static readonly int SocksPort = GetEnvPort("TUN_SOCKS_PORT", 9050);
         private static readonly int CtrlPort = GetEnvPort("TUN_CTRL_PORT", 9051);
@@ -624,24 +623,10 @@ namespace TunHelper
             return set;
         }
 
-        // Adds "DNSPort 127.0.0.1:53" to torrc once and reloads tor so system DNS
-        // (pointed at 127.0.0.1 on the TUN adapter) is served by tor. The line is
-        // never removed: removing it requires closing the DNS listener which can
-        // crash tor on some Windows builds (libevent WSAENOTSOCK), and leaving tor
-        // DNS on 127.0.0.1:53 is harmless when TUN is off.
-        private static void EnsureDns53()
-        {
-            try
-            {
-                if (!File.Exists(Torrc)) return;
-                var lines = new List<string>(File.ReadAllLines(Torrc));
-                if (lines.FindIndex(l => l.Trim() == DnsMarker) >= 0) return;
-                lines.Add(DnsMarker);
-                File.WriteAllLines(Torrc, lines.ToArray(), new UTF8Encoding(false));
-                ControlSend("SIGNAL RELOAD");
-            }
-            catch { }
-        }
+        // NOTE: system DNS (pointed at 127.0.0.1 on the TUN adapter) is served
+        // by the launcher's caching DNS stub on 127.0.0.1:53, which forwards to
+        // tor's DNSPort (127.0.0.1:53530). tor itself never binds port 53, so
+        // there is nothing to patch into torrc here anymore.
 
         private static bool Enable(out Process tun, out int tunIf, out int physIf, out string physGw)
         {
@@ -665,8 +650,7 @@ namespace TunHelper
             physGw = IfIpToString(physRow.nextHop);
             physIf = physRow.ifIndex;
 
-            EnsureDns53();
-            Thread.Sleep(500);
+            Thread.Sleep(200);
 
             try
             {
