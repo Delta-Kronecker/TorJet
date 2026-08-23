@@ -60,21 +60,32 @@ namespace StartTor
         // default (cfx_num_legs_set / cfx_max_prebuilt_set / cfx_max_linked_set);
         // positive values are written to the generated torrc as ConfluxNumSets /
         // ConfluxNumLegs / ConfluxNumLinkedSets. When no setting file exists the
-        // defaults are 32 sets / 2 legs / 32 linked sets.
-        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, 32);
+        // defaults are DefaultConfluxSets sets / 2 legs / DefaultConfluxSets linked.
+        private const int DefaultConfluxSets = 32;
+        private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, DefaultConfluxSets);
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 2);
-        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, 32);
+        private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, DefaultConfluxSets);
         private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
-        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
+        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 200);
         private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 25);
         private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
-        private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate" };
+        private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate", "lowlatency" };
+        // The shipped default when no data\strategy.txt exists yet. Looked up by
+        // NAME (not "last array element") so appending presets never shifts it.
+        private const string DefaultStrategyName = "ultimate";
+        private static int DefaultStrategy()
+        {
+            for (int i = 0; i < StrategyNames.Length; i++)
+                if (StrategyNames[i] == DefaultStrategyName) return i;
+            return 0;
+        }
         private static readonly string[] StrategyDesc =
         {
             "no tuning - stock tor config, most compatible",
             "reuse circuits 24 h, 24-min prebuild window - fewer handshakes",
             "15 primary guards, KISTLite+Vanilla 5 ms scheduler, 24 h reuse, 2 ms token bucket",
-            "20 primary guards, greedy Vanilla scheduler, 128 pending circuits, 1 ms token bucket"
+            "20 primary guards, greedy Vanilla scheduler, 128 pending circuits, 1 ms token bucket",
+            "lowest ping: KISTLite pacing + strict RTT set filters (fastest-set selection)"
         };
         private static readonly string[][] StrategyTorrc =
         {
@@ -107,6 +118,18 @@ namespace StartTor
                 "MaxClientCircuitsPending 128",
                 "CircuitPriorityHalflife 5",
                 "SocksTimeout 120"
+            },
+            /* lowlatency */ new[]
+            {
+                "MaxCircuitDirtiness 86400",
+                "CircuitsAvailableTimeout 1440",
+                "CircuitStreamTimeout 15",
+                "CircuitBuildTimeout 20",
+                "NumPrimaryGuards 10",
+                "Schedulers KISTLite",
+                "KISTSchedRunInterval 5 msec",
+                "CircuitPriorityHalflife 3",
+                "SocksTimeout 60"
             }
         };
         private static readonly string TorLog = Path.Combine(DataDir, "data", "tor.log");
@@ -160,7 +183,7 @@ namespace StartTor
         // and --watch-max-per-pass.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
-        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 0);
+        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 25);
         private static int watchStrikes = 1;
         private static int watchUnlinkedStrikes = 4;
         private static int watchUnlinkedGraceS = 120;
@@ -554,6 +577,27 @@ namespace StartTor
             catch { }
         }
 
+        // When the lowlatency preset is chosen, also steer the conflux set
+        // policy toward latency: fastest-set selection, a tight best-% filter
+        // and the slow-set skip. Applied only on an explicit strategy CHANGE;
+        // later manual edits from the settings menu always win.
+        private static void ApplyConfluxPresetForStrategy(int strategy)
+        {
+            if (strategy < 0 || strategy >= StrategyNames.Length) return;
+            if (StrategyNames[strategy] != "lowlatency") return;
+            confluxSelection = 3;
+            WriteConfluxSetting(ConfluxSelectionFile, 3);
+            if (confluxRttMax < 200)
+            {
+                confluxRttMax = 200;
+                WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax);
+            }
+            confluxRttPct = 10;
+            WriteConfluxSetting(ConfluxRttPctFile, 10);
+            Console.WriteLine("  [lowlatency] set select = fastest, skip-slow >= " +
+                              confluxRttMax + " ms, top-" + confluxRttPct + "% of sets.");
+        }
+
         private static int ReadConfluxSetting(string path, int fallback)
         {
             try
@@ -762,7 +806,7 @@ namespace StartTor
                 if (s >= 0) return s;
             }
             int last = ReadLastStrategy();
-            return last >= 0 ? last : StrategyNames.Length - 1;
+            return last >= 0 ? last : DefaultStrategy();
         }
 
         private static int ShowMenu()
@@ -804,11 +848,11 @@ namespace StartTor
                                       " - " + StrategyDesc[i]);
                 }
                 Console.Write("  Choose 1-" + StrategyNames.Length +
-                              " (Enter = " + StrategyNames[last >= 0 ? last : StrategyNames.Length - 1] + "): ");
+                              " (Enter = " + StrategyNames[last >= 0 ? last : DefaultStrategy()] + "): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return -1; }
-                if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : StrategyNames.Length - 1;
+                if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : DefaultStrategy();
                 int n;
                 if (int.TryParse(input.Trim(), out n) && n >= 1 && n <= StrategyNames.Length) return n - 1;
                 int s = ParseStrategy(input.Trim());
@@ -829,7 +873,7 @@ namespace StartTor
             mode = ReadLastMode();
             if (mode < 0) mode = 0;
             strategy = ReadLastStrategy();
-            if (strategy < 0) strategy = StrategyNames.Length - 1;
+            if (strategy < 0) strategy = DefaultStrategy();
             while (true)
             {
                 Console.WriteLine();
@@ -870,7 +914,7 @@ namespace StartTor
                     else
                     {
                         int s = ParseStrategy(input.Trim());
-                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); ApplyConfluxPresetForStrategy(strategy); }
                         else Console.WriteLine("  Invalid choice, try again.");
                     }
                 }
@@ -908,7 +952,7 @@ namespace StartTor
                     if (n == 1)
                     {
                         int s = ShowStrategyMenu();
-                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); }
+                        if (s >= 0) { strategy = s; WriteStrategyFile(strategy); ApplyConfluxPresetForStrategy(strategy); }
                     }
                     else if (n == 2) { PromptConfluxSets(); }
                     else if (n == 3) { PromptConfluxLegs(); }
@@ -1257,16 +1301,65 @@ namespace StartTor
             catch { return -1; }
         }
 
-        // The "ultimate" speed test: N parallel SOCKS5 streams, each with its own
-        // username -> its own circuit. This is the max-throughput configuration
-        // the strategies are aiming for.
-        private static void MultiSpeedTest(int streams)
+        // Uploads `bytes` to host over a freshly established SOCKS5 stream
+        // (username gives it an isolated circuit). Returns bytes sent when the
+        // server answered 2xx, otherwise -1.
+        private static long SocksUpload(string host, string username, long bytes)
         {
+            try
+            {
+                NetworkStream ns = Socks5Connect(host, 443, username);
+                if (ns == null) return -1;
+                using (var ssl = new System.Net.Security.SslStream(ns))
+                {
+                    ssl.ReadTimeout = 180000;
+                    ssl.WriteTimeout = 180000;
+                    ssl.AuthenticateAsClient(host, null,
+                        System.Security.Authentication.SslProtocols.Tls12, false);
+                    byte[] head = Encoding.ASCII.GetBytes(
+                        "POST /__up HTTP/1.1\r\n" +
+                        "Host: " + host + "\r\n" +
+                        "User-Agent: torjet-speedtest/1.0\r\n" +
+                        "Content-Type: application/octet-stream\r\n" +
+                        "Content-Length: " + bytes + "\r\n" +
+                        "Connection: close\r\n\r\n");
+                    ssl.Write(head, 0, head.Length);
+                    ssl.Flush();
+                    byte[] buf = new byte[64 * 1024]; // zero payload; the endpoint discards it
+                    long sent = 0;
+                    while (sent < bytes)
+                    {
+                        int chunk = (int)Math.Min((long)buf.Length, bytes - sent);
+                        ssl.Write(buf, 0, chunk);
+                        sent += chunk;
+                    }
+                    byte[] rb = new byte[4096];
+                    StringBuilder resp = new StringBuilder();
+                    int r;
+                    while ((r = ssl.Read(rb, 0, rb.Length)) > 0 && resp.Length < 8192)
+                        resp.Append(Encoding.ASCII.GetString(rb, 0, r));
+                    string s = resp.ToString();
+                    int sp = s.IndexOf(' ');
+                    if (sp < 1 || s.Length < sp + 4) return -1;
+                    int code;
+                    if (!int.TryParse(s.Substring(sp + 1, 3), out code)) return -1;
+                    return (code >= 200 && code < 300) ? sent : -1;
+                }
+            }
+            catch { return -1; }
+        }
+
+        private const string SpeedHost = "speed.cloudflare.com";
+        private const long SpeedBytesPerStream = 10L * 1024 * 1024;
+
+        // Runs `streams` parallel isolated-circuit transfers (download or
+        // upload) of SpeedBytesPerStream each and prints the aggregate result.
+        private static void ParallelTransfer(int streams, bool upload)
+        {
+            string dir = upload ? "up" : "down";
             Console.WriteLine();
-            Console.WriteLine("Max speed test: " + streams + " parallel streams " +
+            Console.WriteLine("Max " + dir + " test: " + streams + " parallel streams " +
                               "(each on its own circuit via SOCKS5 auth)...");
-            string host = "speed.cloudflare.com";
-            long target = 10L * 1024 * 1024;
             long total = 0;
             var lockObj = new object();
             var errors = new List<string>();
@@ -1277,7 +1370,8 @@ namespace StartTor
                 string user = "torb" + i; // unique -> isolated circuit
                 Thread th = new Thread(delegate()
                 {
-                    long got = SocksDownload(host, user, target);
+                    long got = upload ? SocksUpload(SpeedHost, user, SpeedBytesPerStream)
+                                      : SocksDownload(SpeedHost, user, SpeedBytesPerStream);
                     if (got < 0)
                     {
                         lock (lockObj) { if (errors.Count == 0) errors.Add("stream " + user + " failed"); }
@@ -1292,28 +1386,39 @@ namespace StartTor
             foreach (Thread th in threads) th.Join();
             sw.Stop();
             double avg = total / sw.Elapsed.TotalSeconds;
-            Console.WriteLine("Done: " + total.ToString("#,0") + " bytes in " +
+            Console.WriteLine("Done (" + dir + "): " + total.ToString("#,0") + " bytes in " +
                               sw.Elapsed.TotalSeconds.ToString("0.0") + " s");
             Console.WriteLine("  aggregate average : " + FormatSpeed(avg));
             if (errors.Count > 0) Console.WriteLine("  " + errors.Count + " of " + streams + " streams failed");
+        }
+
+        private static void MultiSpeedTest(int streams, bool includeUp)
+        {
+            ParallelTransfer(streams, false);
+            if (includeUp) ParallelTransfer(streams, true);
         }
 
         private static void SpeedTestMenu()
         {
             Console.WriteLine();
             Console.WriteLine("  Speed test:");
-            Console.WriteLine("    1) Single stream (HTTP 8118)");
-            Console.WriteLine("    2) Max: " + MaxSpeedTestStreams +
+            Console.WriteLine("    1) Single stream down (HTTP 8118)");
+            Console.WriteLine("    2) Max down: " + MaxSpeedTestStreams +
                               " parallel SOCKS5 streams, each own circuit");
-            Console.Write("  Choose 1-2 (Enter = 2): ");
+            Console.WriteLine("    3) Max up:   " + MaxSpeedTestStreams +
+                              " parallel SOCKS5 streams, each own circuit");
+            Console.WriteLine("    4) Max both: down + up");
+            Console.Write("  Choose 1-4 (Enter = 4): ");
             string input;
             try { input = Console.ReadLine(); }
-            catch { input = "2"; }
-            if (string.IsNullOrWhiteSpace(input)) input = "2";
+            catch { input = "4"; }
+            if (string.IsNullOrWhiteSpace(input)) input = "4";
             int n;
-            if (!int.TryParse(input.Trim(), out n)) n = 2;
+            if (!int.TryParse(input.Trim(), out n)) n = 4;
             if (n == 1) SpeedTest();
-            else MultiSpeedTest(MaxSpeedTestStreams);
+            else if (n == 2) ParallelTransfer(MaxSpeedTestStreams, false);
+            else if (n == 3) ParallelTransfer(MaxSpeedTestStreams, true);
+            else MultiSpeedTest(MaxSpeedTestStreams, true);
         }
 
         // --- benchmark / conflux diagnostics (step 0 harness) --------------
@@ -2640,6 +2745,66 @@ namespace StartTor
             }
         }
 
+        // Upload benchmark: `streams` parallel HTTP POSTs of `bytesPerStream`
+        // zero bytes each through the local HTTP tunnel. Mirror of
+        // BenchDownload; reports aggregate bytes accepted and wall time.
+        private static void BenchUpload(int streams, long bytesPerStream,
+                                        out long total, out double secs)
+        {
+            long totalBytes = 0;
+            var errors = new List<string>();
+            var threads = new List<Thread>();
+            Stopwatch sw = new Stopwatch();
+            sw.Start();
+            for (int i = 0; i < streams; i++)
+            {
+                Thread th = new Thread(delegate()
+                {
+                    long got = 0;
+                    try
+                    {
+                        HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                            "https://speed.cloudflare.com/__up");
+                        req.Proxy = new WebProxy("127.0.0.1", 8118);
+                        req.Method = "POST";
+                        req.ContentType = "application/octet-stream";
+                        req.ContentLength = bytesPerStream;
+                        req.Timeout = 180000;
+                        req.ReadWriteTimeout = 180000;
+                        req.UserAgent = "torjet-speedtest/1.0";
+                        byte[] buf = new byte[64 * 1024];
+                        using (Stream rs = req.GetRequestStream())
+                        {
+                            long sent = 0;
+                            while (sent < bytesPerStream)
+                            {
+                                int chunk = (int)Math.Min((long)buf.Length, bytesPerStream - sent);
+                                rs.Write(buf, 0, chunk);
+                                sent += chunk;
+                            }
+                        }
+                        using (WebResponse resp = req.GetResponse())
+                        {
+                            int code = (int)((HttpWebResponse)resp).StatusCode;
+                            if (code >= 200 && code < 300) got = bytesPerStream;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        lock (errors) errors.Add(ex.Message);
+                    }
+                    Interlocked.Add(ref totalBytes, got);
+                });
+                th.IsBackground = true;
+                threads.Add(th);
+                th.Start();
+            }
+            foreach (Thread th in threads) th.Join();
+            sw.Stop();
+            total = Interlocked.Read(ref totalBytes);
+            secs = sw.Elapsed.TotalSeconds;
+        }
+
         private static void RunBench(int mode, int iters, int[] streamCounts, string csvPath)
         {
             string err;
@@ -2673,7 +2838,7 @@ namespace StartTor
             bool writeHeader = !File.Exists(csvPath) || new FileInfo(csvPath).Length == 0;
             var rows = new StringBuilder();
             if (writeHeader)
-                rows.AppendLine("ts,variant,mode,streams,avg_mbps,peak_mbps,total_bytes,exit_fp,exit_bw,conflux_sets,conflux_legs");
+                rows.AppendLine("ts,variant,mode,streams,avg_mbps,peak_mbps,total_bytes,up_avg_mbps,up_total_bytes,exit_fp,exit_bw,conflux_sets,conflux_legs");
 
             foreach (int sc in streamCounts)
             {
@@ -2681,12 +2846,15 @@ namespace StartTor
                 {
                     Console.WriteLine("  [" + (variant.Length > 0 ? variant : ModeNames[mode]) +
                                       "] streams=" + sc + " iter=" + (i + 1) + " ...");
-                    long total;
-                    double secs, peak;
+                    long total, upTotal;
+                    double secs, peak, upSecs;
                     BenchDownload(sc, 10L * 1024 * 1024, out total, out secs, out peak);
                     double avg = secs > 0 ? total / secs : 0;
-                    Console.WriteLine("      avg " + FormatSpeed(avg) + "  peak " + FormatSpeed(peak) +
-                                      "  in " + secs.ToString("0.0") + " s");
+                    BenchUpload(sc, 10L * 1024 * 1024, out upTotal, out upSecs);
+                    double upAvg = upSecs > 0 ? upTotal / upSecs : 0;
+                    Console.WriteLine("      down avg " + FormatSpeed(avg) + "  peak " + FormatSpeed(peak) +
+                                      "  in " + secs.ToString("0.0") + " s   |   up avg " +
+                                      FormatSpeed(upAvg) + "  in " + upSecs.ToString("0.0") + " s");
                     int cSets, cLegs;
                     string exit = ConfluxInfo(out cSets, out cLegs);
                     string bw = ExitBandwidth(exit);
@@ -2695,7 +2863,9 @@ namespace StartTor
                         Csv(variant), ModeNames[mode], sc.ToString(),
                         (avg / (1024 * 1024)).ToString("0.000"),
                         (peak / (1024 * 1024)).ToString("0.000"),
-                        total.ToString(), exit, bw, cSets.ToString(), cLegs.ToString()));
+                        total.ToString(),
+                        (upAvg / (1024 * 1024)).ToString("0.000"),
+                        upTotal.ToString(), exit, bw, cSets.ToString(), cLegs.ToString()));
                 }
             }
             try { File.AppendAllText(csvPath, rows.ToString(), new UTF8Encoding(false)); }
@@ -3209,8 +3379,7 @@ namespace StartTor
                 if (a == "--bootstrap-only" || a == "-t") bootstrapOnly = true;
                 else if (a == "--gen-torrc-only") genOnly = true;
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
-                else if (a == "--newcircuit") newCircuit = true;
-                else if (a == "--circuit-watch") circuitWatchEnabled = true;
+                else if (a == "--newcircuit") newCircuit = true;                else if (a == "--circuit-watch") circuitWatchEnabled = true;
                 else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
                 else if (a == "--watch-rtt-pct" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttPct); }
                 else if (a == "--watch-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchStrikes); }
@@ -3229,6 +3398,7 @@ namespace StartTor
                     if (s >= 0) strategy = s;
                 }
             }
+            if (strategy >= 0) ApplyConfluxPresetForStrategy(strategy);
             if (newCircuit)
             {
                 Console.WriteLine(ControlSend("SIGNAL NEWNYM")
@@ -3249,7 +3419,7 @@ namespace StartTor
             else
             {
                 if (strategy < 0) strategy = ReadLastStrategy();
-                if (strategy < 0) strategy = StrategyNames.Length - 1;
+                if (strategy < 0) strategy = DefaultStrategy();
                 while (true)
                 {
                     int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
