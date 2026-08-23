@@ -2586,8 +2586,10 @@ namespace StartTor
             }
             lock (keepAliveLock)
             {
+                double avg = keepAliveOk > 0 ? (double)keepAliveTotalMs / keepAliveOk : 0;
                 Log("keep-alive: stopped - " + keepAliveOk + " ok / " + keepAliveFail +
-                    " fail / " + keepAliveTimeouts + " timeouts");
+                    " fail / " + keepAliveTimeouts + " timeouts, avg " +
+                    Math.Round(avg) + " ms");
             }
         }
 
@@ -3219,9 +3221,61 @@ namespace StartTor
             SetSystemProxy(false);
         }
 
+        // --- watchdog: auto-restart a hung tunnel -----------------------------
+        // Independent probe every WatchdogProbeIntervalS seconds once the
+        // post-bootstrap grace window has passed. After WatchdogFailuresToRestart
+        // consecutive failures it kills tor so the session's restart loop
+        // rebuilds monitor, keep-alive and TUN. --no-watchdog disables it.
+        private static bool watchdogEnabled = true;
+        private const int WatchdogProbeIntervalS = 15;
+        private const int WatchdogFailuresToRestart = 4;
+        private static volatile bool watchdogStop = true;
+        private static volatile bool watchdogTriggered;
+
+        private static void WatchdogLoop()
+        {
+            // Grace while conflux legs build: fresh boots are legitimately slow.
+            Thread.Sleep(TimeSpan.FromSeconds(warmupRelaxSeconds));
+            int fails = 0, probe = 0;
+            while (!watchdogStop)
+            {
+                Thread.Sleep(TimeSpan.FromSeconds(WatchdogProbeIntervalS));
+                if (watchdogStop) return;
+                Process p = torProc;
+                if (p == null) return;
+                try { p.Refresh(); if (p.HasExited) return; } catch { return; }
+                PingTarget t = PingTargets[probe++ % PingTargets.Length];
+                long ms;
+                int r = PingSocks(t.Host, t.Path, out ms);
+                fails = (r == 1) ? 0 : fails + 1;
+                if (fails >= WatchdogFailuresToRestart)
+                {
+                    watchdogTriggered = true;
+                    Log("watchdog: " + fails + " consecutive failed probes (" +
+                        t.Host + ") - tor appears hung, killing for auto-restart");
+                    Console.WriteLine();
+                    Console.WriteLine("  [watchdog] tunnel unresponsive (" + fails +
+                                      " failed probes) - restarting tor...");
+                    try { p.Kill(); } catch { }
+                    return;
+                }
+            }
+        }
+
+        private static void StartWatchdog()
+        {
+            if (!watchdogEnabled) return;
+            watchdogStop = false;
+            watchdogTriggered = false;
+            Thread wd = new Thread(WatchdogLoop) { IsBackground = true };
+            wd.Start();
+        }
+
         // Runs one Tor session: writes torrc, boots tor with a live progress
         // bar, then serves the P/T/S/C keys until the user presses C or tor
-        // dies. Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
+        // dies. A hung tunnel is detected by the watchdog and automatically
+        // restarted (up to 3 attempts, TUN restored afterwards).
+        // Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
         private static int RunTorSession(int mode, int strategy,
                                          bool genOnly, bool bootstrapOnly, string autoMode,
                                          bool menuReturn)
@@ -3241,172 +3295,230 @@ namespace StartTor
 
             string startErr;
             bool aborted = false;
-            torProc = StartTorAndWait(mode, strategy, out startErr, out aborted);
-            if (torProc == null)
+            bool tunWasOn = false;
+            bool showBanners = true;
+            for (int attempt = 1; ; attempt++)
             {
-                if (aborted)
+                watchdogStop = true;   // no probing while bootstrapping
+                torProc = StartTorAndWait(mode, strategy, out startErr, out aborted);
+                if (torProc == null)
                 {
-                    Console.WriteLine();
-                    Console.WriteLine("  Stopping Tor...");
+                    if (aborted)
+                    {
+                        Console.WriteLine();
+                        Console.WriteLine("  Stopping Tor...");
+                        Cleanup();
+                        cleaned = false;
+                        Console.WriteLine("  Tor stopped; system proxy restored.");
+                        Console.WriteLine();
+                        return 2;
+                    }
+                    Console.WriteLine("[x] " + startErr);
                     Cleanup();
                     cleaned = false;
-                    Console.WriteLine("  Tor stopped; system proxy restored.");
-                    Console.WriteLine();
-                    return 2;
-                }
-                Console.WriteLine("[x] " + startErr);
-                Cleanup();
-                cleaned = false;
-                if (menuReturn)
-                {
-                    Console.WriteLine();
-                    Console.WriteLine("Press any key to return to the menu...");
-                    try { Console.ReadKey(true); } catch { }
-                    return 2;
-                }
-                WaitForKey();
-                return 1;
-            }
-
-            Console.WriteLine();
-            Console.WriteLine("Bootstrapped 100% - Tor is UP.");
-            Console.WriteLine();
-
-            if (bootstrapOnly)
-            {
-                Console.WriteLine("Test mode: stopping tor (no proxy change).");
-                Cleanup();
-                return 0;
-            }
-
-            circuitWatchStop = false;
-            circuitWatchWarmup = true;
-            if (circuitWatchEnabled)
-            {
-                Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
-                watcher.Start();
-                Log("circuit monitor: watching every " + watchIntervalS +
-                    " s; weak legs (top " + watchRttPct + "% of all linked legs by RTT, " +
-                    "globally across every set) are closed after " + watchStrikes +
-                    " strikes; " +
-                    "stuck-unlinked after " + watchUnlinkedStrikes +
-                    " passes and " + watchUnlinkedGraceS + " s old; " +
-                    "max " + watchMaxPerPass + " close(s)/pass (cooldown " +
-                    watchCooldownS + " s, relaxed during warmup).");
-            }
-
-            // Start the permanent keep-alive (1 request/s through the real
-            // SOCKS proxy) and show the menu right away. The monitor keeps its
-            // relaxed cooldown for a short window after bootstrap while the
-            // first conflux legs build, then enforces the normal gap.
-            if (keepAliveEnabled)
-                StartKeepAlive();
-            else
-                Log("keep-alive: disabled by setting (data\\keepalive.txt)");
-            Thread warmupEnd = new Thread(delegate()
-            {
-                Thread.Sleep(TimeSpan.FromSeconds(warmupRelaxSeconds));
-                circuitWatchWarmup = false;
-            }) { IsBackground = true };
-            warmupEnd.Start();
-
-            bool proxyOn = false;
-            if (autoMode == "proxy")
-            {
-                proxyOn = true;
-                SetSystemProxy(true);
-                Console.WriteLine("  System proxy ON  (127.0.0.1:8118)");
-            }
-            else if (autoMode == "tun")
-            {
-                if (TunActive())
-                    Console.WriteLine("  TUN already ON");
-                else
-                    ToggleTun();
-            }
-            Console.WriteLine("  D   conflux details");
-            Console.WriteLine("  L   view log");
-            Console.WriteLine("  S   speed test");
-            Console.WriteLine("  A   add a leg to a set");
-            Console.WriteLine("  K   keep-alive report");
-            Console.WriteLine("  J   keep-alive on/off");
-            Console.WriteLine();
-            Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
-            Console.WriteLine("  T    :     On / Off  TUN mode");
-            Console.WriteLine("  P    :     On / Off  system proxy");
-            Console.WriteLine("  C    :     Stop Tor, back to menu");
-            Console.WriteLine();
-            while (true)
-            {
-                bool alive = true;
-                if (torProc != null)
-                {
-                    try { torProc.Refresh(); alive = !torProc.HasExited; }
-                    catch { alive = false; }
-                }
-                if (!alive)
-                {
-                    Console.WriteLine("[x] tor exited with code " + (torProc != null ? torProc.ExitCode : -1) + ".");
-                    break;
-                }
-                try
-                {
-                    if (Console.KeyAvailable)
+                    if (menuReturn)
                     {
-                        ConsoleKeyInfo ki = Console.ReadKey(true);
-                        if (ki.Key == ConsoleKey.P)
-                        {
-                            proxyOn = !proxyOn;
-                            SetSystemProxy(proxyOn);
-                            Console.WriteLine("  System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
-                        }
-                        else if (ki.Key == ConsoleKey.S)
-                        {
-                            SpeedTestMenu();
-                        }
-                        else if (ki.Key == ConsoleKey.A)
-                        {
-                            lock (consoleLock) AddConfluxLeg(null);
-                        }
-                        else if (ki.Key == ConsoleKey.L)
-                        {
-                            lock (consoleLock) ViewLog();
-                        }
-                        else if (ki.Key == ConsoleKey.D)
-                        {
-                            lock (consoleLock) ConfluxStatus(true);
-                        }
-                        else if (ki.Key == ConsoleKey.K)
-                        {
-                            lock (consoleLock) ShowKeepAliveReport();
-                        }
-                        else if (ki.Key == ConsoleKey.J)
-                        {
-                            lock (consoleLock) ToggleKeepAlive();
-                        }
-                        else if (ki.Key == ConsoleKey.V)
-                        {
-                            lock (consoleLock) ViewLog();
-                        }
-                        else if (ki.Key == ConsoleKey.T)
-                        {
+                        Console.WriteLine();
+                        Console.WriteLine("Press any key to return to the menu...");
+                        try { Console.ReadKey(true); } catch { }
+                        return 2;
+                    }
+                    WaitForKey();
+                    return 1;
+                }
+
+                if (showBanners)
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Bootstrapped 100% - Tor is UP.");
+                    Console.WriteLine();
+                    showBanners = false;
+                }
+                else
+                {
+                    Console.WriteLine();
+                    Console.WriteLine("Bootstrapped 100% - Tor is UP (auto-restart " + attempt + ").");
+                    Console.WriteLine();
+                }
+
+                if (bootstrapOnly)
+                {
+                    Console.WriteLine("Test mode: stopping tor (no proxy change).");
+                    Cleanup();
+                    return 0;
+                }
+
+                circuitWatchStop = false;
+                circuitWatchWarmup = true;
+                if (circuitWatchEnabled)
+                {
+                    Thread watcher = new Thread(CircuitWatchLoop) { IsBackground = true };
+                    watcher.Start();
+                    Log("circuit monitor: watching every " + watchIntervalS +
+                        " s; weak legs (top " + watchRttPct + "% of all linked legs by RTT, " +
+                        "globally across every set) are closed after " + watchStrikes +
+                        " strikes; " +
+                        "stuck-unlinked after " + watchUnlinkedStrikes +
+                        " passes and " + watchUnlinkedGraceS + " s old; " +
+                        "max " + watchMaxPerPass + " close(s)/pass (cooldown " +
+                        watchCooldownS + " s, relaxed during warmup).");
+                }
+
+                // Start the permanent keep-alive (1 request/s through the real
+                // SOCKS proxy) and show the menu right away. The monitor keeps its
+                // relaxed cooldown for a short window after bootstrap while the
+                // first conflux legs build, then enforces the normal gap.
+                if (keepAliveEnabled)
+                    StartKeepAlive();
+                else
+                    Log("keep-alive: disabled by setting (data\\keepalive.txt)");
+                Thread warmupEnd = new Thread(delegate()
+                {
+                    Thread.Sleep(TimeSpan.FromSeconds(warmupRelaxSeconds));
+                    circuitWatchWarmup = false;
+                }) { IsBackground = true };
+                warmupEnd.Start();
+
+                bool proxyOn = false;
+                if (attempt == 1)
+                {
+                    if (autoMode == "proxy")
+                    {
+                        proxyOn = true;
+                        SetSystemProxy(true);
+                        Console.WriteLine("  System proxy ON  (127.0.0.1:8118)");
+                    }
+                    else if (autoMode == "tun")
+                    {
+                        if (TunActive())
+                            Console.WriteLine("  TUN already ON");
+                        else
                             ToggleTun();
-                        }
-                        else if (ki.Key == ConsoleKey.C)
-                        {
-                            Console.WriteLine();
-                            Console.WriteLine("  Stopping Tor...");
-                            Cleanup();
-                            cleaned = false;
-                            torProc = null;
-                            Console.WriteLine("  Tor stopped; system proxy restored.");
-                            Console.WriteLine();
-                            return 2;
-                        }
                     }
                 }
-                catch { }
-                Thread.Sleep(150);
+                else if (tunWasOn && !TunActive())
+                {
+                    Console.WriteLine("  [watchdog] restoring TUN mode...");
+                    ToggleTun();
+                }
+                tunWasOn = TunActive();
+
+                if (attempt == 1)
+                {
+                    Console.WriteLine("  D   conflux details");
+                    Console.WriteLine("  L   view log");
+                    Console.WriteLine("  S   speed test");
+                    Console.WriteLine("  A   add a leg to a set");
+                    Console.WriteLine("  K   keep-alive report");
+                    Console.WriteLine("  J   keep-alive on/off");
+                    Console.WriteLine();
+                    Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
+                    Console.WriteLine("  T    :     On / Off  TUN mode");
+                    Console.WriteLine("  P    :     On / Off  system proxy");
+                    Console.WriteLine("  C    :     Stop Tor, back to menu");
+                    Console.WriteLine();
+                }
+                StartWatchdog();
+
+                int exitKind = 0; // 0 = tor really exited, 1 = watchdog restart
+                while (true)
+                {
+                    bool alive = true;
+                    if (torProc != null)
+                    {
+                        try { torProc.Refresh(); alive = !torProc.HasExited; }
+                        catch { alive = false; }
+                    }
+                    if (!alive)
+                    {
+                        if (!watchdogTriggered)
+                            Console.WriteLine("[x] tor exited with code " +
+                                (torProc != null ? torProc.ExitCode : -1) + ".");
+                        exitKind = watchdogTriggered ? 1 : 0;
+                        break;
+                    }
+                    try
+                    {
+                        if (Console.KeyAvailable)
+                        {
+                            ConsoleKeyInfo ki = Console.ReadKey(true);
+                            if (ki.Key == ConsoleKey.P)
+                            {
+                                proxyOn = !proxyOn;
+                                SetSystemProxy(proxyOn);
+                                Console.WriteLine("  System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                            }
+                            else if (ki.Key == ConsoleKey.S)
+                            {
+                                SpeedTestMenu();
+                            }
+                            else if (ki.Key == ConsoleKey.A)
+                            {
+                                lock (consoleLock) AddConfluxLeg(null);
+                            }
+                            else if (ki.Key == ConsoleKey.L)
+                            {
+                                lock (consoleLock) ViewLog();
+                            }
+                            else if (ki.Key == ConsoleKey.D)
+                            {
+                                lock (consoleLock) ConfluxStatus(true);
+                            }
+                            else if (ki.Key == ConsoleKey.K)
+                            {
+                                lock (consoleLock) ShowKeepAliveReport();
+                            }
+                            else if (ki.Key == ConsoleKey.J)
+                            {
+                                lock (consoleLock) ToggleKeepAlive();
+                            }
+                            else if (ki.Key == ConsoleKey.V)
+                            {
+                                lock (consoleLock) ViewLog();
+                            }
+                            else if (ki.Key == ConsoleKey.T)
+                            {
+                                ToggleTun();
+                                tunWasOn = TunActive();
+                            }
+                            else if (ki.Key == ConsoleKey.C)
+                            {
+                                Console.WriteLine();
+                                Console.WriteLine("  Stopping Tor...");
+                                Cleanup();
+                                cleaned = false;
+                                torProc = null;
+                                Console.WriteLine("  Tor stopped; system proxy restored.");
+                                Console.WriteLine();
+                                return 2;
+                            }
+                        }
+                    }
+                    catch { }
+                    Thread.Sleep(150);
+                }
+
+                if (exitKind != 1)
+                    break;   // tor genuinely exited -> normal teardown below
+
+                // Watchdog path: rebuild the session without touching the
+                // system-proxy state. Snapshot TUN now - the keeper dies with
+                // tor, so this is the last reliable moment to observe it.
+                tunWasOn = TunActive();
+                Log("watchdog: restarting tor (attempt " + attempt + ")");
+                circuitWatchStop = true;
+                watchdogStop = true;
+                StopKeepAlive();
+                DnsCacheStop();
+                try { torProc.Kill(); torProc.WaitForExit(5000); } catch { }
+                for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
+                try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
+                cleaned = false;
+                if (attempt >= 3)
+                {
+                    Console.WriteLine("[x] watchdog gave up after 3 restart attempts.");
+                    break;
+                }
             }
 
             Cleanup();
@@ -3593,6 +3705,8 @@ namespace StartTor
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
                 else if (a == "--newcircuit") newCircuit = true;                else if (a == "--circuit-watch") circuitWatchEnabled = true;
                 else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
+                else if (a == "--no-watchdog") watchdogEnabled = false;
+                else if (a == "--watchdog") watchdogEnabled = true;
                 else if (a == "--watch-rtt-pct" && i + 1 < args.Length) { int.TryParse(args[++i], out watchRttPct); }
                 else if (a == "--watch-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchStrikes); }
                 else if (a == "--watch-unlinked-strikes" && i + 1 < args.Length) { int.TryParse(args[++i], out watchUnlinkedStrikes); }
