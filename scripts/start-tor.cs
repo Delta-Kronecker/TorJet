@@ -2225,12 +2225,16 @@ namespace StartTor
                 Arguments = "-f \"torrc\"",
                 WorkingDirectory = DataDir,
                 UseShellExecute = false,
-                CreateNoWindow = true
+                CreateNoWindow = true,
+                RedirectStandardError = true
             };
 
             // If tor dies in the first few seconds because a leftover lock or
             // occupied port was still held from the previous run, wait and
-            // retry with a fresh lock file before giving up.
+            // retry with a fresh lock file before giving up. tor writes its
+            // file log only AFTER all listeners bound, so early bind failures
+            // appear solely on stderr - captured below.
+            StringBuilder errBuf = new StringBuilder();
             for (int attempt = 1; ; attempt++)
             {
                 Process proc;
@@ -2240,6 +2244,17 @@ namespace StartTor
                     errorMessage = "failed to start tor: " + ex.Message;
                     return null;
                 }
+                lock (errBuf) errBuf.Length = 0;
+                try
+                {
+                    proc.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
+                    {
+                        if (e.Data != null)
+                            lock (errBuf) errBuf.AppendLine(e.Data);
+                    };
+                    proc.BeginErrorReadLine();
+                }
+                catch { }
                 torProc = proc;
                 Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
 
@@ -2255,10 +2270,13 @@ namespace StartTor
                     if (proc.HasExited)
                     {
                         ClearProgressLine();
+                        Thread.Sleep(300);   // let async stderr drain
+                        string tail;
+                        lock (errBuf) tail = errBuf.ToString();
+                        if (tail.Length == 0) tail = ReadLogTail(1500);
                         if (attempt < 3 &&
                             DateTime.UtcNow - started < TimeSpan.FromSeconds(45))
                         {
-                            string tail = ReadLogTail(1500);
                             if (tail.IndexOf("already in use", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                 tail.IndexOf("lock file", StringComparison.OrdinalIgnoreCase) >= 0)
                             {
@@ -2268,7 +2286,7 @@ namespace StartTor
                                 break;
                             }
                         }
-                        errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + ReadLogTail(1500);
+                        errorMessage = "tor exited with code " + proc.ExitCode + ".\n" + tail;
                         return null;
                     }
                     try
