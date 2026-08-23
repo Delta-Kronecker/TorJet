@@ -35,6 +35,8 @@ data\
       2. **balanced** — long-lived reused circuits (fewer handshakes)
       3. **aggressive** — more guards + faster scheduler + deeper reuse
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
+      5. **lowlatency** — lowest ping: KISTLite pacing, fastest-set selection
+         and strict RTT filters (applied automatically with this preset)
     - **Conflux topology** (from the Settings submenu) — how many conflux
       circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
@@ -46,14 +48,14 @@ data\
       - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
         default) — ceiling on *linked* sets; it only binds when set below
         *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
-      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, 0=off) — when a new
-        stream is attached, sets whose best-leg RTT is at/above this many
-        milliseconds are skipped (a slow-set failover).
+      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, default 200 ms, 0=off) —
+        when a new stream is attached, sets whose best-leg RTT is at/above this
+        many milliseconds are skipped (a slow-set failover).
       - **Best % of sets (RTT)** (`ConfluxSetRttPct`, 0=off) — when a new
         stream is attached, only the best (lowest-RTT) this-many percent of
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
-      - **Weak legs (top %)** (`--watch-rtt-pct`, default off) — the circuit
+      - **Weak legs (top %)** (`--watch-rtt-pct`, default 25) — the circuit
         health monitor closes the top this-many percent of linked legs with the
         highest RTT compared **globally across every set** (fully relative, no
         absolute ms threshold); the single best leg in the pool is never closed
@@ -73,7 +75,8 @@ data\
    test: single-stream over the HTTP proxy, or the *max* test which opens
    several parallel SOCKS5 streams, each authenticated with a unique username
    so tor's isolation gives every stream its own circuit (the true
-    multi-path throughput ceiling). Press **D** for conflux details, **A** to
+    multi-path throughput ceiling) — download and upload are measured
+   separately. Press **D** for conflux details, **A** to
    add a leg to a set, **L** (or **V**) to view the logs, and **C** to stop
    Tor (system proxy, TUN mode and the core) and return to the main menu.
    SOCKS5 is at 127.0.0.1:9050 and DNS at 127.0.0.1:53530.
@@ -87,11 +90,13 @@ press **T** again (or run `TorJet.exe --tun-off`).
 
 How it works:
 
-- Creates a Wintun adapter named `TorJetTun` (`tun2socks.exe` + `wintun.dll`)
-  and points the default route into it, so all system traffic goes to the local
-  tor SOCKS proxy.
-- Points system DNS at `127.0.0.1:53` (tor's DNSPort, enabled with a config
-  reload); port 53 must be free.
+- Creates a Wintun adapter named `TorJetTun` (`tun2socks.exe` + `wintun.dll`,
+  with large TCP buffers + receive autotuning) and points the default route
+  into it, so all system traffic goes to the local tor SOCKS proxy.
+- Points system DNS at `127.0.0.1:53`, where the launcher runs a small
+  caching DNS stub (TTL-based) that forwards to tor's DNSPort
+  (127.0.0.1:53530) — repeated lookups no longer pay a full circuit round
+  trip; port 53 must be free.
 - Adds a `/32` route on the physical interface for every relay IP from the
   cached consensus and bridges, so tor's own relay connections bypass the
   tunnel (without this tor's outbound traffic would loop back into itself).
@@ -113,7 +118,8 @@ TorJet.exe --strategy ultimate start with the ultimate strategy
 TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
-TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default off)
+TorJet.exe --no-watchdog       disable the auto-restart watchdog (on by default)
+TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default 25)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
 TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
 TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
@@ -190,7 +196,7 @@ quality legs so tor rebuilds them with fresh circuits:
 
 - a linked leg is **weak** when it ranks in the top `--watch-rtt-pct`% of ALL
   linked legs across every set by RTT (the slowest legs of the whole pool;
-  default off — set it in Settings item 9 or with `--watch-rtt-pct`), so the
+  default 25 — set it in Settings item 9 or with `--watch-rtt-pct`), so the
   pruning is fully relative and adapts to the network with
   no absolute ms threshold — a set with a single slow leg is pruned just like
   the weak legs of a multi-leg set;
@@ -239,6 +245,14 @@ circuits warm and honest: if tor dies, the pings start failing (details go to
 negatives on cold single-stream circuits and added ~1 MiB of padding traffic.
 During the first 90 s after bootstrap the monitor's close cooldown is relaxed,
 so weak legs are replaced immediately.
+
+### Watchdog (auto-restart)
+
+An independent probe pings the tunnel every 15 s (after a 90 s post-bootstrap
+grace window). Four consecutive failures mean tor is hung: the launcher kills
+it, rebuilds the circuit monitor and keep-alive and boots tor again — up to
+3 attempts — and turns TUN mode back on if it was active. Disable with
+`--no-watchdog`.
 
 ## Building
 

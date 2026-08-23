@@ -55,7 +55,15 @@ param(
     [string]$VariantName = "baseline",
     [string]$Strategy = "standard",
     [string]$ExtraTorrc = "",
-    [string]$ConfluxModes = ""
+    [string]$ConfluxModes = "",
+    # Conflux/monitor overrides: written as data\*.txt settings in the scratch
+    # folder before the run (values < 0 leave the corresponding file untouched).
+    [int]$ConfluxSets = -1,
+    [int]$ConfluxLegs = -1,
+    [int]$Selection = -1,
+    [int]$RttMax = -1,
+    [int]$RttPct = -1,
+    [int]$WatchPct = -1
 )
 
 $ErrorActionPreference = "Stop"
@@ -76,6 +84,22 @@ if (-not (Test-Path (Join-Path $WorkDir "data\tor.exe"))) {
 }
 # always refresh the freshly compiled launcher into the scratch folder
 Copy-Item $newExe -Destination $WorkDir -Force
+
+# apply conflux/monitor variant overrides as launcher settings files
+$settings = @(
+    @{ v = $ConfluxSets; f = "conflux-sets.txt" },
+    @{ v = $ConfluxLegs;  f = "conflux-legs.txt" },
+    @{ v = $Selection;    f = "conflux-selection.txt" },
+    @{ v = $RttMax;       f = "conflux-set-rtt.txt" },
+    @{ v = $RttPct;       f = "conflux-set-rtt-pct.txt" },
+    @{ v = $WatchPct;     f = "circuit-watch-pct.txt" }
+)
+foreach ($s in $settings) {
+    if ($s.v -ge 0) {
+        Set-Content -Path (Join-Path $WorkDir "data\$($s.f)") -Value $s.v -Encoding ASCII
+        Write-Host "variant setting: $($s.f) = $($s.v)"
+    }
+}
 
 # pre-flight: kill any tor leaked from this workdir and drop a stale lock file.
 # A tor whose path cannot be queried is LEFT ALONE: killing it might hit the
