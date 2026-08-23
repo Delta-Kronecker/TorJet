@@ -961,16 +961,11 @@ namespace StartTor
 
             // ---- connect / disconnect ------------------------------------------
             private volatile bool stoppingBusy;
-            private volatile bool pendingConnect;
 
             private void OnConnectButton()
             {
                 if (state == RunState.Idle) Connect();
-                else if (state == RunState.Stopping)
-                {
-                    pendingConnect = true;
-                    FlashMessage("will connect after stop...");
-                }
+                else if (state == RunState.Stopping) return;
                 else Disconnect("stopped by user");
             }
 
@@ -1040,12 +1035,7 @@ namespace StartTor
             {
                 if (stoppingBusy) return;
                 stoppingBusy = true;
-                pendingConnect = false;
                 SetState(RunState.Stopping);
-                if (sessionBusy && state == RunState.Connecting)
-                {
-                    try { if (torProc != null) torProc.Kill(); } catch { }
-                }
                 watchdogStop = true;
                 circuitWatchStop = true;
                 StopKeepAlive();
@@ -1061,16 +1051,8 @@ namespace StartTor
                     {
                         bootPct = 0;
                         stoppingBusy = false;
+                        SetState(RunState.Idle);
                         sessionBusy = false;
-                        if (pendingConnect)
-                        {
-                            pendingConnect = false;
-                            Connect();
-                        }
-                        else
-                        {
-                            SetState(RunState.Idle);
-                        }
                     });
                 });
             }
