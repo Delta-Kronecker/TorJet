@@ -152,10 +152,10 @@ namespace StartTor
         // ---- palette / typography -------------------------------------------
         internal static class Theme
         {
-            internal static readonly Color Bg = Color.FromArgb(23, 25, 31);
-            internal static readonly Color Surface = Color.FromArgb(31, 34, 43);
-            internal static readonly Color SurfaceAlt = Color.FromArgb(41, 45, 57);
-            internal static readonly Color Border = Color.FromArgb(55, 60, 74);
+            internal static readonly Color Bg = Color.FromArgb(40, 44, 56);
+            internal static readonly Color Surface = Color.FromArgb(52, 56, 70);
+            internal static readonly Color SurfaceAlt = Color.FromArgb(65, 70, 86);
+            internal static readonly Color Border = Color.FromArgb(80, 86, 102);
             internal static readonly Color Text = Color.FromArgb(235, 238, 245);
             internal static readonly Color Muted = Color.FromArgb(148, 156, 174);
             internal static readonly Color Accent = Color.FromArgb(125, 70, 179);   // tor purple
@@ -195,7 +195,7 @@ namespace StartTor
         // ---- main form -------------------------------------------------------
         private sealed class MainForm : Form
         {
-            private enum RunState { Idle, Connecting, Connected, Restarting }
+            private enum RunState { Idle, Connecting, Connected, Restarting, Stopping }
             private enum Page { Main, Settings }
 
             private RunState state = RunState.Idle;
@@ -217,6 +217,9 @@ namespace StartTor
             private string editBuf = "";
             private bool caretOn;
             private DateTime lastCaretFlip = DateTime.MinValue;
+
+            private System.Windows.Forms.NotifyIcon trayIcon;
+            private System.Windows.Forms.ContextMenuStrip trayMenu;
 
             private Rectangle rcClose, rcMin, rcModePrev, rcModeNext, rcModeVal,
                               rcProxy, rcTun, rcSettings, rcPower, rcBack;
@@ -260,6 +263,21 @@ namespace StartTor
                 MouseDown += OnMouseDownAll;
                 MouseLeave += delegate { anyHover = false; hoverId = -1; Invalidate(); };
                 KeyDown += OnKeyDownAll;
+                FormClosing += OnFormClosing;
+
+                trayMenu = new System.Windows.Forms.ContextMenuStrip();
+                trayMenu.Items.Add("Show", null, delegate { ShowFromTray(); });
+                trayMenu.Items.Add("-");
+                trayMenu.Items.Add("Exit", null, delegate { ExitFromTray(); });
+
+                trayIcon = new System.Windows.Forms.NotifyIcon();
+                trayIcon.Text = "TorJet";
+                trayIcon.Icon = CreateTrayIcon();
+                trayIcon.ContextMenuStrip = trayMenu;
+                trayIcon.DoubleClick += delegate { ShowFromTray(); };
+
+                Icon appIcon = CreateTrayIcon();
+                Icon = appIcon;
 
                 uiTimer.Interval = 250;
                 uiTimer.Tick += UiTick;
@@ -278,9 +296,11 @@ namespace StartTor
                 int cx = w / 2;
                 rcPower = new Rectangle(cx - 52, 88, 104, 104);
 
-                rcModePrev = new Rectangle(w - 158, 232, 30, 30);
-                rcModeNext = new Rectangle(w - 24, 232, 30, 30);
-                rcModeVal = new Rectangle(rcModePrev.Right, 232, rcModeNext.Left - rcModePrev.Right, 30);
+                int modeGroupW = 180;
+                int modeX = cx - modeGroupW / 2;
+                rcModePrev = new Rectangle(modeX, 232, 30, 30);
+                rcModeVal = new Rectangle(modeX + 34, 232, modeGroupW - 64, 30);
+                rcModeNext = new Rectangle(modeX + modeGroupW - 30, 232, 30, 30);
 
                 int half = (w - 24 * 2 - 10) / 2;
                 rcProxy = new Rectangle(24, 276, half, 42);
@@ -310,6 +330,7 @@ namespace StartTor
                     case RunState.Connected: return Theme.Green;
                     case RunState.Connecting: return Theme.Amber;
                     case RunState.Restarting: return Theme.Red;
+                    case RunState.Stopping: return Theme.Amber;
                     default: return Theme.Muted;
                 }
             }
@@ -319,10 +340,10 @@ namespace StartTor
                 switch (state)
                 {
                     case RunState.Connected: return "CONNECTED";
-                    case RunState.Connecting:
-                        return bootPct > 0 ? "BOOTSTRAP " + bootPct + "%" : "CONNECTING";
+                    case RunState.Connecting: return "BOOTSTRAP";
                     case RunState.Restarting:
                         return "RESTART " + restartAttempts + "/3";
+                    case RunState.Stopping: return "STOPPING";
                     default: return "OFFLINE";
                 }
             }
@@ -406,7 +427,8 @@ namespace StartTor
                 else
                 {
                     Color ringCol = state == RunState.Connected ? Theme.Green :
-                                    state == RunState.Restarting ? Theme.Red : Theme.Border;
+                                    state == RunState.Restarting ? Theme.Red :
+                                    state == RunState.Stopping ? Theme.Amber : Theme.Border;
                     using (Pen p = new Pen(ringCol, 4f))
                         g.DrawEllipse(p, ring);
                 }
@@ -421,22 +443,16 @@ namespace StartTor
                     g.DrawArc(p, arc, -60, 300);
                     g.DrawLine(p, cx(), rcPower.Top + 16, cx(), rcPower.Top + 44);
                 }
-                if (state == RunState.Connecting && bootPct > 0)
-                    TextRenderer.DrawText(g, bootPct + "%", Theme.Small(),
-                        new Rectangle(rcPower.Left, rcPower.Bottom - 6, rcPower.Width, 16),
-                        Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
 
                 string cap = ErrorOr(state == RunState.Idle ? "CONNECT" :
-                                     state == RunState.Connected ? "DISCONNECT" : "CANCEL");
+                                     state == RunState.Connected ? "DISCONNECT" :
+                                     state == RunState.Stopping ? "STOPPING" : "CANCEL");
                 TextRenderer.DrawText(g, cap, Theme.Body(),
                     new Rectangle(0, rcPower.Bottom + 8, ClientSize.Width, 22),
                     HasError() ? Theme.Red : Theme.Muted,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis);
 
-                TextRenderer.DrawText(g, "MODE", Theme.Caption(),
-                    new Rectangle(24, rcModeVal.Y, 90, 30), Theme.Muted,
-                    TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 int modeIdx = comboModeIndexSafe();
                 Theme.Pill(g, rcModeVal, Theme.Surface, Theme.Border);
                 TextRenderer.DrawText(g, PrettyMode(ModeNames[Math.Max(0, modeIdx)]), Theme.Body(),
@@ -689,7 +705,7 @@ namespace StartTor
                 switch (h)
                 {
                     case 1: CloseApp(); break;
-                    case 2: WindowState = FormWindowState.Minimized; break;
+                    case 2: MinimizeToTray(); break;
                     case 5: OnConnectButton(); break;
                     case 10: CycleMode(-1); break;
                     case 11: CycleMode(1); break;
@@ -944,9 +960,17 @@ namespace StartTor
             }
 
             // ---- connect / disconnect ------------------------------------------
+            private volatile bool stoppingBusy;
+            private volatile bool pendingConnect;
+
             private void OnConnectButton()
             {
                 if (state == RunState.Idle) Connect();
+                else if (state == RunState.Stopping)
+                {
+                    pendingConnect = true;
+                    FlashMessage("will connect after stop...");
+                }
                 else Disconnect("stopped by user");
             }
 
@@ -1014,6 +1038,10 @@ namespace StartTor
 
             private void Disconnect(string why)
             {
+                if (stoppingBusy) return;
+                stoppingBusy = true;
+                pendingConnect = false;
+                SetState(RunState.Stopping);
                 if (sessionBusy && state == RunState.Connecting)
                 {
                     try { if (torProc != null) torProc.Kill(); } catch { }
@@ -1032,8 +1060,17 @@ namespace StartTor
                     UiInvokeDelegate(delegate
                     {
                         bootPct = 0;
-                        SetState(RunState.Idle);
+                        stoppingBusy = false;
                         sessionBusy = false;
+                        if (pendingConnect)
+                        {
+                            pendingConnect = false;
+                            Connect();
+                        }
+                        else
+                        {
+                            SetState(RunState.Idle);
+                        }
                     });
                 });
             }
@@ -1112,7 +1149,7 @@ namespace StartTor
 
             private void CloseApp()
             {
-                if (state != RunState.Idle)
+                if (state != RunState.Idle && state != RunState.Stopping)
                 {
                     watchdogStop = true;
                     circuitWatchStop = true;
@@ -1121,7 +1158,74 @@ namespace StartTor
                     try { if (torProc != null) torProc.Kill(); } catch { }
                     Cleanup();
                 }
+                if (trayIcon != null) trayIcon.Visible = false;
                 Close();
+            }
+
+            private void OnFormClosing(object s, FormClosingEventArgs e)
+            {
+                if (e.CloseReason == CloseReason.UserClosing &&
+                    state != RunState.Idle && state != RunState.Stopping)
+                {
+                    e.Cancel = true;
+                    MinimizeToTray();
+                }
+                else
+                {
+                    if (trayIcon != null) trayIcon.Visible = false;
+                }
+            }
+
+            private void MinimizeToTray()
+            {
+                ShowInTaskbar = false;
+                Visible = false;
+                if (trayIcon != null) trayIcon.Visible = true;
+            }
+
+            private void ShowFromTray()
+            {
+                ShowInTaskbar = true;
+                Visible = true;
+                WindowState = FormWindowState.Normal;
+                if (trayIcon != null) trayIcon.Visible = false;
+                Activate();
+            }
+
+            private void ExitFromTray()
+            {
+                if (state != RunState.Idle && state != RunState.Stopping)
+                {
+                    watchdogStop = true;
+                    circuitWatchStop = true;
+                    StopKeepAlive();
+                    DnsCacheStop();
+                    try { if (torProc != null) torProc.Kill(); } catch { }
+                    Cleanup();
+                }
+                if (trayIcon != null) trayIcon.Visible = false;
+                Environment.Exit(0);
+            }
+
+            private Icon CreateTrayIcon()
+            {
+                Bitmap bmp = new Bitmap(16, 16);
+                using (Graphics g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.Clear(Color.Transparent);
+                    using (SolidBrush b = new SolidBrush(Theme.Accent))
+                        g.FillEllipse(b, 1, 1, 14, 14);
+                    using (Pen p = new Pen(Color.White, 1.8f))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
+                        g.DrawArc(p, 4, 2, 8, 10, -60, 300);
+                        g.DrawLine(p, 8, 3, 8, 8);
+                    }
+                }
+                IntPtr h = bmp.GetHicon();
+                return Icon.FromHandle(h);
             }
         }
     }
