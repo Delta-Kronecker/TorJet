@@ -66,8 +66,12 @@ namespace StartTor
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 2);
         private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, DefaultConfluxSets);
         private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
-        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 200);
-        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 25);
+        // Benchmarked 2026-08 (docs/benchmarks/2026-08-webtunnel.csv): turning
+        // the RTT filters on BY DEFAULT cost 30-50% sustained download, so the
+        // shipped defaults keep both filters OFF; the lowlatency preset turns
+        // them on explicitly when picked.
+        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
+        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 0);
         private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate", "lowlatency" };
         // The shipped default when no data\strategy.txt exists yet. Looked up by
@@ -183,7 +187,7 @@ namespace StartTor
         // and --watch-max-per-pass.
         private static volatile bool circuitWatchStop;
         private static bool circuitWatchEnabled = true;
-        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 25);
+        private static int watchRttPct = ReadConfluxSetting(WatchRttPctFile, 0);
         private static int watchStrikes = 1;
         private static int watchUnlinkedStrikes = 4;
         private static int watchUnlinkedGraceS = 120;
@@ -581,25 +585,27 @@ namespace StartTor
             catch { }
         }
 
-        // When the lowlatency preset is chosen, also steer the conflux set
-        // policy toward latency: fastest-set selection, a tight best-% filter
-        // and the slow-set skip. Applied only on an explicit strategy CHANGE;
-        // later manual edits from the settings menu always win.
+        // When the lowlatency preset is chosen, steer the conflux set policy
+        // toward latency: fastest-set selection, a tight best-% filter and the
+        // slow-set skip. Choosing any OTHER preset restores the throughput
+        // defaults, so switching strategies fully switches profiles. Later
+        // manual edits from the settings menu always win afterwards.
         private static void ApplyConfluxPresetForStrategy(int strategy)
         {
             if (strategy < 0 || strategy >= StrategyNames.Length) return;
-            if (StrategyNames[strategy] != "lowlatency") return;
-            confluxSelection = 3;
-            WriteConfluxSetting(ConfluxSelectionFile, 3);
-            if (confluxRttMax < 200)
-            {
-                confluxRttMax = 200;
-                WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax);
-            }
-            confluxRttPct = 10;
-            WriteConfluxSetting(ConfluxRttPctFile, 10);
-            Console.WriteLine("  [lowlatency] set select = fastest, skip-slow >= " +
-                              confluxRttMax + " ms, top-" + confluxRttPct + "% of sets.");
+            bool low = StrategyNames[strategy] == "lowlatency";
+            int sel = low ? 3 : 1;
+            int rttMax = low ? 200 : 0;
+            int rttPct = low ? 10 : 0;
+            confluxSelection = sel;
+            WriteConfluxSetting(ConfluxSelectionFile, sel);
+            confluxRttMax = rttMax;
+            WriteConfluxSetting(ConfluxRttMaxFile, rttMax);
+            confluxRttPct = rttPct;
+            WriteConfluxSetting(ConfluxRttPctFile, rttPct);
+            Console.WriteLine(low
+                ? "  [lowlatency] set select = fastest, skip-slow >= 200 ms, top-10% of sets."
+                : "  [throughput] set select = round-robin, RTT filters off.");
         }
 
         private static int ReadConfluxSetting(string path, int fallback)

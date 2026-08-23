@@ -48,18 +48,21 @@ data\
       - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
         default) — ceiling on *linked* sets; it only binds when set below
         *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
-      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, default 200 ms, 0=off) —
+      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, 0=off) —
         when a new stream is attached, sets whose best-leg RTT is at/above this
         many milliseconds are skipped (a slow-set failover).
       - **Best % of sets (RTT)** (`ConfluxSetRttPct`, 0=off) — when a new
         stream is attached, only the best (lowest-RTT) this-many percent of
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
-      - **Weak legs (top %)** (`--watch-rtt-pct`, default 25) — the circuit
+      - **Weak legs (top %)** (`--watch-rtt-pct`, default off) — the circuit
         health monitor closes the top this-many percent of linked legs with the
         highest RTT compared **globally across every set** (fully relative, no
         absolute ms threshold); the single best leg in the pool is never closed
-        and the pool is never fully pruned. 0 = off.
+        and the pool is never fully pruned. Off by default: the 2026-08 bench
+        campaign showed the RTT filters cost 30-50% sustained download on this
+        network — pick the **lowlatency** preset (or set item 9) to trade some
+        throughput for lower ping.
     Your choices are remembered for next time (`data\mode.txt`,
     `data\strategy.txt`, `data\keepalive.txt`,
     `data\conflux-sets.txt`, `data\conflux-linked-sets.txt`,
@@ -119,7 +122,7 @@ TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
 TorJet.exe obfs4 aggressive tun     start + auto-enable TUN mode
 TorJet.exe --no-circuit-watch  disable the circuit health monitor (on by default)
 TorJet.exe --no-watchdog       disable the auto-restart watchdog (on by default)
-TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default 25)
+TorJet.exe --watch-rtt-pct 30  close a set's slowest N% of legs by RTT (default off)
 TorJet.exe --watch-strikes 1   weak passes before a leg is closed (default 1)
 TorJet.exe --watch-interval 10 check circuits every N seconds (default 10)
 TorJet.exe --watch-cooldown 20 seconds between closes (default 20)
