@@ -11,7 +11,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 
@@ -222,7 +224,7 @@ namespace StartTor
             private System.Windows.Forms.ContextMenuStrip trayMenu;
 
             private Rectangle rcClose, rcMin, rcModePrev, rcModeNext, rcModeVal,
-                              rcProxy, rcTun, rcSettings, rcPower, rcBack;
+                              rcProxy, rcTun, rcSettings, rcPower, rcBack, rcUpdateBtn;
             private readonly Rectangle[] rcRowVal = new Rectangle[9];
             private readonly Rectangle[] rcRowPrev = new Rectangle[9];
             private readonly Rectangle[] rcRowNext = new Rectangle[9];
@@ -278,6 +280,14 @@ namespace StartTor
 
                 Icon appIcon = CreateTrayIcon();
                 Icon = appIcon;
+                try
+                {
+                    string icoPath = Path.Combine(
+                        Path.GetDirectoryName(Application.ExecutablePath), "TorJet.ico");
+                    if (File.Exists(icoPath))
+                        Icon = new Icon(icoPath, 32, 32);
+                }
+                catch { }
 
                 uiTimer.Interval = 250;
                 uiTimer.Tick += UiTick;
@@ -307,6 +317,7 @@ namespace StartTor
                 rcTun = new Rectangle(24 + half + 10, 276, half, 42);
 
                 rcSettings = new Rectangle(24, 332, w - 48, 38);
+                rcUpdateBtn = new Rectangle(24, 378, w - 48, 32);
 
                 int ry = 78;
                 for (int i = 0; i < 9; i++)
@@ -444,15 +455,6 @@ namespace StartTor
                     g.DrawLine(p, cx(), rcPower.Top + 16, cx(), rcPower.Top + 44);
                 }
 
-                string cap = ErrorOr(state == RunState.Idle ? "CONNECT" :
-                                     state == RunState.Connected ? "DISCONNECT" :
-                                     state == RunState.Stopping ? "STOPPING" : "CANCEL");
-                TextRenderer.DrawText(g, cap, Theme.Body(),
-                    new Rectangle(0, rcPower.Bottom + 8, ClientSize.Width, 22),
-                    HasError() ? Theme.Red : Theme.Muted,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
-                    TextFormatFlags.EndEllipsis);
-
                 int modeIdx = comboModeIndexSafe();
                 Theme.Pill(g, rcModeVal, Theme.Surface, Theme.Border);
                 TextRenderer.DrawText(g, PrettyMode(ModeNames[Math.Max(0, modeIdx)]), Theme.Body(),
@@ -472,6 +474,24 @@ namespace StartTor
                 DrawChevron(g, new Rectangle(rcSettings.Right - 34,
                     rcSettings.Y + (rcSettings.Height - 24) / 2, 24, 24),
                     true, hovSet);
+
+                if (showUpdateBanner && updateVersion.Length > 0)
+                {
+                    bool hovUpd = hoverId == 50;
+                    Theme.Pill(g, rcUpdateBtn, hovUpd ? Theme.Accent : Theme.AccentSoft, Theme.Accent);
+                    TextRenderer.DrawText(g, "New version v" + updateVersion + " available",
+                        Theme.H2(),
+                        new Rectangle(rcUpdateBtn.Left + 14, rcUpdateBtn.Y,
+                            rcUpdateBtn.Width - 40, rcUpdateBtn.Height),
+                        Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    using (SolidBrush b = new SolidBrush(hovUpd ? Color.White : Theme.Text))
+                    {
+                        int bx = rcUpdateBtn.Right - 28, by = rcUpdateBtn.Y + rcUpdateBtn.Height / 2;
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.DrawLine(new Pen(b, 2f), bx - 4, by - 4, bx + 2, by);
+                        g.DrawLine(new Pen(b, 2f), bx + 2, by, bx - 4, by + 4);
+                    }
+                }
             }
 
             private int cx() { return rcPower.Left + rcPower.Width / 2; }
@@ -713,6 +733,7 @@ namespace StartTor
                     case 21: ApplyTunToggle(!TunActive()); break;
                     case 30: page = Page.Settings; CancelEdit(); LayoutPass(); Invalidate(); break;
                     case 40: page = Page.Main; CancelEdit(); LayoutPass(); Invalidate(); break;
+                    case 50: try { Process.Start("https://github.com/Delta-Kronecker/TorJet/releases/latest"); } catch { } break;
                     default:
                         if (page != Page.Settings || h < 100) break;
                         int baseIdx = (h - 100) / 3;
@@ -799,6 +820,7 @@ namespace StartTor
                     if (rcProxy.Contains(p)) return 20;
                     if (rcTun.Contains(p)) return 21;
                     if (rcSettings.Contains(p)) return 30;
+                    if (showUpdateBanner && rcUpdateBtn.Contains(p)) return 50;
                 }
                 else
                 {
@@ -962,6 +984,10 @@ namespace StartTor
             // ---- connect / disconnect ------------------------------------------
             private volatile bool stoppingBusy;
 
+            private bool showUpdateBanner;
+            private string updateVersion = "";
+            private DateTime lastUpdateCheck = DateTime.MinValue;
+
             private void OnConnectButton()
             {
                 if (state == RunState.Idle) Connect();
@@ -1084,6 +1110,38 @@ namespace StartTor
                 {
                     errorMsg = "";
                     Invalidate();
+                }
+
+                if (!showUpdateBanner && (DateTime.UtcNow - lastUpdateCheck).TotalMinutes >= 5)
+                {
+                    lastUpdateCheck = DateTime.UtcNow;
+                    RunBg(delegate
+                    {
+                        try
+                        {
+                            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                                "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
+                            req.UserAgent = "torjet-ui/" + TorJetVersion.App;
+                            req.Timeout = 8000;
+                            using (WebResponse resp = req.GetResponse())
+                            using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
+                            {
+                                Match m = Regex.Match(sr.ReadToEnd(), "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+                                if (m.Success)
+                                {
+                                    string latest = m.Groups[1].Value.TrimStart('v', 'V');
+                                    if (CompareVersions(latest, TorJetVersion.App) > 0)
+                                    {
+                                        updateVersion = latest;
+                                        showUpdateBanner = true;
+                                        UiInvokeDelegate(delegate { Invalidate(); });
+                                    }
+                                }
+                            }
+                        }
+                        catch { }
+                    });
                 }
 
                 if (state == RunState.Connected || state == RunState.Restarting)

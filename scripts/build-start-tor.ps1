@@ -44,9 +44,13 @@ namespace StartTor
 }
 "@
 Set-Content -Path $versionSrc -Value $versionCode -Encoding UTF8
+$icoPath = Join-Path $PSScriptRoot "TorJet.ico"
+$iconArg = ""
+if (Test-Path $icoPath) { $iconArg = "-win32icon:$icoPath" }
 try {
     & $csc -nologo -optimize+ -target:winexe `
         -r:System.Windows.Forms.dll -r:System.Drawing.dll `
+        $iconArg `
         -out:$OutFile $src $srcUi $versionSrc
     if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
     Write-Host "[ok] built $OutFile (version $Version)"
