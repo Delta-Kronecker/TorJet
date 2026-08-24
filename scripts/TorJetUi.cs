@@ -154,23 +154,29 @@ namespace StartTor
         // ---- palette / typography -------------------------------------------
         internal static class Theme
         {
-            internal static readonly Color Bg = Color.FromArgb(40, 44, 56);
-            internal static readonly Color Surface = Color.FromArgb(52, 56, 70);
-            internal static readonly Color SurfaceAlt = Color.FromArgb(65, 70, 86);
-            internal static readonly Color Border = Color.FromArgb(80, 86, 102);
-            internal static readonly Color Text = Color.FromArgb(235, 238, 245);
-            internal static readonly Color Muted = Color.FromArgb(148, 156, 174);
-            internal static readonly Color Accent = Color.FromArgb(125, 70, 179);   // tor purple
-            internal static readonly Color AccentSoft = Color.FromArgb(96, 58, 138);
-            internal static readonly Color Green = Color.FromArgb(62, 190, 133);
-            internal static readonly Color Red = Color.FromArgb(228, 92, 103);
-            internal static readonly Color Amber = Color.FromArgb(220, 166, 80);
+            internal static readonly Color Bg = Color.FromArgb(18, 20, 28);
+            internal static readonly Color Surface = Color.FromArgb(26, 29, 38);
+            internal static readonly Color SurfaceAlt = Color.FromArgb(35, 39, 50);
+            internal static readonly Color SurfaceLight = Color.FromArgb(44, 49, 62);
+            internal static readonly Color Border = Color.FromArgb(45, 50, 65);
+            internal static readonly Color BorderLight = Color.FromArgb(60, 66, 82);
+            internal static readonly Color Text = Color.FromArgb(245, 247, 252);
+            internal static readonly Color Muted = Color.FromArgb(120, 130, 155);
+            internal static readonly Color Accent = Color.FromArgb(138, 92, 246);
+            internal static readonly Color AccentSoft = Color.FromArgb(96, 64, 190);
+            internal static readonly Color AccentDark = Color.FromArgb(72, 48, 160);
+            internal static readonly Color Green = Color.FromArgb(52, 211, 153);
+            internal static readonly Color GreenDark = Color.FromArgb(38, 160, 118);
+            internal static readonly Color Red = Color.FromArgb(239, 92, 112);
+            internal static readonly Color Amber = Color.FromArgb(245, 178, 60);
             internal const string FontName = "Segoe UI";
-            internal static Font Big() { return new Font(FontName, 16.5f, FontStyle.Bold); }
-            internal static Font H2() { return new Font(FontName, 9.75f, FontStyle.Bold); }
+            internal static Font Title() { return new Font(FontName, 11f, FontStyle.Bold); }
+            internal static Font Big() { return new Font(FontName, 18f, FontStyle.Bold); }
+            internal static Font H2() { return new Font(FontName, 9.5f, FontStyle.Bold); }
             internal static Font Body() { return new Font(FontName, 9.25f, FontStyle.Regular); }
             internal static Font Small() { return new Font(FontName, 8f, FontStyle.Regular); }
             internal static Font Caption() { return new Font(FontName, 7.25f, FontStyle.Bold); }
+
             internal static GraphicsPath RoundRect(Rectangle r, int radius)
             {
                 int maxR = Math.Max(1, Math.Min(r.Width, r.Height) / 2);
@@ -184,13 +190,74 @@ namespace StartTor
                 p.CloseFigure();
                 return p;
             }
+
+            internal static void FillGradient(Graphics g, Rectangle r, Color top, Color bottom)
+            {
+                using (LinearGradientBrush br = new LinearGradientBrush(
+                    new Point(r.X, r.Y), new Point(r.X, r.Bottom), top, bottom))
+                    g.FillRectangle(br, r);
+            }
+
+            internal static void FillGradientPath(Graphics g, GraphicsPath path, Color top, Color bottom)
+            {
+                RectangleF boundsF = path.GetBounds();
+                Rectangle bounds = Rectangle.Round(boundsF);
+                using (LinearGradientBrush br = new LinearGradientBrush(
+                    new Point(bounds.X, bounds.Y), new Point(bounds.X, bounds.Bottom), top, bottom))
+                    g.FillPath(br, path);
+            }
+
+            internal static void DrawGlow(Graphics g, Rectangle center, Color color, int spread, int alpha)
+            {
+                for (int i = spread; i >= 1; i--)
+                {
+                    int a = (int)(alpha * (1.0 - (double)i / (spread + 1)));
+                    if (a < 1) continue;
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(a, color)))
+                    {
+                        Rectangle r = new Rectangle(center.X - i, center.Y - i,
+                            center.Width + i * 2, center.Height + i * 2);
+                        g.SmoothingMode = SmoothingMode.AntiAlias;
+                        g.FillEllipse(b, r);
+                    }
+                }
+            }
+
+            internal static void DrawShadow(Graphics g, GraphicsPath path, int offset, int alpha)
+            {
+                using (GraphicsPath shadow = (GraphicsPath)path.Clone())
+                {
+                    Matrix m = new Matrix(1, 0, 0, 1, offset, offset);
+                    shadow.Transform(m);
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(alpha, 0, 0, 0)))
+                        g.FillPath(b, shadow);
+                }
+            }
+
             internal static void Pill(Graphics g, Rectangle r, Color fill, Color border)
             {
                 using (GraphicsPath path = RoundRect(r, r.Height / 2))
                 {
                     using (SolidBrush b = new SolidBrush(fill)) g.FillPath(b, path);
-                    using (Pen pen = new Pen(border)) g.DrawPath(pen, path);
+                    using (Pen pen = new Pen(border, 1f)) g.DrawPath(pen, path);
                 }
+            }
+
+            internal static void PillGradient(Graphics g, Rectangle r, Color top, Color bottom, Color border)
+            {
+                using (GraphicsPath path = RoundRect(r, r.Height / 2))
+                {
+                    FillGradientPath(g, path, top, bottom);
+                    using (Pen pen = new Pen(border, 1f)) g.DrawPath(pen, path);
+                }
+            }
+
+            internal static void DrawTextShadow(Graphics g, string text, Font font, Rectangle r,
+                Color textColor, Color shadowColor, TextFormatFlags flags, int ox, int oy)
+            {
+                TextRenderer.DrawText(g, text, font,
+                    new Rectangle(r.X + ox, r.Y + oy, r.Width, r.Height), shadowColor, flags);
+                TextRenderer.DrawText(g, text, font, r, textColor, flags);
             }
         }
 
@@ -211,6 +278,9 @@ namespace StartTor
             private int restartAttempts;
             private volatile bool sessionBusy;
             private bool tunWasOnBeforeRestart;
+            private bool showUpdateBanner;
+            private string updateVersion = "";
+            private DateTime nextUpdateCheck = DateTime.UtcNow.AddMinutes(2);
 
             private int hoverId = -1;
             private bool anyHover;
@@ -280,14 +350,6 @@ namespace StartTor
 
                 Icon appIcon = CreateTrayIcon();
                 Icon = appIcon;
-                try
-                {
-                    string icoPath = Path.Combine(
-                        Path.GetDirectoryName(Application.ExecutablePath), "TorJet.ico");
-                    if (File.Exists(icoPath))
-                        Icon = new Icon(icoPath, 32, 32);
-                }
-                catch { }
 
                 uiTimer.Interval = 250;
                 uiTimer.Tick += UiTick;
@@ -300,8 +362,8 @@ namespace StartTor
             private void LayoutPass()
             {
                 int w = ClientSize.Width;
-                rcClose = new Rectangle(w - 40, 0, 40, 34);
-                rcMin = new Rectangle(w - 78, 0, 38, 34);
+                rcClose = new Rectangle(w - 40, 0, 40, 36);
+                rcMin = new Rectangle(w - 78, 0, 38, 36);
 
                 int cx = w / 2;
                 rcPower = new Rectangle(cx - 52, 88, 104, 104);
@@ -317,7 +379,7 @@ namespace StartTor
                 rcTun = new Rectangle(24 + half + 10, 276, half, 42);
 
                 rcSettings = new Rectangle(24, 332, w - 48, 38);
-                rcUpdateBtn = new Rectangle(24, 378, w - 48, 32);
+                rcUpdateBtn = new Rectangle(24, 380, w - 48, 38);
 
                 int ry = 78;
                 for (int i = 0; i < 9; i++)
@@ -330,6 +392,17 @@ namespace StartTor
                     ry += 37;
                 }
                 rcBack = new Rectangle(14, 42, 96, 26);
+
+                try
+                {
+                    using (GraphicsPath path = Theme.RoundRect(
+                        new Rectangle(0, 0, ClientSize.Width, ClientSize.Height), 12))
+                    {
+                        Region = new Region(path);
+                    }
+                }
+                catch { }
+
                 Invalidate();
             }
 
@@ -391,29 +464,46 @@ namespace StartTor
 
             private void PaintTitlebar(Graphics g)
             {
-                using (SolidBrush b = new SolidBrush(Theme.Surface))
-                    g.FillRectangle(b, 0, 0, ClientSize.Width, 34);
-                using (Pen pen = new Pen(Theme.Border))
-                    g.DrawLine(pen, 0, 34, ClientSize.Width, 34);
+                Theme.FillGradient(g, new Rectangle(0, 0, ClientSize.Width, 36),
+                    Theme.SurfaceAlt, Theme.Surface);
 
+                Color sc = StateColor();
+                Theme.DrawGlow(g, new Rectangle(11, 10, 14, 14), sc, 6, 40);
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (SolidBrush b = new SolidBrush(StateColor()))
-                    g.FillEllipse(b, 14, 13, 9, 9);
+                using (SolidBrush b = new SolidBrush(sc))
+                    g.FillEllipse(b, 14, 13, 8, 8);
 
-                TextRenderer.DrawText(g, "TorJet", Theme.H2(),
-                    new Rectangle(32, 0, 140, 34), Theme.Text,
+                TextRenderer.DrawText(g, "TorJet", Theme.Title(),
+                    new Rectangle(30, 0, 120, 36), Theme.Text,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+
+                string ver = TorJetVersion.App;
+                TextRenderer.DrawText(g, "v" + ver, Theme.Small(),
+                    new Rectangle(ClientSize.Width - 180, 0, 90, 36), Theme.Muted,
+                    TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
 
                 bool hovClose = hoverId == 1;
                 bool hovMin = hoverId == 2;
-                if (hovClose) using (SolidBrush b = new SolidBrush(Color.FromArgb(40, Theme.Red))) g.FillRectangle(b, rcClose);
-                if (hovMin) using (SolidBrush b = new SolidBrush(Theme.SurfaceAlt)) g.FillRectangle(b, rcMin);
+                if (hovClose)
+                    using (SolidBrush b = new SolidBrush(Color.FromArgb(50, Theme.Red)))
+                        g.FillRectangle(b, rcClose);
+                if (hovMin)
+                    Theme.FillGradient(g, rcMin, Theme.SurfaceAlt, Theme.SurfaceLight);
 
-                int midY = 17;
-                using (Pen p = new Pen(hovMin ? Theme.Text : Theme.Muted, 1.6f))
-                    g.DrawLine(p, rcMin.Left + 13, midY, rcMin.Right - 13, midY);
-                using (Pen p = new Pen(hovClose ? Theme.Text : Theme.Muted, 1.6f))
+                using (Pen pen = new Pen(Theme.Border, 1f))
+                    g.DrawLine(pen, 0, 35, ClientSize.Width, 35);
+
+                int midY = 18;
+                using (Pen p = new Pen(hovMin ? Theme.Text : Theme.Muted, 1.8f))
                 {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
+                    g.DrawLine(p, rcMin.Left + 14, midY, rcMin.Right - 14, midY);
+                }
+                using (Pen p = new Pen(hovClose ? Theme.Text : Theme.Muted, 1.8f))
+                {
+                    p.StartCap = LineCap.Round;
+                    p.EndCap = LineCap.Round;
                     g.DrawLine(p, rcClose.Left + 14, midY - 4, rcClose.Right - 14, midY + 4);
                     g.DrawLine(p, rcClose.Left + 14, midY + 4, rcClose.Right - 14, midY - 4);
                 }
@@ -421,42 +511,100 @@ namespace StartTor
 
             private void PaintMain(Graphics g)
             {
-                TextRenderer.DrawText(g, StateText(), Theme.Big(),
-                    new Rectangle(0, 44, ClientSize.Width, 34), StateColor(),
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                string stateTxt = StateText();
+                Color stateCol = StateColor();
+                Theme.DrawTextShadow(g, stateTxt, Theme.Big(),
+                    new Rectangle(0, 46, ClientSize.Width, 36), stateCol,
+                    Color.FromArgb(60, 0, 0, 0),
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter,
+                    1, 2);
 
                 Rectangle ring = rcPower;
-                using (Pen p = new Pen(Theme.SurfaceAlt, 4f))
-                    g.DrawEllipse(p, ring);
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+
+                Color ringColor, glowColor;
                 if (state == RunState.Connecting && bootPct > 0)
                 {
-                    float sweep = 360f * Math.Min(100, bootPct) / 100f;
-                    if (sweep >= 1f)
-                        using (Pen p = new Pen(Theme.Accent, 4f))
-                            g.DrawArc(p, ring, -90, sweep);
+                    ringColor = Theme.Accent;
+                    glowColor = Theme.Accent;
                 }
                 else
                 {
-                    Color ringCol = state == RunState.Connected ? Theme.Green :
-                                    state == RunState.Restarting ? Theme.Red :
-                                    state == RunState.Stopping ? Theme.Amber : Theme.Border;
-                    using (Pen p = new Pen(ringCol, 4f))
+                    switch (state)
+                    {
+                        case RunState.Connected: ringColor = Theme.Green; glowColor = Theme.Green; break;
+                        case RunState.Restarting: ringColor = Theme.Red; glowColor = Theme.Red; break;
+                        case RunState.Stopping: ringColor = Theme.Amber; glowColor = Theme.Amber; break;
+                        default: ringColor = Theme.BorderLight; glowColor = Color.Transparent; break;
+                    }
+                }
+
+                if (glowColor != Color.Transparent)
+                    Theme.DrawGlow(g,
+                        new Rectangle(ring.X - 4, ring.Y - 4, ring.Width + 8, ring.Height + 8),
+                        glowColor, 10, 25);
+
+                using (GraphicsPath ringPath = Theme.RoundRect(
+                    new Rectangle(ring.X - 1, ring.Y - 1, ring.Width + 2, ring.Height + 2),
+                    ring.Width / 2))
+                {
+                    Theme.DrawShadow(g, ringPath, 3, 40);
+                }
+
+                if (state == RunState.Connecting && bootPct > 0)
+                {
+                    using (Pen bgPen = new Pen(Theme.Border, 5f))
+                    {
+                        bgPen.StartCap = LineCap.Round;
+                        bgPen.EndCap = LineCap.Round;
+                        g.DrawEllipse(bgPen, ring);
+                    }
+                    float sweep = 360f * Math.Min(100, bootPct) / 100f;
+                    if (sweep >= 1f)
+                    {
+                        using (Pen p = new Pen(Theme.Accent, 5f))
+                        {
+                            p.StartCap = LineCap.Round;
+                            p.EndCap = LineCap.Round;
+                            g.DrawArc(p, ring, -90, sweep);
+                        }
+                    }
+                }
+                else
+                {
+                    using (LinearGradientBrush ringBrush = new LinearGradientBrush(
+                        new Point(ring.X, ring.Y), new Point(ring.X, ring.Bottom),
+                        Color.FromArgb(255, ringColor), Color.FromArgb(180, ringColor)))
+                    using (Pen p = new Pen(ringBrush, 5f))
+                    {
+                        p.StartCap = LineCap.Round;
+                        p.EndCap = LineCap.Round;
                         g.DrawEllipse(p, ring);
+                    }
                 }
 
                 Color glyph = state == RunState.Idle ? Theme.Text : StateColor();
-                int d = rcPower.Width - 44;
-                Rectangle arc = new Rectangle(rcPower.Left + 22, rcPower.Top + 22, d, d);
-                using (Pen p = new Pen(glyph, 4f))
+                int gd = rcPower.Width - 44;
+                Rectangle arc = new Rectangle(rcPower.Left + 22, rcPower.Top + 22, gd, gd);
+                using (Pen p = new Pen(glyph, 5f))
                 {
                     p.StartCap = LineCap.Round;
                     p.EndCap = LineCap.Round;
                     g.DrawArc(p, arc, -60, 300);
-                    g.DrawLine(p, cx(), rcPower.Top + 16, cx(), rcPower.Top + 44);
+                    g.DrawLine(p, cx(), rcPower.Top + 16, cx(), rcPower.Top + 46);
                 }
 
+                string cap = ErrorOr(state == RunState.Idle ? "CONNECT" :
+                                     state == RunState.Connected ? "DISCONNECT" :
+                                     state == RunState.Stopping ? "STOPPING" : "CANCEL");
+                TextRenderer.DrawText(g, cap, Theme.Body(),
+                    new Rectangle(0, rcPower.Bottom + 8, ClientSize.Width, 22),
+                    HasError() ? Theme.Red : Theme.Muted,
+                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.EndEllipsis);
+
                 int modeIdx = comboModeIndexSafe();
-                Theme.Pill(g, rcModeVal, Theme.Surface, Theme.Border);
+                Theme.PillGradient(g, rcModeVal, Theme.SurfaceAlt, Theme.Surface, Theme.Border);
                 TextRenderer.DrawText(g, PrettyMode(ModeNames[Math.Max(0, modeIdx)]), Theme.Body(),
                     rcModeVal, Theme.Text, TextFormatFlags.HorizontalCenter |
                     TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
@@ -467,7 +615,9 @@ namespace StartTor
                 PaintTogglePill(g, rcTun, "TUN", TunActive(), hoverId == 21);
 
                 bool hovSet = hoverId == 30;
-                Theme.Pill(g, rcSettings, hovSet ? Theme.SurfaceAlt : Theme.Surface, Theme.Border);
+                Theme.PillGradient(g, rcSettings,
+                    hovSet ? Theme.SurfaceLight : Theme.SurfaceAlt,
+                    hovSet ? Theme.SurfaceAlt : Theme.Surface, Theme.Border);
                 TextRenderer.DrawText(g, "SETTINGS", Theme.H2(),
                     new Rectangle(rcSettings.Left + 18, rcSettings.Y, rcSettings.Width - 36, rcSettings.Height),
                     Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
@@ -478,8 +628,10 @@ namespace StartTor
                 if (showUpdateBanner && updateVersion.Length > 0)
                 {
                     bool hovUpd = hoverId == 50;
-                    Theme.Pill(g, rcUpdateBtn, hovUpd ? Theme.Accent : Theme.AccentSoft, Theme.Accent);
-                    TextRenderer.DrawText(g, "New version v" + updateVersion + " available",
+                    Theme.PillGradient(g, rcUpdateBtn,
+                        hovUpd ? Theme.Accent : Theme.AccentSoft,
+                        hovUpd ? Theme.AccentSoft : Theme.AccentDark, Theme.Accent);
+                    TextRenderer.DrawText(g, "New version v" + updateVersion,
                         Theme.H2(),
                         new Rectangle(rcUpdateBtn.Left + 14, rcUpdateBtn.Y,
                             rcUpdateBtn.Width - 40, rcUpdateBtn.Height),
@@ -487,9 +639,13 @@ namespace StartTor
                     using (SolidBrush b = new SolidBrush(hovUpd ? Color.White : Theme.Text))
                     {
                         int bx = rcUpdateBtn.Right - 28, by = rcUpdateBtn.Y + rcUpdateBtn.Height / 2;
-                        g.SmoothingMode = SmoothingMode.AntiAlias;
-                        g.DrawLine(new Pen(b, 2f), bx - 4, by - 4, bx + 2, by);
-                        g.DrawLine(new Pen(b, 2f), bx + 2, by, bx - 4, by + 4);
+                        using (Pen p = new Pen(b, 2.2f))
+                        {
+                            p.StartCap = LineCap.Round;
+                            p.EndCap = LineCap.Round;
+                            g.DrawLine(p, bx - 4, by - 5, bx + 2, by);
+                            g.DrawLine(p, bx + 2, by, bx - 4, by + 5);
+                        }
                     }
                 }
             }
@@ -498,15 +654,40 @@ namespace StartTor
 
             private void PaintTogglePill(Graphics g, Rectangle r, string name, bool on, bool hovered)
             {
-                Theme.Pill(g, r, hovered ? Theme.SurfaceAlt : Theme.Surface,
-                           on ? Theme.Accent : Theme.Border);
+                Theme.PillGradient(g, r,
+                    hovered ? Theme.SurfaceLight : Theme.SurfaceAlt,
+                    Theme.Surface, on ? Theme.Accent : Theme.Border);
                 TextRenderer.DrawText(g, name, Theme.H2(),
                     new Rectangle(r.Left + 16, r.Y, r.Width - 40, r.Height),
                     on ? Theme.Text : Theme.Muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+
+                int swW = 44, swH = 22, swX = r.Right - 56, swY = r.Y + (r.Height - swH) / 2;
+                Rectangle sw = new Rectangle(swX, swY, swW, swH);
+
+                Color bg = on ? Theme.Green : Theme.SurfaceLight;
+                using (GraphicsPath bgPath = Theme.RoundRect(sw, swH / 2))
+                    Theme.FillGradientPath(g, bgPath, bg, Color.FromArgb(
+                        Math.Max(0, bg.A - 30), bg.R, bg.G, bg.B));
+
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (SolidBrush b = new SolidBrush(on ? Theme.Green : Theme.Border))
-                    g.FillEllipse(b, r.Right - 22, r.Y + r.Height / 2 - 5, 10, 10);
+                if (on)
+                    Theme.DrawGlow(g, new Rectangle(swX - 2, swY - 2, swW + 4, swH + 4),
+                        Theme.Green, 4, 20);
+
+                int knobD = 16;
+                int knobX = on ? swX + swW - knobD - 3 : swX + 3;
+                int knobY = swY + (swH - knobD) / 2;
+                Rectangle knob = new Rectangle(knobX, knobY, knobD, knobD);
+
+                using (SolidBrush b = new SolidBrush(on ? Color.White : Theme.BorderLight))
+                    g.FillEllipse(b, knob);
+
+                if (!on)
+                {
+                    using (Pen pen = new Pen(Theme.Border, 1f))
+                        g.DrawEllipse(pen, knob);
+                }
             }
 
             private void DrawChevron(Graphics g, Rectangle r, bool pointRight, bool hovered)
@@ -534,7 +715,7 @@ namespace StartTor
             private void PaintSettings(Graphics g)
             {
                 bool hovBack = hoverId == 40;
-                TextRenderer.DrawText(g, hovBack ? "‹ BACK" : "‹ Back", Theme.Body(),
+                TextRenderer.DrawText(g, hovBack ? "\u2039 BACK" : "\u2039 Back", Theme.Body(),
                     rcBack, hovBack ? Theme.Text : Theme.Muted,
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
                 TextRenderer.DrawText(g, "SETTINGS", Theme.H2(),
@@ -545,9 +726,22 @@ namespace StartTor
                 {
                     Rectangle body = rcRowBody[i];
                     bool selected = editRow == i;
-                    Theme.Pill(g, body, Theme.Surface, selected ? Theme.AccentSoft : Theme.Border);
-                    TextRenderer.DrawText(g, (i + 1) + "  " + SettingLabels[i], Theme.Body(),
-                        new Rectangle(body.Left + 14, body.Y, body.Width - 184, body.Height),
+
+                    Color bgTop = i % 2 == 0 ? Theme.Surface : Theme.SurfaceAlt;
+                    Color bgBot = i % 2 == 0 ? Theme.SurfaceAlt : Theme.Surface;
+                    Theme.FillGradient(g, new Rectangle(body.X - 12, body.Y, body.Width + 24, body.Height), bgTop, bgBot);
+
+                    if (selected)
+                    {
+                        using (SolidBrush b = new SolidBrush(Theme.Accent))
+                            g.FillRectangle(b, body.X - 12, body.Y + 4, 4, body.Height - 8);
+                    }
+
+                    using (Pen pen = new Pen(Theme.Border, 1f))
+                        g.DrawLine(pen, body.X - 12, body.Bottom, body.Right + 12, body.Bottom);
+
+                    TextRenderer.DrawText(g, SettingLabels[i], Theme.Body(),
+                        new Rectangle(body.Left + 8, body.Y, body.Width - 174, body.Height),
                         Theme.Text, TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
                         TextFormatFlags.EndEllipsis);
                     PaintSettingValue(g, i);
@@ -563,11 +757,22 @@ namespace StartTor
                 if (i == 4)
                 {
                     bool on = keepAliveEnabled;
-                    Theme.Pill(g, new Rectangle(v.Right - 52, v.Y + 2, 52, 26),
-                               on ? Theme.Accent : Theme.SurfaceAlt, on ? Theme.Accent : Theme.Border);
+                    int swW = 44, swH = 22, swX = v.Right - 52, swY = v.Y + (v.Height - swH) / 2;
+                    Rectangle sw = new Rectangle(swX, swY, swW, swH);
+                    Color bg = on ? Theme.Green : Theme.SurfaceLight;
+                    using (GraphicsPath bgPath = Theme.RoundRect(sw, swH / 2))
+                        Theme.FillGradientPath(g, bgPath, bg, Color.FromArgb(
+                            Math.Max(0, bg.A - 30), bg.R, bg.G, bg.B));
                     g.SmoothingMode = SmoothingMode.AntiAlias;
-                    using (SolidBrush b = new SolidBrush(Color.White))
-                        g.FillEllipse(b, on ? v.Right - 52 + 29 : v.Right - 52 + 3, v.Y + 5, 20, 20);
+                    if (on)
+                        Theme.DrawGlow(g, new Rectangle(swX - 2, swY - 2, swW + 4, swH + 4),
+                            Theme.Green, 3, 15);
+                    int knobD = 16;
+                    int knobX = on ? swX + swW - knobD - 3 : swX + 3;
+                    int knobY = swY + (swH - knobD) / 2;
+                    Rectangle knob = new Rectangle(knobX, knobY, knobD, knobD);
+                    using (SolidBrush b = new SolidBrush(on ? Color.White : Theme.BorderLight))
+                        g.FillEllipse(b, knob);
                     TextRenderer.DrawText(g, on ? "ON" : "OFF", Theme.Caption(),
                         new Rectangle(v.Left, v.Y, v.Width - 60, v.Height), Theme.Muted,
                         TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
@@ -575,7 +780,12 @@ namespace StartTor
                 }
                 string text = SettingDisplay(i);
                 bool editing = editRow == i;
-                Theme.Pill(g, v, Theme.SurfaceAlt, editing ? Theme.Accent : Theme.Border);
+
+                Theme.PillGradient(g, v,
+                    editing ? Theme.SurfaceLight : Theme.SurfaceAlt,
+                    editing ? Theme.Surface : Theme.Surface,
+                    editing ? Theme.Accent : Theme.Border);
+
                 Rectangle inner = Rectangle.Inflate(v, -6, 0);
                 if (editing)
                 {
@@ -714,7 +924,7 @@ namespace StartTor
                 int h = HitTest(p);
                 if (h == -1)
                 {
-                    if (p.Y <= 34)
+                    if (p.Y <= 36)
                     {
                         ReleaseCapture();
                         SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
@@ -733,7 +943,6 @@ namespace StartTor
                     case 21: ApplyTunToggle(!TunActive()); break;
                     case 30: page = Page.Settings; CancelEdit(); LayoutPass(); Invalidate(); break;
                     case 40: page = Page.Main; CancelEdit(); LayoutPass(); Invalidate(); break;
-                    case 50: try { Process.Start("https://github.com/Delta-Kronecker/TorJet/releases/latest"); } catch { } break;
                     default:
                         if (page != Page.Settings || h < 100) break;
                         int baseIdx = (h - 100) / 3;
@@ -820,7 +1029,6 @@ namespace StartTor
                     if (rcProxy.Contains(p)) return 20;
                     if (rcTun.Contains(p)) return 21;
                     if (rcSettings.Contains(p)) return 30;
-                    if (showUpdateBanner && rcUpdateBtn.Contains(p)) return 50;
                 }
                 else
                 {
@@ -984,10 +1192,6 @@ namespace StartTor
             // ---- connect / disconnect ------------------------------------------
             private volatile bool stoppingBusy;
 
-            private bool showUpdateBanner;
-            private string updateVersion = "";
-            private DateTime lastUpdateCheck = DateTime.MinValue;
-
             private void OnConnectButton()
             {
                 if (state == RunState.Idle) Connect();
@@ -1112,36 +1316,10 @@ namespace StartTor
                     Invalidate();
                 }
 
-                if (!showUpdateBanner && (DateTime.UtcNow - lastUpdateCheck).TotalMinutes >= 5)
+                if (!showUpdateBanner && DateTime.UtcNow >= nextUpdateCheck)
                 {
-                    lastUpdateCheck = DateTime.UtcNow;
-                    RunBg(delegate
-                    {
-                        try
-                        {
-                            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-                            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
-                                "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
-                            req.UserAgent = "torjet-ui/" + TorJetVersion.App;
-                            req.Timeout = 8000;
-                            using (WebResponse resp = req.GetResponse())
-                            using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
-                            {
-                                Match m = Regex.Match(sr.ReadToEnd(), "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
-                                if (m.Success)
-                                {
-                                    string latest = m.Groups[1].Value.TrimStart('v', 'V');
-                                    if (CompareVersions(latest, TorJetVersion.App) > 0)
-                                    {
-                                        updateVersion = latest;
-                                        showUpdateBanner = true;
-                                        UiInvokeDelegate(delegate { Invalidate(); });
-                                    }
-                                }
-                            }
-                        }
-                        catch { }
-                    });
+                    nextUpdateCheck = DateTime.UtcNow.AddMinutes(5);
+                    RunBg(delegate { CheckForUpdateFromUi(); });
                 }
 
                 if (state == RunState.Connected || state == RunState.Restarting)
@@ -1185,6 +1363,53 @@ namespace StartTor
                         }
                     }
                 }
+            }
+
+            private void CheckForUpdateFromUi()
+            {
+                try
+                {
+                    ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+                    HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
+                        "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
+                    req.UserAgent = "torjet-ui/" + TorJetVersion.App;
+                    req.Timeout = 8000;
+                    req.ReadWriteTimeout = 8000;
+                    using (WebResponse resp = req.GetResponse())
+                    using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
+                    {
+                        Match m = Regex.Match(sr.ReadToEnd(), "\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
+                        if (m.Success)
+                        {
+                            string latest = m.Groups[1].Value.TrimStart('v', 'V');
+                            if (CompareVersionsLocal(latest, TorJetVersion.App) > 0)
+                            {
+                                UiInvokeDelegate(delegate
+                                {
+                                    showUpdateBanner = true;
+                                    updateVersion = latest;
+                                    Invalidate();
+                                });
+                            }
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            private static int CompareVersionsLocal(string a, string b)
+            {
+                string[] pa = a.Split('.');
+                string[] pb = b.Split('.');
+                int n = Math.Max(pa.Length, pb.Length);
+                for (int i = 0; i < n; i++)
+                {
+                    int x = 0, y = 0;
+                    if (i < pa.Length) int.TryParse(pa[i], out x);
+                    if (i < pb.Length) int.TryParse(pb[i], out y);
+                    if (x != y) return x.CompareTo(y);
+                }
+                return 0;
             }
 
             private void CloseApp()
