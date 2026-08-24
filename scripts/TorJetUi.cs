@@ -1227,14 +1227,15 @@ namespace StartTor
                 }, out err, out aborted);
                 if (proc == null)
                 {
-                    sessionBusy = false;
-                    UiInvokeDelegate(delegate
+                    if (!stoppingBusy)
                     {
-                        bootPct = 0;
-                        SetState(RunState.Idle);
-                        FlashMessage(FirstLine(err));
-                        LogLine("[x] " + FirstLine(err));
-                    });
+                        sessionBusy = false;
+                        UiInvokeDelegate(delegate
+                        {
+                            bootPct = 0;
+                            SetState(RunState.Idle);
+                        });
+                    }
                     return;
                 }
                 circuitWatchStop = false;
@@ -1434,7 +1435,23 @@ namespace StartTor
                     state != RunState.Idle && state != RunState.Stopping)
                 {
                     e.Cancel = true;
-                    MinimizeToTray();
+                    DialogResult dr = MessageBox.Show(
+                        "Tor is connected.\n\nDo you want to stop and exit,\nor minimize to tray?",
+                        "TorJet",
+                        MessageBoxButtons.YesNoCancel,
+                        MessageBoxIcon.Question);
+                    if (dr == DialogResult.Yes)
+                    {
+                        CloseApp();
+                    }
+                    else if (dr == DialogResult.No)
+                    {
+                        MinimizeToTray();
+                    }
+                    else
+                    {
+                        e.Cancel = true;
+                    }
                 }
                 else
                 {
@@ -1475,6 +1492,14 @@ namespace StartTor
 
             private Icon CreateTrayIcon()
             {
+                string icoPath = Path.Combine(
+                    Path.GetDirectoryName(System.Reflection.Assembly.GetExecutingAssembly().Location) ?? "",
+                    "TorJet.ico");
+                if (File.Exists(icoPath))
+                {
+                    try { return new Icon(icoPath, 16, 16); } catch { }
+                }
+
                 Bitmap bmp = new Bitmap(16, 16);
                 using (Graphics g = Graphics.FromImage(bmp))
                 {
