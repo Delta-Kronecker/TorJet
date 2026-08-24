@@ -517,10 +517,15 @@ namespace StartTor
 
         private static string CookieHex()
         {
+            return CookieHexFor(ControlCookie);
+        }
+
+        private static string CookieHexFor(string cookiePath)
+        {
             try
             {
-                if (!File.Exists(ControlCookie)) return null;
-                byte[] cookie = File.ReadAllBytes(ControlCookie);
+                if (!File.Exists(cookiePath)) return null;
+                byte[] cookie = File.ReadAllBytes(cookiePath);
                 var sb = new StringBuilder(cookie.Length * 2);
                 foreach (byte b in cookie) sb.Append(b.ToString("x2"));
                 return sb.ToString();
@@ -983,15 +988,18 @@ namespace StartTor
             }
         }
 
-        private static bool WriteTorrc(int mode, int strategy)
+        // Builds the torrc content for a mode/strategy (template + bridges +
+        // strategy + conflux blocks). Returns null when the template or the
+        // bridge file is missing (reason already printed).
+        private static string BuildTorrc(int mode, int strategy, out int bridgeCount)
         {
+            bridgeCount = 0;
             if (!File.Exists(TorrcTemplate))
             {
                 Console.WriteLine("[x] torrc.template not found in " + DataDir);
-                return false;
+                return null;
             }
             string tmpl = File.ReadAllText(TorrcTemplate);
-            int bridgeCount = 0;
             StringBuilder sb = new StringBuilder(tmpl.TrimEnd());
             if (BridgeFiles[mode].Length > 0)
             {
@@ -999,7 +1007,7 @@ namespace StartTor
                 if (!File.Exists(bf))
                 {
                     Console.WriteLine("[x] bridge file not found: " + bf);
-                    return false;
+                    return null;
                 }
                 var bridges = new List<string>();
                 foreach (string line in File.ReadAllLines(bf))
@@ -1011,7 +1019,7 @@ namespace StartTor
                 if (bridges.Count == 0)
                 {
                     Console.WriteLine("[!] no usable bridge lines in " + bf);
-                    return false;
+                    return null;
                 }
                 sb.AppendLine();
                 sb.AppendLine();
@@ -1069,7 +1077,15 @@ namespace StartTor
                 sb.AppendLine("# --- conflux: keep best " + confluxRttPct + "% of sets by RTT ---");
                 sb.AppendLine("ConfluxSetRttPct " + confluxRttPct);
             }
-            File.WriteAllText(Torrc, sb.ToString(), new UTF8Encoding(false));
+            return sb.ToString();
+        }
+
+        private static bool WriteTorrc(int mode, int strategy)
+        {
+            int bridgeCount;
+            string content = BuildTorrc(mode, strategy, out bridgeCount);
+            if (content == null) return false;
+            File.WriteAllText(Torrc, content, new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
             catch { }
             try { WriteStrategyFile(strategy); }
@@ -1450,11 +1466,16 @@ namespace StartTor
         // Returns null when the port is unreachable or auth fails.
         private static List<string> ControlRaw(string cmd)
         {
+            return ControlRawFor(9051, cmd, ControlCookie);
+        }
+
+        private static List<string> ControlRawFor(int port, string cmd, string cookiePath)
+        {
             try
             {
-                string hex = CookieHex();
+                string hex = CookieHexFor(cookiePath);
                 if (hex == null) return null;
-                using (TcpClient c = new TcpClient("127.0.0.1", 9051))
+                using (TcpClient c = new TcpClient("127.0.0.1", port))
                 {
                     NetworkStream s = c.GetStream();
                     s.ReadTimeout = 5000;
@@ -1487,7 +1508,12 @@ namespace StartTor
         // payload lines (without the terminating status line).
         private static List<string> ControlCommand(string cmd)
         {
-            var raw = ControlRaw(cmd);
+            return ControlCommandFor(9051, cmd, ControlCookie);
+        }
+
+        private static List<string> ControlCommandFor(int port, string cmd, string cookiePath)
+        {
+            var raw = ControlRawFor(port, cmd, cookiePath);
             if (raw == null) return null;
             var lines = new List<string>();
             bool inData = false;
@@ -2048,13 +2074,19 @@ namespace StartTor
         // Returns false when neither source has a percentage yet.
         private static bool BootstrapPhase(out int pct, out string tag, out string summary)
         {
+            return BootstrapPhaseFor(9051, TorLog, ControlCookie, out pct, out tag, out summary);
+        }
+
+        private static bool BootstrapPhaseFor(int controlPort, string logPath, string cookiePath,
+                                              out int pct, out string tag, out string summary)
+        {
             pct = -1;
             tag = "";
             summary = "";
             int ctl = -1, log = -1;
             string ctlTag = "", logTag = "", ctlSummary = "";
 
-            var lines = ControlCommand("GETINFO status/bootstrap-phase");
+            var lines = ControlCommandFor(controlPort, "GETINFO status/bootstrap-phase", cookiePath);
             if (lines != null)
             {
                 foreach (string raw in lines)
@@ -2074,7 +2106,7 @@ namespace StartTor
                 }
             }
 
-            string tail = ReadLogTail(8192);
+            string tail = string.Join("\n", ReadLogTailFile(logPath, 8192));
             MatchCollection ms = Regex.Matches(tail, @"Bootstrapped\s+(\d+)%\s*(?:\(([^)]+)\))?");
             if (ms.Count > 0)
             {
@@ -3308,6 +3340,289 @@ namespace StartTor
             wd.Start();
         }
 
+        // --- auto mode: race three transports, keep the fastest --------------
+        // Spawns vanilla / obfs4 / webtunnel tor instances side by side, each
+        // with its own ports and DataDirectory, and reports every progress
+        // change. The first instance to reach 100% wins; the losers are killed
+        // and the winner restarts on the primary ports reusing its cached
+        // directory, so the final bootstrap takes seconds.
+        private sealed class AutoRacer
+        {
+            public string Name;
+            public int Mode;
+            public string Dir;
+            public string TorrcFile;
+            public int Socks, Keep, Http, Dns, Ctrl;
+            public Process Proc;
+            public int LastPct = -1;
+            public string LastTag = "";
+            public bool Alive = true;
+        }
+
+        // SocksPort/HTTPTunnelPort/DNSPort/ControlPort/Log are cumulative torrc
+        // options: appending overrides would ADD listeners on the primary
+        // ports instead of replacing them. Racer configs therefore get the
+        // template with every listener line stripped, then their own block.
+        private static string StripListenerLines(string content)
+        {
+            var keep = new List<string>();
+            foreach (string raw in content.Split('\n'))
+            {
+                string t = raw.Trim();
+                bool drop = t.StartsWith("SocksPort ", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("HTTPTunnelPort ", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("DNSPort ", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("ControlPort ", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("Log ", StringComparison.OrdinalIgnoreCase) ||
+                            t.StartsWith("LogNoticeFile ", StringComparison.OrdinalIgnoreCase);
+                if (!drop) keep.Add(raw.TrimEnd('\r'));
+            }
+            return string.Join("\n", keep);
+        }
+
+        private static void AutoKillAll(List<AutoRacer> racers)
+        {
+            foreach (AutoRacer r in racers)
+            {
+                try
+                {
+                    if (r.Proc != null && !r.Proc.HasExited)
+                    {
+                        r.Proc.Kill();
+                        r.Proc.WaitForExit(3000);
+                    }
+                }
+                catch { }
+                r.Alive = false;
+            }
+        }
+
+        private static void CopyDirectory(string src, string dst)
+        {
+            Directory.CreateDirectory(dst);
+            foreach (string f in Directory.GetFiles(src))
+            {
+                try { File.Copy(f, Path.Combine(dst, Path.GetFileName(f)), true); }
+                catch { }
+            }
+            foreach (string d in Directory.GetDirectories(src))
+            {
+                try { CopyDirectory(d, Path.Combine(dst, Path.GetFileName(d))); }
+                catch { }
+            }
+        }
+
+        private static string AutoRacerLog(AutoRacer r)
+        {
+            return Path.Combine(DataDir, r.Dir, "tor.log");
+        }
+
+        private static string AutoRacerCookie(AutoRacer r)
+        {
+            return Path.Combine(DataDir, r.Dir, "control_auth_cookie");
+        }
+
+        private static string AutoPad(string s)
+        {
+            return s.Length >= 9 ? s : s + new string(' ', 9 - s.Length);
+        }
+
+        private static string FirstLine(string s)
+        {
+            if (string.IsNullOrEmpty(s)) return "(no details)";
+            int nl = s.IndexOf('\n');
+            return nl > 0 ? s.Substring(0, nl).TrimEnd() : s.TrimEnd();
+        }
+
+        // Runs the race. Returns true with winnerMode set when one transport
+        // reached 100% and its cache has been moved to the primary data dir.
+        private static bool AutoRace(int strategy, out int winnerMode, out string raceError)
+        {
+            winnerMode = -1;
+            raceError = null;
+            string[] names = { "vanilla", "obfs4", "webtunnel" };
+            string[] suffixes = { "v", "o", "w" };
+            var racers = new List<AutoRacer>();
+            for (int i = 0; i < 3; i++)
+            {
+                AutoRacer r = new AutoRacer();
+                r.Name = names[i];
+                r.Mode = i; // ModeNames: vanilla, obfs4, webtunnel, ...
+                r.Dir = "data-" + suffixes[i];
+                r.TorrcFile = "torrc-auto-" + names[i];
+                int basePort = 9150 + i * 100;
+                r.Socks = basePort;
+                r.Ctrl = basePort + 1;
+                r.Keep = basePort + 2;
+                r.Http = 8150 + i * 100;
+                r.Dns = 61530 + i * 1000;
+                racers.Add(r);
+            }
+
+            foreach (AutoRacer r in racers)
+            {
+                if (TcpPortBusy(r.Socks) || TcpPortBusy(r.Ctrl) ||
+                    TcpPortBusy(r.Http) || TcpPortBusy(r.Keep))
+                {
+                    raceError = "race port " + r.Ctrl + "/" + r.Socks + " (" + r.Name + ") is busy";
+                    return false;
+                }
+                if (UdpPortBusy(r.Dns))
+                {
+                    raceError = "race DNS port " + r.Dns + " (" + r.Name + ") is busy";
+                    return false;
+                }
+            }
+
+            Console.WriteLine("[auto] racing vanilla / obfs4 / webtunnel (strategy " +
+                              StrategyNames[Math.Max(0, Math.Min(StrategyNames.Length - 1, strategy))] + ")");
+
+            foreach (AutoRacer r in racers)
+            {
+                int bc;
+                string content = BuildTorrc(r.Mode, strategy, out bc);
+                if (content == null)
+                {
+                    raceError = "failed to build torrc for " + r.Name;
+                    AutoKillAll(racers);
+                    return false;
+                }
+                content = StripListenerLines(content);
+                content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
+                           "DataDirectory " + r.Dir + "\r\n" +
+                           "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
+                           "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
+                           "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
+                           "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
+                           "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
+                           "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
+                File.WriteAllText(Path.Combine(DataDir, r.TorrcFile), content, new UTF8Encoding(false));
+                Directory.CreateDirectory(Path.Combine(DataDir, r.Dir));
+            }
+
+            foreach (AutoRacer r in racers)
+            {
+                ProcessStartInfo psi = new ProcessStartInfo
+                {
+                    FileName = TorExe,
+                    Arguments = "-f \"" + r.TorrcFile + "\"",
+                    WorkingDirectory = DataDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                };
+                try
+                {
+                    r.Proc = Process.Start(psi);
+                    Console.WriteLine("[auto] " + AutoPad(r.Name) + " started (PID " + r.Proc.Id +
+                                      ", socks " + r.Socks + ")");
+                }
+                catch (Exception ex)
+                {
+                    r.Alive = false;
+                    Console.WriteLine("[auto] " + AutoPad(r.Name) + " failed to start: " + ex.Message);
+                }
+            }
+
+            AutoRacer winner = null;
+            DateTime started = DateTime.UtcNow;
+            DateTime lastSnapshot = DateTime.UtcNow;
+            while (winner == null)
+            {
+                if (DateTime.UtcNow - started > TimeSpan.FromMinutes(10))
+                {
+                    raceError = "10-minute timeout";
+                    AutoKillAll(racers);
+                    return false;
+                }
+                try
+                {
+                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    {
+                        raceError = "aborted by user";
+                        AutoKillAll(racers);
+                        return false;
+                    }
+                }
+                catch { }
+                Thread.Sleep(1500);
+
+                int aliveCount = 0;
+                foreach (AutoRacer r in racers)
+                {
+                    if (!r.Alive) continue;
+                    try { r.Proc.Refresh(); r.Alive = !r.Proc.HasExited; }
+                    catch { r.Alive = false; }
+                    if (!r.Alive)
+                    {
+                        string tail = string.Join(" | ",
+                            ReadLogTailFile(AutoRacerLog(r), 900));
+                        Console.WriteLine("[auto] " + AutoPad(r.Name) + " DIED (code " +
+                            r.Proc.ExitCode + ") " + FirstLine(tail));
+                        continue;
+                    }
+                    aliveCount++;
+                    int pct; string tag, summ;
+                    if (BootstrapPhaseFor(r.Ctrl, AutoRacerLog(r), AutoRacerCookie(r),
+                                          out pct, out tag, out summ))
+                    {
+                        if (pct != r.LastPct)
+                        {
+                            r.LastPct = pct;
+                            r.LastTag = tag ?? "";
+                            Console.WriteLine("[auto] " + AutoPad(r.Name) + " " + pct + "% " + r.LastTag);
+                            if (pct >= 100) winner = r;
+                        }
+                    }
+                }
+                if (winner != null) break;
+                if (aliveCount == 0)
+                {
+                    raceError = "all three racers died";
+                    return false;
+                }
+                if (DateTime.UtcNow - lastSnapshot > TimeSpan.FromSeconds(15))
+                {
+                    lastSnapshot = DateTime.UtcNow;
+                    string s1 = racers[0].Alive ? (racers[0].LastPct < 0 ? "?" : racers[0].LastPct + "%") : "dead";
+                    string s2 = racers[1].Alive ? (racers[1].LastPct < 0 ? "?" : racers[1].LastPct + "%") : "dead";
+                    string s3 = racers[2].Alive ? (racers[2].LastPct < 0 ? "?" : racers[2].LastPct + "%") : "dead";
+                    Console.WriteLine("[auto] snapshot   vanilla " + s1 + " | obfs4 " + s2 +
+                                      " | webtunnel " + s3);
+                }
+            }
+
+            Console.WriteLine("[auto] WINNER = " + winner.Name +
+                              " — stopping the other two…");
+            foreach (AutoRacer r in racers)
+            {
+                if (r != winner)
+                {
+                    try { if (r.Proc != null && !r.Proc.HasExited) { r.Proc.Kill(); r.Proc.WaitForExit(3000); } }
+                    catch { }
+                    r.Alive = false;
+                }
+            }
+            // The winner is stopped too: its cache moves to the primary data
+            // directory and the standard single-core start takes over.
+            try { if (winner.Proc != null && !winner.Proc.HasExited) { winner.Proc.Kill(); winner.Proc.WaitForExit(3000); } }
+            catch { }
+            Thread.Sleep(800);
+
+            Console.WriteLine("[auto] switching " + winner.Name + " to primary ports (9050/8118)…");
+            try
+            {
+                string dst = Path.Combine(DataDir, "data");
+                CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
+                try { File.Delete(Path.Combine(dst, "lock")); } catch { }
+            }
+            catch (Exception ex)
+            {
+                Log("auto: cache copy failed (" + ex.Message + ") — cold bootstrap");
+            }
+            winnerMode = winner.Mode;
+            return true;
+        }
+
         // Runs one Tor session: writes torrc, boots tor with a live progress
         // bar, then serves the P/T/S/C keys until the user presses C or tor
         // dies. A hung tunnel is detected by the watchdog and automatically
@@ -3315,13 +3630,18 @@ namespace StartTor
         // Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
         private static int RunTorSession(int mode, int strategy,
                                          bool genOnly, bool bootstrapOnly, string autoMode,
-                                         bool menuReturn)
+                                         bool menuReturn, bool raceStart)
         {
             if (!File.Exists(TorExe))
             {
                 Console.WriteLine("[x] tor.exe not found in " + DataDir);
                 WaitForKey();
                 return 1;
+            }
+            if (mode < 0)
+            {
+                mode = ReadLastMode();
+                if (mode < 0) mode = 1; // obfs4 — only used when the race is off
             }
             if (genOnly)
             {
@@ -3337,6 +3657,20 @@ namespace StartTor
             for (int attempt = 1; ; attempt++)
             {
                 watchdogStop = true;   // no probing while bootstrapping
+                if (raceStart)
+                {
+                    int winnerMode;
+                    string raceErr;
+                    if (!AutoRace(strategy, out winnerMode, out raceErr))
+                    {
+                        Console.WriteLine("[x] auto race failed: " + raceErr);
+                        Cleanup();
+                        cleaned = false;
+                        return menuReturn ? 2 : 1;
+                    }
+                    mode = winnerMode;
+                    Console.WriteLine("[auto] winner mode: " + ModeNames[mode]);
+                }
                 torProc = StartTorAndWait(mode, strategy, true, null, out startErr, out aborted);
                 if (torProc == null)
                 {
@@ -3798,6 +4132,7 @@ namespace StartTor
             bool bootstrapOnly = false;
             bool genOnly = false;
             bool newCircuit = false;
+            bool raceStart = false;
             string autoMode = "";
             for (int i = 0; i < args.Length; i++)
             {
@@ -3805,7 +4140,9 @@ namespace StartTor
                 if (a == "--bootstrap-only" || a == "-t") bootstrapOnly = true;
                 else if (a == "--gen-torrc-only") genOnly = true;
                 else if (a == "--strategy" && i + 1 < args.Length) strategy = ParseStrategy(args[++i]);
-                else if (a == "--newcircuit") newCircuit = true;                else if (a == "--circuit-watch") circuitWatchEnabled = true;
+                else if (a == "--newcircuit") newCircuit = true;
+                else if (a == "auto" || a == "--auto") raceStart = true;
+                else if (a == "--circuit-watch") circuitWatchEnabled = true;
                 else if (a == "--no-circuit-watch") circuitWatchEnabled = false;
                 else if (a == "--no-watchdog") watchdogEnabled = false;
                 else if (a == "--watchdog") watchdogEnabled = true;
@@ -3834,13 +4171,13 @@ namespace StartTor
                     : "No tor control port on 127.0.0.1:9051. Is tor running?");
                 return 0;
             }
-            if (mode < 0)
+            if (mode < 0 && !raceStart)
             {
                 while (true)
                 {
                     ShowMainMenu(out mode, out strategy);
                     if (mode < 0) return 0;
-                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true, raceStart);
                     if (rc != 2) return rc;
                 }
             }
@@ -3850,7 +4187,7 @@ namespace StartTor
                 if (strategy < 0) strategy = DefaultStrategy();
                 while (true)
                 {
-                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true);
+                    int rc = RunTorSession(mode, strategy, genOnly, bootstrapOnly, autoMode, true, raceStart);
                     if (rc != 2) return rc;
                     ShowMainMenu(out mode, out strategy);
                     if (mode < 0) return 0;

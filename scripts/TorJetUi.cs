@@ -1288,13 +1288,6 @@ namespace StartTor
                 Invalidate();
             }
 
-            private static string FirstLine(string s)
-            {
-                if (string.IsNullOrEmpty(s)) return "(no details)";
-                int nl = s.IndexOf('\n');
-                return nl > 0 ? s.Substring(0, nl).TrimEnd() : s.TrimEnd();
-            }
-
             // ---- tick: death / watchdog / caret ---------------------------------
             private void UiTick(object s, EventArgs e)
             {

@@ -116,6 +116,8 @@ You can also launch with fixed settings:
 
 ```
 TorJet.exe obfs4               start directly in obfs4 mode
+TorJet.exe auto                race vanilla/obfs4/webtunnel in parallel and
+                               keep the first that bootstraps (CLI)
 TorJet.exe obfs4 aggressive    start in obfs4 mode + strategy level
 TorJet.exe --strategy ultimate start with the ultimate strategy
 TorJet.exe obfs4 aggressive proxy   start + auto-enable the system proxy
