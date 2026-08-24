@@ -48,6 +48,10 @@ namespace StartTor
         private static readonly object uiLogLock = new object();
         private static readonly List<string> uiLogBuffer = new List<string>();
         private const int UiLogCap = 600;
+        // set while an auto race is running (drives the RACE n% status)
+        internal static volatile bool uiRaceActive;
+        // mode that won the last race — reconnects skip re-racing
+        internal static int lastWinnerMode = -1;
 
         private static void AppendUiLogLine(string line)
         {
@@ -348,6 +352,7 @@ namespace StartTor
                 uiTimer.Tick += UiTick;
                 uiTimer.Start();
                 LayoutPass();
+                uiModePos = AutoEnabled() ? ModeNames.Length : Math.Max(0, comboModeIndexSafe());
                 LogLine("TorJet " + TorJetVersion.App);
             }
 
@@ -402,6 +407,7 @@ namespace StartTor
             // ---- painting ---------------------------------------------------
             private Color StateColor()
             {
+                if (uiRaceActive) return Theme.Amber;
                 switch (state)
                 {
                     case RunState.Connected: return Theme.Green;
@@ -414,6 +420,8 @@ namespace StartTor
 
             private string StateText()
             {
+                if (uiRaceActive)
+                    return bootPct > 0 ? "RACE " + bootPct + "%" : "RACING";
                 switch (state)
                 {
                     case RunState.Connected: return "CONNECTED";
@@ -596,9 +604,11 @@ namespace StartTor
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis);
 
-                int modeIdx = comboModeIndexSafe();
+                string modeLabel = uiModePos < ModeNames.Length
+                    ? PrettyMode(ModeNames[uiModePos])
+                    : "Auto race";
                 Theme.PillGradient(g, rcModeVal, Theme.SurfaceAlt, Theme.Surface, Theme.Border);
-                TextRenderer.DrawText(g, PrettyMode(ModeNames[Math.Max(0, modeIdx)]), Theme.Body(),
+                TextRenderer.DrawText(g, modeLabel, Theme.Body(),
                     rcModeVal, Theme.Text, TextFormatFlags.HorizontalCenter |
                     TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
                 DrawChevron(g, rcModePrev, false, hoverId == 10);
@@ -1042,6 +1052,19 @@ namespace StartTor
             }
 
             // ---- mode helpers -----------------------------------------------
+            private int uiModePos = 1;
+            private static readonly string AutoPrefFile = Path.Combine(DataDir, "auto.txt");
+
+            private bool AutoEnabled()
+            {
+                try
+                {
+                    return File.Exists(AutoPrefFile) &&
+                           File.ReadAllText(AutoPrefFile).Trim() == "on";
+                }
+                catch { return false; }
+            }
+
             private int comboModeIndexSafe()
             {
                 int m = ReadLastMode();
@@ -1056,8 +1079,16 @@ namespace StartTor
 
             private void CycleMode(int dir)
             {
-                int m = Wrap(comboModeIndexSafe() + dir, ModeNames.Length);
-                WriteModeFile(m);
+                uiModePos = Wrap(uiModePos + dir, ModeNames.Length + 1);
+                if (uiModePos < ModeNames.Length)
+                {
+                    WriteModeFile(uiModePos);
+                    try { File.WriteAllText(AutoPrefFile, "off", new UTF8Encoding(false)); } catch { }
+                }
+                else
+                {
+                    try { File.WriteAllText(AutoPrefFile, "on", new UTF8Encoding(false)); } catch { }
+                }
                 Invalidate();
             }
 
@@ -1199,20 +1230,48 @@ namespace StartTor
                 restartAttempts = 0;
                 bootPct = 0;
                 SetState(RunState.Connecting);
-                int mode = comboModeIndexSafe();
+                bool race = uiModePos >= ModeNames.Length;
+                int mode = race ? -1 : uiModePos;
                 int strategy = comboStrategyIndexSafe();
-                WriteModeFile(mode);
                 WriteStrategyFile(strategy);
-                RunBg(delegate { SessionWorker(mode, strategy); });
+                RunBg(delegate { SessionWorker(mode, strategy, race); });
             }
-
-            private void SessionWorker(int mode, int strategy)
+            private void SessionWorker(int mode, int strategy, bool raceStart)
             {
+                if (raceStart)
+                {
+                    uiRaceActive = true;
+                    int winnerMode;
+                    string raceErr;
+                    bool ok = AutoRace(strategy, out winnerMode, out raceErr,
+                        delegate(string line) { LogLine(line); },
+                        delegate(int p, string info)
+                        {
+                            bootPct = p;
+                            bootTag = info;
+                            UiInvokeDelegate(delegate { Invalidate(); });
+                        });
+                    uiRaceActive = false;
+                    if (!ok)
+                    {
+                        sessionBusy = false;
+                        UiInvokeDelegate(delegate
+                        {
+                            bootPct = 0;
+                            SetState(RunState.Idle);
+                            FlashMessage(raceErr);
+                        });
+                        return;
+                    }
+                    mode = winnerMode;
+                    lastWinnerMode = winnerMode;
+                }
                 StopPreviousRun();
                 for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
                 string err;
                 bool aborted;
                 Process proc = StartTorAndWait(mode, strategy, false, delegate(int pct, string tag)
+
                 {
                     bootPct = pct;
                     bootTag = tag ?? "";
@@ -1259,6 +1318,7 @@ namespace StartTor
             {
                 if (stoppingBusy) return;
                 stoppingBusy = true;
+                autoAbort = true;   // cancels a running race immediately
                 SetState(RunState.Stopping);
                 watchdogStop = true;
                 circuitWatchStop = true;
@@ -1326,7 +1386,10 @@ namespace StartTor
                             DnsCacheStop();
                             tunWasOnBeforeRestart = TunActive();
                             LogLine("watchdog: restarting tor (" + restartAttempts + "/3)");
-                            int mode = comboModeIndexSafe(), strat = comboStrategyIndexSafe();
+                            // reconnect with the winning mode — never re-race
+                            int mode = lastWinnerMode >= 0 ? lastWinnerMode :
+                                       (uiModePos < ModeNames.Length ? uiModePos : 1);
+                            int strat = comboStrategyIndexSafe();
                             bootPct = 0;
                             RunBg(delegate
                             {
@@ -1334,7 +1397,7 @@ namespace StartTor
                                 for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
                                 try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
                                 cleaned = false;
-                                SessionWorker(mode, strat);
+                                SessionWorker(mode, strat, false);
                                 if (tunWasOnBeforeRestart && !TunActive())
                                 {
                                     EnableTunAndWait();

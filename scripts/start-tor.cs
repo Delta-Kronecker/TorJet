@@ -3436,8 +3436,28 @@ namespace StartTor
 
         // Runs the race. Returns true with winnerMode set when one transport
         // reached 100% and its cache has been moved to the primary data dir.
+        private static Action<string> autoLineSink;
+        private static volatile bool autoAbort;
+        private static void AutoEmit(string line)
+        {
+            Action<string> s = autoLineSink;
+            if (s != null) s(line);
+            else Console.WriteLine(line);
+        }
+
         private static bool AutoRace(int strategy, out int winnerMode, out string raceError)
         {
+            return AutoRace(strategy, out winnerMode, out raceError, null, null);
+        }
+
+        // lineSink (null = console) receives every [auto] event line; progress
+        // (null = skip) is called each poll with the best alive racer's
+        // percentage and name+tag, for GUI rings.
+        private static bool AutoRace(int strategy, out int winnerMode, out string raceError,
+                                     Action<string> lineSink, Action<int, string> progress)
+        {
+            autoLineSink = lineSink;
+            autoAbort = false;
             winnerMode = -1;
             raceError = null;
             string[] names = { "vanilla", "obfs4", "webtunnel" };
@@ -3474,7 +3494,7 @@ namespace StartTor
                 }
             }
 
-            Console.WriteLine("[auto] racing vanilla / obfs4 / webtunnel (strategy " +
+            AutoEmit("[auto] racing vanilla / obfs4 / webtunnel (strategy " +
                               StrategyNames[Math.Max(0, Math.Min(StrategyNames.Length - 1, strategy))] + ")");
 
             foreach (AutoRacer r in racers)
@@ -3513,13 +3533,13 @@ namespace StartTor
                 try
                 {
                     r.Proc = Process.Start(psi);
-                    Console.WriteLine("[auto] " + AutoPad(r.Name) + " started (PID " + r.Proc.Id +
+                    AutoEmit("[auto] " + AutoPad(r.Name) + " started (PID " + r.Proc.Id +
                                       ", socks " + r.Socks + ")");
                 }
                 catch (Exception ex)
                 {
                     r.Alive = false;
-                    Console.WriteLine("[auto] " + AutoPad(r.Name) + " failed to start: " + ex.Message);
+                    AutoEmit("[auto] " + AutoPad(r.Name) + " failed to start: " + ex.Message);
                 }
             }
 
@@ -3532,21 +3552,35 @@ namespace StartTor
                 {
                     raceError = "10-minute timeout";
                     AutoKillAll(racers);
+                    autoLineSink = null;
                     return false;
                 }
                 try
                 {
-                    if (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C)
+                    if (autoAbort ||
+                        (Console.KeyAvailable && Console.ReadKey(true).Key == ConsoleKey.C))
                     {
                         raceError = "aborted by user";
                         AutoKillAll(racers);
+                        autoLineSink = null;
                         return false;
                     }
                 }
-                catch { }
+                catch
+                {
+                    if (autoAbort)
+                    {
+                        raceError = "aborted by user";
+                        AutoKillAll(racers);
+                        autoLineSink = null;
+                        return false;
+                    }
+                }
                 Thread.Sleep(1500);
 
                 int aliveCount = 0;
+                int bestPct = -1;
+                string bestInfo = "";
                 foreach (AutoRacer r in racers)
                 {
                     if (!r.Alive) continue;
@@ -3556,7 +3590,7 @@ namespace StartTor
                     {
                         string tail = string.Join(" | ",
                             ReadLogTailFile(AutoRacerLog(r), 900));
-                        Console.WriteLine("[auto] " + AutoPad(r.Name) + " DIED (code " +
+                        AutoEmit("[auto] " + AutoPad(r.Name) + " DIED (code " +
                             r.Proc.ExitCode + ") " + FirstLine(tail));
                         continue;
                     }
@@ -3569,15 +3603,23 @@ namespace StartTor
                         {
                             r.LastPct = pct;
                             r.LastTag = tag ?? "";
-                            Console.WriteLine("[auto] " + AutoPad(r.Name) + " " + pct + "% " + r.LastTag);
+                            AutoEmit("[auto] " + AutoPad(r.Name) + " " + pct + "% " + r.LastTag);
                             if (pct >= 100) winner = r;
+                        }
+                        if (pct > bestPct)
+                        {
+                            bestPct = pct;
+                            bestInfo = r.Name + " " + r.LastTag;
                         }
                     }
                 }
+                if (progress != null && bestPct >= 0)
+                    progress(bestPct, bestInfo);
                 if (winner != null) break;
                 if (aliveCount == 0)
                 {
                     raceError = "all three racers died";
+                    autoLineSink = null;
                     return false;
                 }
                 if (DateTime.UtcNow - lastSnapshot > TimeSpan.FromSeconds(15))
@@ -3586,12 +3628,12 @@ namespace StartTor
                     string s1 = racers[0].Alive ? (racers[0].LastPct < 0 ? "?" : racers[0].LastPct + "%") : "dead";
                     string s2 = racers[1].Alive ? (racers[1].LastPct < 0 ? "?" : racers[1].LastPct + "%") : "dead";
                     string s3 = racers[2].Alive ? (racers[2].LastPct < 0 ? "?" : racers[2].LastPct + "%") : "dead";
-                    Console.WriteLine("[auto] snapshot   vanilla " + s1 + " | obfs4 " + s2 +
+                    AutoEmit("[auto] snapshot   vanilla " + s1 + " | obfs4 " + s2 +
                                       " | webtunnel " + s3);
                 }
             }
 
-            Console.WriteLine("[auto] WINNER = " + winner.Name +
+            AutoEmit("[auto] WINNER = " + winner.Name +
                               " — stopping the other two…");
             foreach (AutoRacer r in racers)
             {
@@ -3608,7 +3650,7 @@ namespace StartTor
             catch { }
             Thread.Sleep(800);
 
-            Console.WriteLine("[auto] switching " + winner.Name + " to primary ports (9050/8118)…");
+            AutoEmit("[auto] switching " + winner.Name + " to primary ports (9050/8118)…");
             try
             {
                 string dst = Path.Combine(DataDir, "data");
@@ -3620,6 +3662,7 @@ namespace StartTor
                 Log("auto: cache copy failed (" + ex.Message + ") — cold bootstrap");
             }
             winnerMode = winner.Mode;
+            autoLineSink = null;
             return true;
         }
 
@@ -3669,7 +3712,7 @@ namespace StartTor
                         return menuReturn ? 2 : 1;
                     }
                     mode = winnerMode;
-                    Console.WriteLine("[auto] winner mode: " + ModeNames[mode]);
+                    AutoEmit("[auto] winner mode: " + ModeNames[mode]);
                 }
                 torProc = StartTorAndWait(mode, strategy, true, null, out startErr, out aborted);
                 if (torProc == null)
