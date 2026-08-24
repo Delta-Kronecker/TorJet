@@ -321,13 +321,6 @@ namespace StartTor
 
                 string forced = Environment.GetEnvironmentVariable("TORJET_UI_PAGE");
                 if (forced == "settings") page = Page.Settings;
-                try
-                {
-                    if (forced != null)
-                        File.WriteAllText(Path.Combine(Path.GetTempPath(), "torjet-uipage.txt"),
-                            forced + " -> page=" + page);
-                }
-                catch { }
 
                 Resize += delegate { LayoutPass(); };
                 Paint += OnPaintAll;

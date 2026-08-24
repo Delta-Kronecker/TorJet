@@ -3640,17 +3640,23 @@ namespace StartTor
         [System.Runtime.InteropServices.DllImport("kernel32.dll")]
         private static extern bool FreeConsole();
         private static bool consoleAttached;
+        private static bool consoleOwned;
 
         // The launcher is built as a windowed exe (no console flash on GUI
         // launch). CLI invocations attach to the parent terminal; when there
         // is none (e.g. mintty), a fresh console is allocated so output and
-        // the interactive menus still work.
+        // the interactive menus still work. Only a console we allocated may
+        // be retitled/re-encoded — never the parent terminal.
         private static void AttachParentConsole()
         {
             try
             {
                 if (AttachConsole(-1)) { consoleAttached = true; return; }
-                if (AllocConsole()) { consoleAttached = true; }
+                if (AllocConsole())
+                {
+                    consoleAttached = true;
+                    consoleOwned = true;
+                }
             }
             catch { }
         }
@@ -3691,8 +3697,11 @@ namespace StartTor
 
         private static int MainCli(string[] args)
         {
-            try { Console.Title = "TorJet"; } catch { }
-            try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            if (consoleOwned)
+            {
+                try { Console.Title = "TorJet"; } catch { }
+                try { Console.OutputEncoding = Encoding.UTF8; } catch { }
+            }
             // Recover the user's pre-TorJet proxy settings if a previous run
             // crashed while the TorJet system proxy was still enabled.
             LoadProxyBackup();
