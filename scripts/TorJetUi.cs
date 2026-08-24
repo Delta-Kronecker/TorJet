@@ -1277,6 +1277,7 @@ namespace StartTor
                 {
                     Cleanup();
                     cleaned = false;
+                    Thread.Sleep(5000);
                     UiInvokeDelegate(delegate
                     {
                         bootPct = 0;
