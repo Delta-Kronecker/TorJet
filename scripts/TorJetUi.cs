@@ -381,7 +381,25 @@ namespace StartTor
                 uiTimer.Tick += UiTick;
                 uiTimer.Start();
                 LayoutPass();
-                uiModePos = AutoEnabled() ? ModeNames.Length : Math.Max(0, comboModeIndexSafe());
+                // Auto race is the shipped default: it runs unless the user
+                // explicitly turned it off (auto.txt = "off") or picked a
+                // concrete mode (mode.txt written by the cycler).
+                string autoPref = null;
+                try
+                {
+                    if (File.Exists(AutoPrefFile))
+                        autoPref = File.ReadAllText(AutoPrefFile).Trim();
+                }
+                catch { }
+                if (autoPref == "off")
+                {
+                    int lastMode = ReadLastMode();
+                    uiModePos = lastMode >= 0 ? lastMode : 1;
+                }
+                else
+                {
+                    uiModePos = ModeNames.Length;   // Auto race
+                }
                 LogLine("TorJet " + TorJetVersion.App);
             }
 
@@ -1086,16 +1104,6 @@ namespace StartTor
             private int uiModePos = 1;
             private static readonly string AutoPrefFile = Path.Combine(DataDir, "auto.txt");
 
-            private bool AutoEnabled()
-            {
-                try
-                {
-                    return File.Exists(AutoPrefFile) &&
-                           File.ReadAllText(AutoPrefFile).Trim() == "on";
-                }
-                catch { return false; }
-            }
-
             private int comboModeIndexSafe()
             {
                 int m = ReadLastMode();
@@ -1215,11 +1223,31 @@ namespace StartTor
             {
                 DnsCacheStop();
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                for (int i = 0; i < 20 && TunActive(); i++) Thread.Sleep(500);
+                // Route cleanup of a few thousand relay /32s can take a while;
+                // the state file flipping to "off" is the authoritative signal.
+                for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
                 if (TunActive())
                 {
-                    SpawnElevated("off", true);
+                    SpawnElevated("off", true, 20000);
+                    for (int i = 0; i < 12 && TunActive(); i++) Thread.Sleep(500);
                 }
+                Run("ipconfig.exe", "/flushdns");
+            }
+
+            private void Run(string file, string args)
+            {
+                try
+                {
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = file,
+                        Arguments = args,
+                        UseShellExecute = false,
+                        CreateNoWindow = true
+                    };
+                    Process.Start(psi);
+                }
+                catch { }
             }
 
             private void FlashMessage(string msg)

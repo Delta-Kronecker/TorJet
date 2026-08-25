@@ -724,6 +724,16 @@ namespace TunHelper
             foreach (string ip in relays)
                 AddRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf, 1);
 
+            // DNS-leak fix: Windows sends DNS queries on EVERY adapter that
+            // has DNS servers configured (Smart Multi-Homed Name Resolution),
+            // and those queries ride the PHYSICAL default route that we leave
+            // in place for the relay /32s. Result: the ISP's resolvers answer
+            // in parallel with tor's (classic "browser broken + DNS leak").
+            // Removing the physical default route while tunnelled closes that
+            // escape — the /32 relay routes do not depend on it.
+            DeleteRoute(0, 0, IpToUInt(physGw), physIf);
+            Run("ipconfig.exe", "/flushdns");
+
             // IPv6 kill switch: with an IPv4-only tunnel, browsers would hang
             // on IPv6-capable sites (chat apps that use plain TCP keep working,
             // which looks like "browser broken, everything else fine").
@@ -775,6 +785,8 @@ namespace TunHelper
             string physIf = GetStateValue(state, "physIf");
             string physGw = GetStateValue(state, "physGw");
             string relays = GetStateValue(state, "relays");
+            int ifidx;
+            int.TryParse(physIf, out ifidx);
 
             int p;
             if (!string.IsNullOrEmpty(pid) && int.TryParse(pid, out p) && p > 0)
@@ -783,8 +795,7 @@ namespace TunHelper
             }
             Thread.Sleep(2000);
 
-            int ifidx;
-            if (int.TryParse(physIf, out ifidx) && ifidx > 0 && !string.IsNullOrEmpty(physGw) && !string.IsNullOrEmpty(relays))
+            if (ifidx > 0 && !string.IsNullOrEmpty(physGw) && !string.IsNullOrEmpty(relays))
             {
                 foreach (string ip in relays.Split(','))
                 {
@@ -797,6 +808,13 @@ namespace TunHelper
             KillStaleTun2Socks();
             WintunDeleteAdapterByName(TunName);
             SetIp6Binding(true);   // restore IPv6 bindings
+            // bring the physical default route back (removed while tunnelled
+            // to close the DNS-leak escape; the /32 relay routes never need it)
+            if (ifidx > 0 && !string.IsNullOrEmpty(physGw))
+            {
+                AddRoute(0, 0, IpToUInt(physGw), ifidx, 1);
+            }
+            Run("ipconfig.exe", "/flushdns");
             WriteState("status=off");
             try { if (File.Exists(StopFile)) File.Delete(StopFile); } catch { }
         }

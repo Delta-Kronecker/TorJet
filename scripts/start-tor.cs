@@ -367,7 +367,12 @@ namespace StartTor
         // the tunnel off.
         private static bool TunActive()
         {
-            if (ReadTunState() == "on") return true;
+            // The state file is the single source of truth: the helper writes
+            // "status=off" only AFTER routes/adapter are restored, and a
+            // lingering helper process must never keep "on" alive past that.
+            string st = ReadTunState();
+            if (st == "off") return false;
+            if (st == "on") return true;
             try
             {
                 foreach (Process p in Process.GetProcessesByName("tun-helper"))
@@ -386,7 +391,11 @@ namespace StartTor
             return "";
         }
 
-        private static bool SpawnElevated(string args, bool wait)
+        // waitMs: bounded wait when >= 0 (a hung elevated helper must never
+        // freeze the caller forever — route cleanup of a few thousand /32s
+        // can legitimately take a while, so the default stays unbounded for
+        // the interactive CLI path and callers pass explicit budgets).
+        private static bool SpawnElevated(string args, bool wait, int waitMs = -1)
         {
             try
             {
@@ -405,7 +414,7 @@ namespace StartTor
                 };
                 using (Process p = Process.Start(psi))
                 {
-                    if (wait) p.WaitForExit();
+                    if (wait) p.WaitForExit(waitMs < 0 ? int.MaxValue : waitMs);
                 }
                 return true;
             }
@@ -449,7 +458,7 @@ namespace StartTor
             for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
             if (!TunActive()) { Console.WriteLine("  TUN OFF"); return; }
             Console.WriteLine("  keeper did not stop; forcing teardown (UAC)...");
-            if (SpawnElevated("off", true))
+            if (SpawnElevated("off", true, 20000))
                 Console.WriteLine("  " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
             else
                 Console.WriteLine("  teardown cancelled - TUN still ON");
@@ -471,7 +480,7 @@ namespace StartTor
                     if (!TunActive()) break;
                 }
                 if (TunActive())
-                    try { SpawnElevated("off", true); } catch { }
+                    try { SpawnElevated("off", true, 20000); } catch { }
             }
             if (torProc != null)
             {
@@ -3341,7 +3350,7 @@ namespace StartTor
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
                 for (int i = 0; i < 16 && TunActive(); i++) Thread.Sleep(500);
                 if (TunActive())
-                    try { SpawnElevated("off", true); } catch { }
+                    try { SpawnElevated("off", true, 20000); } catch { }
             }
 
             if (prev)
