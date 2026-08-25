@@ -1277,6 +1277,7 @@ namespace StartTor
             {
                 if (raceStart)
                 {
+                    torProc = null;
                     uiRaceActive = true;
                     int winnerMode;
                     string raceErr;
@@ -1302,30 +1303,43 @@ namespace StartTor
                     }
                     mode = winnerMode;
                     lastWinnerMode = winnerMode;
+                    if (autoLiveProc != null)
+                        torProc = autoLiveProc;   // winner kept alive — skip the restart
                 }
-                StopPreviousRun();
-                for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
+                if (torProc == null)
+                {
+                    StopPreviousRun();
+                    for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
+                }
                 string err;
                 bool aborted;
-                Process proc = StartTorAndWait(mode, strategy, false, delegate(int pct, string tag)
+                Process proc;
+                if (torProc != null)
+                {
+                    proc = torProc;   // live race winner — already at 100%
+                }
+                else
+                {
+                    proc = StartTorAndWait(mode, strategy, false, delegate(int pct, string tag)
 
-                {
-                    bootPct = pct;
-                    bootTag = tag ?? "";
-                    UiInvokeDelegate(delegate { Invalidate(); });
-                }, out err, out aborted);
-                if (proc == null)
-                {
-                    if (!stoppingBusy)
                     {
-                        sessionBusy = false;
-                        UiInvokeDelegate(delegate
+                        bootPct = pct;
+                        bootTag = tag ?? "";
+                        UiInvokeDelegate(delegate { Invalidate(); });
+                    }, out err, out aborted);
+                    if (proc == null)
+                    {
+                        if (!stoppingBusy)
                         {
-                            bootPct = 0;
-                            SetState(RunState.Idle);
-                        });
+                            sessionBusy = false;
+                            UiInvokeDelegate(delegate
+                            {
+                                bootPct = 0;
+                                SetState(RunState.Idle);
+                            });
+                        }
+                        return;
                     }
-                    return;
                 }
                 circuitWatchStop = false;
                 circuitWatchWarmup = true;

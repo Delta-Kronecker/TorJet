@@ -2714,6 +2714,9 @@ namespace StartTor
         // lookups. Started when TUN comes up, stopped on TUN off / cleanup.
         private const int DnsCachePort = 53;
         private const int DnsUpstreamPort = 53530;
+        // The DNS stub forwards here; the auto race re-points it at the
+        // winner's DNS port so tor's own DNSPort listener never has to move.
+        private static int dnsUpstreamActive = DnsUpstreamPort;
         private const int DnsCacheMaxEntries = 4096;
         private static volatile bool dnsCacheStop;
         private static Thread dnsCacheThread;
@@ -2811,7 +2814,7 @@ namespace StartTor
                 dnsListener = listener;
             }
             Log("dns-cache: listening on 127.0.0.1:" + DnsCachePort +
-                " -> tor 127.0.0.1:" + DnsUpstreamPort);
+                " -> tor 127.0.0.1:" + dnsUpstreamActive);
             while (!dnsCacheStop)
             {
                 IPEndPoint from = new IPEndPoint(IPAddress.Loopback, 0);
@@ -2857,7 +2860,7 @@ namespace StartTor
                 using (UdpClient up = new UdpClient())
                 {
                     up.Client.ReceiveTimeout = 5000;
-                    up.Connect(IPAddress.Loopback, DnsUpstreamPort);
+                    up.Connect(IPAddress.Loopback, dnsUpstreamActive);
                     up.Send(query, query.Length);
                     IPEndPoint any = new IPEndPoint(IPAddress.Any, 0);
                     byte[] resp = up.Receive(ref any);
@@ -2947,7 +2950,7 @@ namespace StartTor
                 client.SendTimeout = 5000;
                 using (TcpClient up = new TcpClient())
                 {
-                    up.Connect(IPAddress.Loopback, DnsUpstreamPort);
+                    up.Connect(IPAddress.Loopback, dnsUpstreamActive);
                     up.ReceiveTimeout = 5000;
                     up.SendTimeout = 5000;
                     NetworkStream cs = client.GetStream();
@@ -3528,6 +3531,50 @@ namespace StartTor
         // reached 100% and its cache has been moved to the primary data dir.
         private static Action<string> autoLineSink;
         private static volatile bool autoAbort;
+        private static Process autoLiveProc;   // non-null when the winner survived the switch
+
+        // Moves a live winner onto the primary ports via SETCONF. The DNS
+        // port stays put on purpose; the DNS stub re-points at it instead.
+        private static bool AutoSwitchWinnerToPrimaryPorts(AutoRacer w)
+        {
+            try { File.Copy(AutoRacerCookie(w), ControlCookie, true); }
+            catch (Exception ex)
+            {
+                AutoEmit("[auto] live switch: cookie copy failed (" + ex.Message + ")");
+                return false;
+            }
+            string setconf =
+                "SETCONF SocksPort=\"127.0.0.1:9050 IsolateSOCKSAuth\" " +
+                "SocksPort=\"127.0.0.1:9052 NoIsolateSOCKSAuth\" " +
+                "HTTPTunnelPort=127.0.0.1:8118 " +
+                "ControlPort=127.0.0.1:9051";
+            var reply = ControlRawFor(w.Ctrl, setconf, AutoRacerCookie(w));
+            if (reply == null)
+            {
+                AutoEmit("[auto] live switch: control port unreachable");
+                return false;
+            }
+            bool ok = false;
+            foreach (string l in reply)
+                if (l.StartsWith("250")) { ok = true; break; }
+            if (!ok)
+            {
+                AutoEmit("[auto] live switch rejected by tor — falling back to restart");
+                return false;
+            }
+            dnsUpstreamActive = w.Dns;
+            Thread.Sleep(700);   // let the new control listener come up
+            int pct; string tag, summ;
+            if (!BootstrapPhaseFor(9051, AutoRacerLog(w), ControlCookie,
+                                   out pct, out tag, out summ))
+            {
+                AutoEmit("[auto] live switch: control 9051 not answering — falling back");
+                return false;
+            }
+            AutoEmit("[auto] live switch OK — winner stays up on 9050/8118 (no restart)");
+            return true;
+        }
+
         private static void AutoEmit(string line)
         {
             Action<string> s = autoLineSink;
@@ -3734,8 +3781,39 @@ namespace StartTor
                     r.Alive = false;
                 }
             }
-            // The winner is stopped too: its cache moves to the primary data
-            // directory and the standard single-core start takes over.
+
+            // Preferred: keep the winner ALIVE and move its SOCKS/HTTP/Control
+            // ports to the primary ones via SETCONF. Its conflux sets stay up,
+            // so the session continues at full speed with zero downtime.
+            // DNSPort is intentionally never touched (closing the DNS listener
+            // has crashed tor on some Windows builds) — the DNS stub simply
+            // forwards to the winner's existing DNS port instead.
+            autoLiveProc = null;
+            if (AutoSwitchWinnerToPrimaryPorts(winner))
+            {
+                autoLiveProc = winner.Proc;
+                try { WriteTorrc(winner.Mode, strategy); } catch { }
+                // warm the primary data dir for future restarts (best effort —
+                // some files are open in the live winner and are skipped)
+                Thread copyWarm = new Thread(delegate()
+                {
+                    try
+                    {
+                        string dst = Path.Combine(DataDir, "data");
+                        CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
+                        try { File.Delete(Path.Combine(dst, "lock")); } catch { }
+                    }
+                    catch { }
+                });
+                copyWarm.IsBackground = true;
+                copyWarm.Start();
+                winnerMode = winner.Mode;
+                autoLineSink = null;
+                return true;
+            }
+
+            // Fallback: stop everyone, move the winner's cache to the primary
+            // data directory and let the standard single-core start take over.
             try { if (winner.Proc != null && !winner.Proc.HasExited) { winner.Proc.Kill(); winner.Proc.WaitForExit(3000); } }
             catch { }
             Thread.Sleep(800);
@@ -3783,7 +3861,7 @@ namespace StartTor
                 return 0;
             }
 
-            string startErr;
+            string startErr = null;
             bool aborted = false;
             bool tunWasOn = false;
             bool showBanners = true;
@@ -3792,6 +3870,7 @@ namespace StartTor
                 watchdogStop = true;   // no probing while bootstrapping
                 if (raceStart)
                 {
+                    torProc = null;
                     int winnerMode;
                     string raceErr;
                     if (!AutoRace(strategy, out winnerMode, out raceErr))
@@ -3803,8 +3882,11 @@ namespace StartTor
                     }
                     mode = winnerMode;
                     AutoEmit("[auto] winner mode: " + ModeNames[mode]);
+                    if (autoLiveProc != null)
+                        torProc = autoLiveProc;   // winner kept alive — skip the restart
                 }
-                torProc = StartTorAndWait(mode, strategy, true, null, out startErr, out aborted);
+                if (torProc == null)
+                    torProc = StartTorAndWait(mode, strategy, true, null, out startErr, out aborted);
                 if (torProc == null)
                 {
                     if (aborted)
