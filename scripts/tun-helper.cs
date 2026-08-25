@@ -724,9 +724,37 @@ namespace TunHelper
             foreach (string ip in relays)
                 AddRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf, 1);
 
+            // IPv6 kill switch: with an IPv4-only tunnel, browsers would hang
+            // on IPv6-capable sites (chat apps that use plain TCP keep working,
+            // which looks like "browser broken, everything else fine").
+            SetIp6Binding(false);
+
             WriteState(BuildState(tun.Id, tunIf, physIf, physGw, relays));
             WriteResult("on: " + relays.Count + " relay routes, default route now via " + TunName);
             return true;
+        }
+
+        // Toggles the ms_tcpip6 binding on every adapter. The helper runs
+        // elevated, so this is the standard IPv6 kill switch used while the
+        // IPv4-only tunnel is up; re-enabled on teardown.
+        private static void SetIp6Binding(bool enable)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "powershell.exe",
+                    Arguments = "-NoProfile -Command " +
+                        (enable ? "Enable" : "Disable") +
+                        "-NetAdapterBinding -ComponentID ms_tcpip6 -Name *",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                Process p = Process.Start(psi);
+                if (p != null) p.WaitForExit(20000);
+            }
+            catch { }
         }
 
         private static string BuildState(int pid, int tunIf, int physIf, string physGw, HashSet<string> relays)
@@ -768,6 +796,7 @@ namespace TunHelper
 
             KillStaleTun2Socks();
             WintunDeleteAdapterByName(TunName);
+            SetIp6Binding(true);   // restore IPv6 bindings
             WriteState("status=off");
             try { if (File.Exists(StopFile)) File.Delete(StopFile); } catch { }
         }

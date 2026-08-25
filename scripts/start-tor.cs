@@ -422,6 +422,7 @@ namespace StartTor
             {
                 if (!IsAdmin()) Console.WriteLine("  TUN mode needs Administrator - accept the UAC prompt.");
                 Console.WriteLine("  Turning TUN ON (all traffic via Tor)...");
+                DnsCacheStart();   // port 53 live before Windows points DNS at it
                 if (!SpawnElevated("on", false))
                 {
                     Console.WriteLine("  TUN enable cancelled.");
@@ -2717,6 +2718,8 @@ namespace StartTor
         private static volatile bool dnsCacheStop;
         private static Thread dnsCacheThread;
         private static UdpClient dnsListener;
+        private static Thread dnsTcpThread;
+        private static TcpListener dnsTcpListener;
         private static readonly object dnsLock = new object();
 
         private sealed class DnsEntry { public byte[] Reply; public DateTime Expires; }
@@ -2893,24 +2896,110 @@ namespace StartTor
                 dnsCacheStop = false;
                 dnsCacheThread = new Thread(DnsCacheLoop) { IsBackground = true };
                 dnsCacheThread.Start();
+                dnsTcpThread = new Thread(DnsTcpLoop) { IsBackground = true };
+                dnsTcpThread.Start();
+            }
+        }
+
+        // Some resolvers fall back to DNS-over-TCP when a UDP reply is
+        // truncated; without a TCP listener those domains would hang in the
+        // browser while lighter apps (chat) keep working.
+        private static void DnsTcpLoop()
+        {
+            try
+            {
+                dnsTcpListener = new TcpListener(IPAddress.Loopback, DnsCachePort);
+                dnsTcpListener.Start();
+            }
+            catch (Exception ex)
+            {
+                Log("dns-tcp: bind failed (" + ex.Message + ")");
+                return;
+            }
+            while (!dnsCacheStop)
+            {
+                TcpClient c;
+                try { c = dnsTcpListener.AcceptTcpClient(); }
+                catch { break; }
+                ThreadPool.QueueUserWorkItem(delegate { HandleDnsTcp(c); });
+            }
+            try { dnsTcpListener.Stop(); } catch { }
+        }
+
+        private static bool ReadExactNet(NetworkStream s, byte[] buf, int n)
+        {
+            int got = 0;
+            while (got < n)
+            {
+                int r = s.Read(buf, got, n - got);
+                if (r <= 0) return false;
+                got += r;
+            }
+            return true;
+        }
+
+        // One DNS message per TCP connection (what every resolver does).
+        private static void HandleDnsTcp(TcpClient client)
+        {
+            try
+            {
+                client.ReceiveTimeout = 5000;
+                client.SendTimeout = 5000;
+                using (TcpClient up = new TcpClient())
+                {
+                    up.Connect(IPAddress.Loopback, DnsUpstreamPort);
+                    up.ReceiveTimeout = 5000;
+                    up.SendTimeout = 5000;
+                    NetworkStream cs = client.GetStream();
+                    NetworkStream us = up.GetStream();
+                    byte[] lenBuf = new byte[2];
+                    if (!ReadExactNet(cs, lenBuf, 2)) return;
+                    int len = (lenBuf[0] << 8) | lenBuf[1];
+                    if (len <= 0 || len > 4096) return;
+                    byte[] query = new byte[len];
+                    if (!ReadExactNet(cs, query, len)) return;
+                    us.Write(lenBuf, 0, 2);
+                    us.Write(query, 0, len);
+                    byte[] rlen = new byte[2];
+                    if (!ReadExactNet(us, rlen, 2)) return;
+                    int rn = (rlen[0] << 8) | rlen[1];
+                    if (rn <= 0 || rn > 8192) return;
+                    byte[] resp = new byte[rn];
+                    if (!ReadExactNet(us, resp, rn)) return;
+                    cs.Write(rlen, 0, 2);
+                    cs.Write(resp, 0, rn);
+                }
+            }
+            catch { }
+            finally
+            {
+                try { client.Close(); } catch { }
             }
         }
 
         private static void DnsCacheStop()
         {
-            Thread t;
+            Thread t, tt;
             lock (dnsLock)
             {
                 t = dnsCacheThread;
+                tt = dnsTcpThread;
                 dnsCacheThread = null;
+                dnsTcpThread = null;
                 dnsCacheStop = true;
                 if (dnsListener != null)
                 {
                     try { dnsListener.Close(); } catch { }
                     dnsListener = null;
                 }
+                if (dnsTcpListener != null)
+                {
+                    try { dnsTcpListener.Stop(); } catch { }
+                    dnsTcpListener = null;
+                }
             }
             if (t != null) { try { t.Join(2000); } catch { } }
+            if (tt != null) { try { tt.Join(2000); } catch { } }
         }
 
         // Picks the first speed endpoint reachable through the proxy.

@@ -643,8 +643,9 @@ namespace StartTor
                 DrawChevron(g, rcModePrev, false, hoverId == 10);
                 DrawChevron(g, rcModeNext, true, hoverId == 11);
 
-                PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20);
-                PaintTogglePill(g, rcTun, "TUN", TunActive(), hoverId == 21);
+                PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20, false);
+                PaintTogglePill(g, rcTun, tunPending ? "TUN…" : "TUN",
+                    TunActive(), hoverId == 21, tunPending);
 
                 bool hovSet = hoverId == 30;
                 Theme.PillGradient(g, rcSettings,
@@ -684,38 +685,39 @@ namespace StartTor
 
             private int cx() { return rcPower.Left + rcPower.Width / 2; }
 
-            private void PaintTogglePill(Graphics g, Rectangle r, string name, bool on, bool hovered)
+            private void PaintTogglePill(Graphics g, Rectangle r, string name, bool on,
+                                         bool hovered, bool pending)
             {
                 Theme.PillGradient(g, r,
                     hovered ? Theme.SurfaceLight : Theme.SurfaceAlt,
-                    Theme.Surface, on ? Theme.Accent : Theme.Border);
+                    Theme.Surface, pending ? Theme.Amber : (on ? Theme.Accent : Theme.Border));
                 TextRenderer.DrawText(g, name, Theme.H2(),
                     new Rectangle(r.Left + 16, r.Y, r.Width - 40, r.Height),
-                    on ? Theme.Text : Theme.Muted,
+                    pending ? Theme.Amber : (on ? Theme.Text : Theme.Muted),
                     TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
 
                 int swW = 44, swH = 22, swX = r.Right - 56, swY = r.Y + (r.Height - swH) / 2;
                 Rectangle sw = new Rectangle(swX, swY, swW, swH);
 
-                Color bg = on ? Theme.Green : Theme.SurfaceLight;
+                Color bg = pending ? Theme.Amber : (on ? Theme.Green : Theme.SurfaceLight);
                 using (GraphicsPath bgPath = Theme.RoundRect(sw, swH / 2))
                     Theme.FillGradientPath(g, bgPath, bg, Color.FromArgb(
                         Math.Max(0, bg.A - 30), bg.R, bg.G, bg.B));
 
                 g.SmoothingMode = SmoothingMode.AntiAlias;
-                if (on)
+                if (on && !pending)
                     Theme.DrawGlow(g, new Rectangle(swX - 2, swY - 2, swW + 4, swH + 4),
                         Theme.Green, 4, 20);
 
                 int knobD = 16;
-                int knobX = on ? swX + swW - knobD - 3 : swX + 3;
+                int knobX = (on && !pending) ? swX + swW - knobD - 3 : swX + 3;
                 int knobY = swY + (swH - knobD) / 2;
                 Rectangle knob = new Rectangle(knobX, knobY, knobD, knobD);
 
-                using (SolidBrush b = new SolidBrush(on ? Color.White : Theme.BorderLight))
+                using (SolidBrush b = new SolidBrush(on || pending ? Color.White : Theme.BorderLight))
                     g.FillEllipse(b, knob);
 
-                if (!on)
+                if (!on && !pending)
                 {
                     using (Pen pen = new Pen(Theme.Border, 1f))
                         g.DrawEllipse(pen, knob);
@@ -966,7 +968,7 @@ namespace StartTor
                 }
                 switch (h)
                 {
-                    case 1: CloseApp(); break;
+                    case 1: HandleCloseRequest(); break;
                     case 2: MinimizeToTray(); break;
                     case 5: OnConnectButton(); break;
                     case 10: CycleMode(-1); break;
@@ -1157,20 +1159,26 @@ namespace StartTor
                 Invalidate();
             }
 
+            private volatile bool tunPending;
+
             private void ApplyTunToggle(bool want)
             {
-                if (sessionBusy) return;
+                if (sessionBusy || tunPending) return;
+                tunPending = true;
+                Invalidate();   // instant feedback: TUN… while the helper works
                 RunBg(delegate
                 {
                     bool active = TunActive();
                     if (want && !active) EnableTunAndWait();
                     else if (!want && active) DisableTunAndWait();
+                    tunPending = false;
                     UiInvokeDelegate(delegate { Invalidate(); });
                 });
             }
 
             private void EnableTunAndWait()
             {
+                DnsCacheStart();   // port 53 live before Windows points DNS at it
                 try
                 {
                     Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir, EnvironmentVariableTarget.Process);
@@ -1494,6 +1502,8 @@ namespace StartTor
 
             private void CloseApp()
             {
+                forceClosing = true;   // FormClosing must not re-prompt
+                autoAbort = true;
                 if (state != RunState.Idle && state != RunState.Stopping)
                 {
                     watchdogStop = true;
@@ -1507,28 +1517,39 @@ namespace StartTor
                 Close();
             }
 
+            private bool forceClosing;
+
+            // The ✕ button and Alt+F4 both land here. While tor is running the
+            // user gets the two-choice dialog; only an explicit "stop and exit"
+            // (or idle state) actually tears down and closes.
+            private void HandleCloseRequest()
+            {
+                if (state == RunState.Idle || state == RunState.Stopping)
+                {
+                    CloseApp();
+                    return;
+                }
+                bool tray = false, stopExit = false;
+                using (ExitDialog d = new ExitDialog())
+                {
+                    d.StartPosition = FormStartPosition.CenterParent;
+                    d.ShowDialog(this);
+                    tray = d.ChoiceTray;
+                    stopExit = d.ChoiceStop;
+                }
+                if (stopExit) CloseApp();
+                else if (tray) MinimizeToTray();
+            }
+
             private void OnFormClosing(object s, FormClosingEventArgs e)
             {
-                if (e.CloseReason == CloseReason.UserClosing &&
-                    state != RunState.Idle && state != RunState.Stopping)
-                {
-                    e.Cancel = true;
-                    bool tray;
-                    bool stopExit;
-                    using (ExitDialog d = new ExitDialog())
-                    {
-                        d.StartPosition = FormStartPosition.CenterParent;
-                        d.ShowDialog(this);
-                        tray = d.ChoiceTray;
-                        stopExit = d.ChoiceStop;
-                    }
-                    if (stopExit) CloseApp();
-                    else if (tray) MinimizeToTray();
-                }
-                else
+                if (forceClosing || e.CloseReason != CloseReason.UserClosing)
                 {
                     if (trayIcon != null) trayIcon.Visible = false;
+                    return;
                 }
+                e.Cancel = true;
+                HandleCloseRequest();
             }
 
             // Small owner-drawn exit prompt: exactly two choices, matching the

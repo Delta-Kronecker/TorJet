@@ -110,7 +110,8 @@ How it works:
 Notes:
 
 - TUN mode and the P-proxy are independent — you can use either, both, or neither.
-- While TUN is on, only IPv4 is tunnelled (IPv6 is untouched).
+- While TUN is on, only IPv4 is tunnelled; IPv6 is blocked system-wide for
+  the duration (kill switch) and restored on teardown.
 
 You can also launch with fixed settings:
 
