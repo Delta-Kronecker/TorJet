@@ -322,6 +322,12 @@ namespace StartTor
                 Font = Theme.Body();
                 DoubleBuffered = true;
                 KeyPreview = true;
+                try
+                {
+                    Icon = System.Drawing.Icon.ExtractAssociatedIcon(
+                        System.Reflection.Assembly.GetExecutingAssembly().Location);
+                }
+                catch { }
 
                 string forced = Environment.GetEnvironmentVariable("TORJET_UI_PAGE");
                 if (forced == "settings") page = Page.Settings;

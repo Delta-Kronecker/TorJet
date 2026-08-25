@@ -129,6 +129,7 @@ namespace StartTor
                 "CircuitsAvailableTimeout 1440",
                 "CircuitStreamTimeout 15",
                 "CircuitBuildTimeout 20",
+                "NumEntryGuards 10",
                 "NumPrimaryGuards 10",
                 "Schedulers KISTLite",
                 "KISTSchedRunInterval 5 msec",
