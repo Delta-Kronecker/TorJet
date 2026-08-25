@@ -47,10 +47,12 @@ Set-Content -Path $versionSrc -Value $versionCode -Encoding UTF8
 $icoPath = Join-Path $PSScriptRoot "TorJet.ico"
 $iconArg = ""
 if (Test-Path $icoPath) { $iconArg = "-win32icon:$icoPath" }
+$resArg = ""
+if (Test-Path $icoPath) { $resArg = "-resource:$icoPath,TorJet.ico" }
 try {
     & $csc -nologo -optimize+ -target:winexe `
         -r:System.Windows.Forms.dll -r:System.Drawing.dll `
-        $iconArg `
+        $iconArg $resArg `
         -out:$OutFile $src $srcUi $versionSrc
     if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
     Write-Host "[ok] built $OutFile (version $Version)"

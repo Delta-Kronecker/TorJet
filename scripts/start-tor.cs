@@ -63,20 +63,20 @@ namespace StartTor
         // defaults are DefaultConfluxSets sets / 2 legs / DefaultConfluxSets linked.
         private const int DefaultConfluxSets = 32;
         private static int confluxSets = ReadConfluxSetting(ConfluxSetsFile, DefaultConfluxSets);
-        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 2);
+        private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 1);
         private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, DefaultConfluxSets);
         private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
-        // Benchmarked 2026-08 (docs/benchmarks/2026-08-webtunnel.csv): turning
-        // the RTT filters on BY DEFAULT cost 30-50% sustained download, so the
-        // shipped defaults keep both filters OFF; the lowlatency preset turns
-        // them on explicitly when picked.
-        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
-        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 0);
+        // Deliberate product default (v1.5.5+): ping-first tuning — RTT filters
+        // ship ON (400 ms skip / best 20%). The 2026-08 bench showed this costs
+        // sustained download; throughput-focused users can pick the ultimate
+        // preset, which switches the filters off again.
+        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 400);
+        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 20);
         private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate", "lowlatency" };
         // The shipped default when no data\strategy.txt exists yet. Looked up by
         // NAME (not "last array element") so appending presets never shifts it.
-        private const string DefaultStrategyName = "ultimate";
+        private const string DefaultStrategyName = "lowlatency";
         private static int DefaultStrategy()
         {
             for (int i = 0; i < StrategyNames.Length; i++)
@@ -89,7 +89,7 @@ namespace StartTor
             "reuse circuits 24 h, 24-min prebuild window - fewer handshakes",
             "15 primary guards, KISTLite+Vanilla 5 ms scheduler, 24 h reuse, 2 ms token bucket",
             "20 primary guards, greedy Vanilla scheduler, 128 pending circuits, 1 ms token bucket",
-            "lowest ping: KISTLite pacing + strict RTT set filters (fastest-set selection)"
+            "lowest ping: KISTLite pacing + RTT set filters (skip 400 ms, best 20%)"
         };
         private static readonly string[][] StrategyTorrc =
         {
@@ -600,9 +600,9 @@ namespace StartTor
         {
             if (strategy < 0 || strategy >= StrategyNames.Length) return;
             bool low = StrategyNames[strategy] == "lowlatency";
-            int sel = low ? 3 : 1;
-            int rttMax = low ? 200 : 0;
-            int rttPct = low ? 10 : 0;
+            int sel = low ? 1 : 1;
+            int rttMax = low ? 400 : 0;
+            int rttPct = low ? 20 : 0;
             confluxSelection = sel;
             WriteConfluxSetting(ConfluxSelectionFile, sel);
             confluxRttMax = rttMax;
@@ -610,7 +610,7 @@ namespace StartTor
             confluxRttPct = rttPct;
             WriteConfluxSetting(ConfluxRttPctFile, rttPct);
             Console.WriteLine(low
-                ? "  [lowlatency] set select = fastest, skip-slow >= 200 ms, top-10% of sets."
+                ? "  [lowlatency] set select = round-robin, skip-slow >= 400 ms, top-20% of sets."
                 : "  [throughput] set select = round-robin, RTT filters off.");
         }
 

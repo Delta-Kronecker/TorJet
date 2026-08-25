@@ -64,6 +64,29 @@ namespace StartTor
             }
         }
 
+        // The exact TorJet.ico travels INSIDE the exe (embedded resource), so
+        // the tray, taskbar and Alt-Tab all show the real icon without any
+        // external file. Falls back to the exe icon, then a drawn placeholder.
+        internal static Icon LoadAppIcon()
+        {
+            try
+            {
+                System.Reflection.Assembly a = System.Reflection.Assembly.GetExecutingAssembly();
+                using (Stream s = a.GetManifestResourceStream("TorJet.ico"))
+                {
+                    if (s != null) return new Icon(s);
+                }
+            }
+            catch { }
+            try
+            {
+                System.Reflection.Assembly a = System.Reflection.Assembly.GetExecutingAssembly();
+                return Icon.ExtractAssociatedIcon(a.Location);
+            }
+            catch { }
+            return null;
+        }
+
         private static void RunGui()
         {
             try
@@ -347,11 +370,11 @@ namespace StartTor
 
                 trayIcon = new System.Windows.Forms.NotifyIcon();
                 trayIcon.Text = "TorJet";
-                trayIcon.Icon = CreateTrayIcon();
+                trayIcon.Icon = LoadAppIcon() ?? CreateTrayIcon();
                 trayIcon.ContextMenuStrip = trayMenu;
                 trayIcon.DoubleClick += delegate { ShowFromTray(); };
 
-                Icon appIcon = CreateTrayIcon();
+                Icon appIcon = LoadAppIcon() ?? CreateTrayIcon();
                 Icon = appIcon;
 
                 uiTimer.Interval = 250;
@@ -1490,27 +1513,121 @@ namespace StartTor
                     state != RunState.Idle && state != RunState.Stopping)
                 {
                     e.Cancel = true;
-                    DialogResult dr = MessageBox.Show(
-                        "Tor is connected.\n\nDo you want to stop and exit,\nor minimize to tray?",
-                        "TorJet",
-                        MessageBoxButtons.YesNoCancel,
-                        MessageBoxIcon.Question);
-                    if (dr == DialogResult.Yes)
+                    bool tray;
+                    bool stopExit;
+                    using (ExitDialog d = new ExitDialog())
                     {
-                        CloseApp();
+                        d.StartPosition = FormStartPosition.CenterParent;
+                        d.ShowDialog(this);
+                        tray = d.ChoiceTray;
+                        stopExit = d.ChoiceStop;
                     }
-                    else if (dr == DialogResult.No)
-                    {
-                        MinimizeToTray();
-                    }
-                    else
-                    {
-                        e.Cancel = true;
-                    }
+                    if (stopExit) CloseApp();
+                    else if (tray) MinimizeToTray();
                 }
                 else
                 {
                     if (trayIcon != null) trayIcon.Visible = false;
+                }
+            }
+
+            // Small owner-drawn exit prompt: exactly two choices, matching the
+            // main window's style. Esc / the ✕ dismiss it (keeps running).
+            internal sealed class ExitDialog : Form
+            {
+                public bool ChoiceTray;
+                public bool ChoiceStop;
+                private Rectangle rcClose, rcTray, rcStop;
+                private int hover = -1;
+
+                public ExitDialog()
+                {
+                    FormBorderStyle = FormBorderStyle.None;
+                    StartPosition = FormStartPosition.CenterParent;
+                    ClientSize = new Size(320, 176);
+                    BackColor = Theme.Bg;
+                    ForeColor = Theme.Text;
+                    Font = Theme.Body();
+                    DoubleBuffered = true;
+                    MaximizeBox = false;
+                    MinimizeBox = false;
+                    ShowInTaskbar = false;
+                    KeyPreview = true;
+
+                    Resize += delegate { Layout(); };
+                    Paint += OnPaint;
+                    MouseMove += delegate(object s, MouseEventArgs e)
+                    {
+                        int h = Hit(e.Location);
+                        if (h != hover) { hover = h; Invalidate(); }
+                        Cursor = h >= 1 ? Cursors.Hand : Cursors.Default;
+                    };
+                    MouseDown += delegate(object s, MouseEventArgs e)
+                    {
+                        int h = Hit(e.Location);
+                        if (h == 1) { ChoiceTray = true; Close(); }
+                        else if (h == 2) { ChoiceStop = true; Close(); }
+                        else if (h == 3) Close();
+                    };
+                    KeyDown += delegate(object s, KeyEventArgs e)
+                    {
+                        if (e.KeyCode == Keys.Escape) Close();
+                        if (e.KeyCode == Keys.Enter) { ChoiceTray = true; Close(); }
+                    };
+                    Layout();
+                }
+
+                private void Layout()
+                {
+                    int w = ClientSize.Width;
+                    rcClose = new Rectangle(w - 36, 0, 36, 32);
+                    rcTray = new Rectangle(24, 66, w - 48, 40);
+                    rcStop = new Rectangle(24, 116, w - 48, 40);
+                    Invalidate();
+                }
+
+                private int Hit(Point p)
+                {
+                    if (rcTray.Contains(p)) return 1;
+                    if (rcStop.Contains(p)) return 2;
+                    if (rcClose.Contains(p)) return 3;
+                    return -1;
+                }
+
+                private void OnPaint(object s, PaintEventArgs e)
+                {
+                    Graphics g = e.Graphics;
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.Clear(Theme.Bg);
+                    using (SolidBrush b = new SolidBrush(Theme.Surface))
+                        g.FillRectangle(b, 0, 0, ClientSize.Width, 32);
+                    using (Pen pen = new Pen(Theme.Border))
+                        g.DrawLine(pen, 0, 32, ClientSize.Width, 32);
+                    TextRenderer.DrawText(g, "TorJet", Theme.H2(),
+                        new Rectangle(16, 0, 160, 32), Theme.Text,
+                        TextFormatFlags.Left | TextFormatFlags.VerticalCenter);
+                    bool hovX = hover == 3;
+                    using (Pen p = new Pen(hovX ? Theme.Text : Theme.Muted, 1.6f))
+                    {
+                        g.DrawLine(p, rcClose.Left + 13, 12, rcClose.Right - 13, 20);
+                        g.DrawLine(p, rcClose.Left + 13, 20, rcClose.Right - 13, 12);
+                    }
+
+                    TextRenderer.DrawText(g, "Tor is running", Theme.Body(),
+                        new Rectangle(0, 38, ClientSize.Width, 22), Theme.Muted,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+
+                    PaintPill(g, rcTray, "MINIMIZE TO TRAY", hover == 1, false);
+                    PaintPill(g, rcStop, "STOP AND EXIT", hover == 2, true);
+                }
+
+                private void PaintPill(Graphics g, Rectangle r, string text, bool hovered, bool danger)
+                {
+                    Color border = danger ? Theme.Red : Theme.Border;
+                    Color col = danger ? Theme.Red : Theme.Text;
+                    Theme.Pill(g, r, hovered ? Theme.SurfaceAlt : Theme.Surface, border);
+                    TextRenderer.DrawText(g, text, Theme.H2(), r, col,
+                        TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
                 }
             }
 

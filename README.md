@@ -35,8 +35,8 @@ data\
       2. **balanced** — long-lived reused circuits (fewer handshakes)
       3. **aggressive** — more guards + faster scheduler + deeper reuse
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
-      5. **lowlatency** — lowest ping: KISTLite pacing, fastest-set selection
-         and strict RTT filters (applied automatically with this preset)
+      5. **lowlatency** — lowest ping: KISTLite pacing and RTT set filters
+         (skip ≥400 ms, best 20%) — **the shipped default strategy**
     - **Conflux topology** (from the Settings submenu) — how many conflux
       circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
@@ -48,10 +48,10 @@ data\
       - **Conflux linked (cap)** (`ConfluxNumLinkedSets`, 0=consensus
         default) — ceiling on *linked* sets; it only binds when set below
         *Conflux sets* (e.g. cap 4 with 5 sets keeps at most 4 linked).
-      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, 0=off) —
+      - **Skip slow sets (RTT)** (`ConfluxSetRttMax`, default 400 ms, 0=off) —
         when a new stream is attached, sets whose best-leg RTT is at/above this
         many milliseconds are skipped (a slow-set failover).
-      - **Best % of sets (RTT)** (`ConfluxSetRttPct`, 0=off) — when a new
+      - **Best % of sets (RTT)** (`ConfluxSetRttPct`, default 20%, 0=off) — when a new
         stream is attached, only the best (lowest-RTT) this-many percent of
         sets are used; e.g. 25 keeps the top quarter. Applied after the RTT
         skip above, and always keeps at least one set.
