@@ -403,6 +403,8 @@ namespace TunHelper
             if (!TorUp(2000)) { WriteResult("error: tor SOCKS (127.0.0.1:9050) is not up"); return 1; }
             if (GetStateValue(ReadState(), "status") == "on") { WriteResult("error: TUN is already on"); return 1; }
 
+            WriteResult("enabling... (cleaning up)");
+
             // Kill orphaned xray.exe from earlier attempts first: a stale
             // holder wedges wintun ("Failed to register rings") and every
             // later attempt times out. The only xray.exe on the system is
@@ -426,6 +428,7 @@ namespace TunHelper
             // physical gateway for the relay /32 routes (TUN is not up yet,
             // so the best route to 0/0 IS the physical default)
             MibIpForwardRow phys;
+            WriteResult("enabling... (routing)");
             if (GetBestRoute(0, 0, out phys) != NO_ERROR)
             {
                 WriteResult("error: no IPv4 default route");
@@ -520,6 +523,12 @@ namespace TunHelper
                     return 1;
                 }
                 try { return RunKeeper(); }
+                catch (Exception ex)
+                {
+                    try { WriteResult("error: " + ex.GetType().Name + ": " + ex.Message); }
+                    catch { }
+                    return 1;
+                }
                 finally { try { TunMutex.ReleaseMutex(); } catch { } }
             }
             if (arg == "off")
