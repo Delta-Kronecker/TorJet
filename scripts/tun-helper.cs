@@ -164,10 +164,29 @@ namespace TunHelper
             public uint Origin;
         }
 
-        [DllImport("netioapi.dll")]
-        private static extern uint SetIpForwardEntry2(ref MibIpForwardRow2 row);
-        [DllImport("netioapi.dll")]
-        private static extern uint DeleteIpForwardEntry2(ref MibIpForwardRow2 row);
+        private delegate uint SetIpForwardEntry2Fn(ref MibIpForwardRow2 row);
+        private delegate uint DeleteIpForwardEntry2Fn(ref MibIpForwardRow2 row);
+        private static SetIpForwardEntry2Fn _SetIpForwardEntry2;
+        private static DeleteIpForwardEntry2Fn _DeleteIpForwardEntry2;
+        private static bool _netioapiLoaded;
+
+        private static void LoadNetioapi()
+        {
+            if (_netioapiLoaded) return;
+            _netioapiLoaded = true;
+            try
+            {
+                IntPtr h = LoadLibrary("iphlpapi.dll");
+                if (h == IntPtr.Zero) return;
+                IntPtr p1 = GetProcAddress(h, "SetIpForwardEntry2");
+                IntPtr p2 = GetProcAddress(h, "DeleteIpForwardEntry2");
+                if (p1 != IntPtr.Zero)
+                    _SetIpForwardEntry2 = (SetIpForwardEntry2Fn)Marshal.GetDelegateForFunctionPointer(p1, typeof(SetIpForwardEntry2Fn));
+                if (p2 != IntPtr.Zero)
+                    _DeleteIpForwardEntry2 = (DeleteIpForwardEntry2Fn)Marshal.GetDelegateForFunctionPointer(p2, typeof(DeleteIpForwardEntry2Fn));
+            }
+            catch { }
+        }
 
         [StructLayout(LayoutKind.Sequential)]
         private struct MibIpForwardRow
@@ -209,6 +228,7 @@ namespace TunHelper
 
         private static bool AddRelayRoute(string ip, int ifIndex, uint nextHop)
         {
+            if (_SetIpForwardEntry2 == null) return false;
             MibIpForwardRow2 r = new MibIpForwardRow2();
             r.InterfaceIndex = (uint)ifIndex;
             r.DestinationPrefix.Prefix = SockFromUInt(IpToUInt(ip));
@@ -218,17 +238,18 @@ namespace TunHelper
             r.ValidLifetime = 0xFFFFFFFF;
             r.PreferredLifetime = 0xFFFFFFFF;
             r.Protocol = 3; // NETMGMT
-            return SetIpForwardEntry2(ref r) == NO_ERROR;
+            return _SetIpForwardEntry2(ref r) == NO_ERROR;
         }
 
         private static bool DeleteRelayRoute(string ip, int ifIndex, uint nextHop)
         {
+            if (_DeleteIpForwardEntry2 == null) return false;
             MibIpForwardRow2 r = new MibIpForwardRow2();
             r.InterfaceIndex = (uint)ifIndex;
             r.DestinationPrefix.Prefix = SockFromUInt(IpToUInt(ip));
             r.DestinationPrefix.PrefixLength = 32;
             r.NextHop = SockFromUInt(nextHop);
-            return DeleteIpForwardEntry2(ref r) == NO_ERROR;
+            return _DeleteIpForwardEntry2(ref r) == NO_ERROR;
         }
 
         private static bool IsPublicIpv4(string s)
@@ -431,6 +452,17 @@ namespace TunHelper
             KillPid(GetStateValue(ReadState(), "pid"));
             WintunDeleteAdapterByName(TunName);
             SetIp6Binding(false);
+
+            // load netioapi.dll for relay-route helpers; on older or
+            // stripped Windows builds it may be missing — TUN cannot
+            // work without relay routes (tor would deadlock).
+            LoadNetioapi();
+            if (_SetIpForwardEntry2 == null)
+            {
+                SetIp6Binding(true);
+                WriteResult("error: SetIpForwardEntry2 not found in iphlpapi.dll — cannot create relay routes");
+                return 1;
+            }
 
             // physical gateway for the relay /32 routes (TUN is not up yet,
             // so the best route to 0/0 IS the physical default)
