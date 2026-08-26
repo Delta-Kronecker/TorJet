@@ -403,6 +403,21 @@ namespace TunHelper
             if (!TorUp(2000)) { WriteResult("error: tor SOCKS (127.0.0.1:9050) is not up"); return 1; }
             if (GetStateValue(ReadState(), "status") == "on") { WriteResult("error: TUN is already on"); return 1; }
 
+            // Kill orphaned xray.exe from earlier attempts first: a stale
+            // holder wedges wintun ("Failed to register rings") and every
+            // later attempt times out. The only xray.exe on the system is
+            // ours, so the path match is safe.
+            foreach (Process p in Process.GetProcessesByName("xray"))
+            {
+                try
+                {
+                    if (p.MainModule.FileName.Equals(XrayExe, StringComparison.OrdinalIgnoreCase))
+                        p.Kill();
+                }
+                catch { }
+            }
+            Thread.Sleep(300);
+
             // clean leftovers from a previous (crashed) run
             KillPid(GetStateValue(ReadState(), "pid"));
             WintunDeleteAdapterByName(TunName);
