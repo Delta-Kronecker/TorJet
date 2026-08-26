@@ -38,6 +38,7 @@ jobs:
         env:
           # SHA256 pin for the binary download below (computed once from
           # the vendor file; CI fails loudly if it ever changes).
+          XRAY_ZIP_SHA256: d004c39288ce9ada487c6f398c7c545f7d749e44bdfdd59dbc9f865afba4e1ad
           WINTUN_ZIP_SHA256: 07c256185d6ee3652e09fa55c0b673e2624b565e02c4b9091c79ca7d2f24ef51
         run: |
           set -e
@@ -58,6 +59,12 @@ jobs:
           GOOS=windows GOARCH=amd64 \
             go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@v0.0.6
           cp "$GOPATH_BIN/client.exe" out/webtunnel.exe
+
+          echo "=== xray core (TUN tunnel + engine) ==="
+          curl -fsSL -o xray.zip https://github.com/XTLS/Xray-core/releases/download/v26.3.27/Xray-windows-64.zip
+          echo "$XRAY_ZIP_SHA256  xray.zip" | sha256sum -c -
+          unzip -o xray.zip xray.exe
+          cp xray.exe out/xray.exe
 
           echo "=== wintun driver (Xray TUN) ==="
           curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
