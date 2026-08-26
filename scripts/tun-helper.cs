@@ -58,20 +58,27 @@ namespace TunHelper
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr GetProcAddress(IntPtr module, string name);
         [UnmanagedFunctionPointer(CallingConvention.StdCall)]
-        private delegate uint WintunDeleteAdapterFn([MarshalAs(UnmanagedType.LPWStr)] string name);
+        private delegate int WintunDeleteAdapterFn(
+            [MarshalAs(UnmanagedType.LPWStr)] string name,
+            IntPtr logger);
 
         private static bool WintunDeleteAdapterByName(string name)
         {
-            try
+            for (int attempt = 0; attempt < 3; attempt++)
             {
-                IntPtr h = LoadLibrary(Path.Combine(DataDir, "wintun.dll"));
-                if (h == IntPtr.Zero) return false;
-                IntPtr fn = GetProcAddress(h, "WintunDeleteAdapter");
-                if (fn == IntPtr.Zero) return false;
-                var del = (WintunDeleteAdapterFn)Marshal.GetDelegateForFunctionPointer(fn, typeof(WintunDeleteAdapterFn));
-                return del(name) == 0;
+                try
+                {
+                    IntPtr h = LoadLibrary(Path.Combine(DataDir, "wintun.dll"));
+                    if (h == IntPtr.Zero) return false;
+                    IntPtr fn = GetProcAddress(h, "WintunDeleteAdapter");
+                    if (fn == IntPtr.Zero) return false;
+                    var del = (WintunDeleteAdapterFn)Marshal.GetDelegateForFunctionPointer(fn, typeof(WintunDeleteAdapterFn));
+                    if (del(name, IntPtr.Zero) != 0) return true;
+                }
+                catch { }
+                Thread.Sleep(500);
             }
-            catch { return false; }
+            return false;
         }
 
         private static string ReadState()
