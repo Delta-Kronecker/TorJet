@@ -129,12 +129,10 @@ namespace TunHelper
         {
             public ushort si_family;
             public ushort si_port;
-            public uint si_flowinfo;
-            public uint si_addr0;
-            public uint si_addr1;
-            public uint si_addr2;
-            public uint si_addr3;
-            public uint si_scope_id;
+            public uint si_addr;          // IN_ADDR at offset 4
+            private ulong _pad1;          // offset 8
+            private ulong _pad2;          // offset 16
+            private uint _pad3;           // offset 24
         }
 
         [StructLayout(LayoutKind.Sequential)]
@@ -164,9 +162,9 @@ namespace TunHelper
             public uint Origin;
         }
 
-        private delegate uint SetIpForwardEntry2Fn(ref MibIpForwardRow2 row);
+        private delegate uint CreateIpForwardEntry2Fn(ref MibIpForwardRow2 row);
         private delegate uint DeleteIpForwardEntry2Fn(ref MibIpForwardRow2 row);
-        private static SetIpForwardEntry2Fn _SetIpForwardEntry2;
+        private static CreateIpForwardEntry2Fn _CreateIpForwardEntry2;
         private static DeleteIpForwardEntry2Fn _DeleteIpForwardEntry2;
         private static bool _netioapiLoaded;
 
@@ -178,10 +176,10 @@ namespace TunHelper
             {
                 IntPtr h = LoadLibrary("iphlpapi.dll");
                 if (h == IntPtr.Zero) return;
-                IntPtr p1 = GetProcAddress(h, "SetIpForwardEntry2");
+                IntPtr p1 = GetProcAddress(h, "CreateIpForwardEntry2");
                 IntPtr p2 = GetProcAddress(h, "DeleteIpForwardEntry2");
                 if (p1 != IntPtr.Zero)
-                    _SetIpForwardEntry2 = (SetIpForwardEntry2Fn)Marshal.GetDelegateForFunctionPointer(p1, typeof(SetIpForwardEntry2Fn));
+                    _CreateIpForwardEntry2 = (CreateIpForwardEntry2Fn)Marshal.GetDelegateForFunctionPointer(p1, typeof(CreateIpForwardEntry2Fn));
                 if (p2 != IntPtr.Zero)
                     _DeleteIpForwardEntry2 = (DeleteIpForwardEntry2Fn)Marshal.GetDelegateForFunctionPointer(p2, typeof(DeleteIpForwardEntry2Fn));
             }
@@ -222,13 +220,13 @@ namespace TunHelper
         {
             SockaddrInet s = new SockaddrInet();
             s.si_family = 2; // AF_INET
-            s.si_addr0 = v;
+            s.si_addr = v;
             return s;
         }
 
         private static bool AddRelayRoute(string ip, int ifIndex, uint nextHop)
         {
-            if (_SetIpForwardEntry2 == null) return false;
+            if (_CreateIpForwardEntry2 == null) return false;
             MibIpForwardRow2 r = new MibIpForwardRow2();
             r.InterfaceIndex = (uint)ifIndex;
             r.DestinationPrefix.Prefix = SockFromUInt(IpToUInt(ip));
@@ -238,7 +236,9 @@ namespace TunHelper
             r.ValidLifetime = 0xFFFFFFFF;
             r.PreferredLifetime = 0xFFFFFFFF;
             r.Protocol = 3; // NETMGMT
-            return _SetIpForwardEntry2(ref r) == NO_ERROR;
+            uint rc = _CreateIpForwardEntry2(ref r);
+            if (rc == 183) return true;
+            return rc == NO_ERROR;
         }
 
         private static bool DeleteRelayRoute(string ip, int ifIndex, uint nextHop)
@@ -457,7 +457,7 @@ namespace TunHelper
             // stripped Windows builds it may be missing — TUN cannot
             // work without relay routes (tor would deadlock).
             LoadNetioapi();
-            if (_SetIpForwardEntry2 == null)
+            if (_CreateIpForwardEntry2 == null)
             {
                 SetIp6Binding(true);
                 WriteResult("error: SetIpForwardEntry2 not found in iphlpapi.dll — cannot create relay routes");

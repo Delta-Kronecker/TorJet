@@ -448,6 +448,7 @@ namespace StartTor
     ""servers"": [ { ""address"": ""127.0.0.1"", ""port"": 53530 } ]
   },
   ""routing"": {
+    ""domainStrategy"": ""AsIs"",
     ""rules"": [
       { ""type"": ""field"", ""port"": 53, ""network"": ""tcp,udp"", ""outboundTag"": ""dns-out"" },
       { ""type"": ""field"", ""network"": ""udp"", ""outboundTag"": ""blackhole"" }
