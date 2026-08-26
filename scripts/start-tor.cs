@@ -58,6 +58,7 @@ namespace StartTor
         private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
         private static readonly string ModeFile = Path.Combine(DataDir, "mode.txt");
         private static readonly string StrategyFile = Path.Combine(DataDir, "strategy.txt");
+        private static readonly string LastSuccessFile = Path.Combine(DataDir, "last-success.txt");
         private static readonly string ConfluxSetsFile = Path.Combine(DataDir, "conflux-sets.txt");
         private static readonly string ConfluxLegsFile = Path.Combine(DataDir, "conflux-legs.txt");
         private static readonly string ConfluxLinkedSetsFile = Path.Combine(DataDir, "conflux-linked-sets.txt");
@@ -166,8 +167,8 @@ namespace StartTor
         private const int InternetOptionSettingsChanged = 39;
         private const int InternetOptionRefresh = 37;
 
-        private static readonly string[] ModeNames = { "vanilla", "obfs4", "webtunnel", "snowflake", "direct" };
-        private static readonly string[] BridgeFiles = { "vanilla_tested.txt", "obfs4_tested.txt", "webtunnel_tested.txt", "snowflake_tested.txt", "" };
+        private static readonly string[] ModeNames = { "vanilla", "obfs4", "webtunnel", "snowflake", "direct", "memory" };
+        private static readonly string[] BridgeFiles = { "vanilla_tested.txt", "obfs4_tested.txt", "webtunnel_tested.txt", "snowflake_tested.txt", "", "" };
         private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "snowflake_tested.txt" };
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
@@ -499,6 +500,40 @@ namespace StartTor
             catch { }
         }
 
+        private static void WriteLastSuccessCache(int mode, int strategy)
+        {
+            try
+            {
+                if (mode < 0 || mode >= ModeNames.Length) return;
+                if (strategy < 0 || strategy >= StrategyNames.Length) return;
+                string content = "mode=" + ModeNames[mode] + "\r\nstrategy=" + StrategyNames[strategy];
+                File.WriteAllText(LastSuccessFile, content, new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        private static bool ReadLastSuccessCache(out int mode, out int strategy)
+        {
+            mode = -1;
+            strategy = -1;
+            try
+            {
+                if (!File.Exists(LastSuccessFile)) return false;
+                string[] lines = File.ReadAllLines(LastSuccessFile);
+                string modeName = null, stratName = null;
+                foreach (string line in lines)
+                {
+                    string t = line.Trim();
+                    if (t.StartsWith("mode=")) modeName = t.Substring(5).Trim();
+                    else if (t.StartsWith("strategy=")) stratName = t.Substring(9).Trim();
+                }
+                if (modeName != null) mode = ParseMode(modeName);
+                if (stratName != null) strategy = ParseStrategy(stratName);
+                return mode >= 0;
+            }
+            catch { return false; }
+        }
+
         // When the lowlatency preset is chosen, steer the conflux set policy
         // toward latency: fastest-set selection, a tight best-% filter and the
         // slow-set skip. Choosing any OTHER preset restores the throughput
@@ -745,13 +780,14 @@ namespace StartTor
                 Console.WriteLine("    3) WebTunnel");
                 Console.WriteLine("    4) Snowflake");
                 Console.WriteLine("    5) Direct Tor");
-                Console.Write("  Choose 1-5 (Enter = " + ModeNames[last >= 0 ? last : 0] + "): ");
+                Console.WriteLine("    6) Memory (last successful)");
+                Console.Write("  Choose 1-6 (Enter = " + ModeNames[last >= 0 ? last : 0] + "): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return -1; }
                 if (string.IsNullOrWhiteSpace(input)) return last >= 0 ? last : 0;
                 int n;
-                if (int.TryParse(input.Trim(), out n) && n >= 1 && n <= 5) return n - 1;
+                if (int.TryParse(input.Trim(), out n) && n >= 1 && n <= 6) return n - 1;
                 int m = ParseMode(input.Trim());
                 if (m >= 0) return m;
                 Console.WriteLine("    Invalid choice, try again.");
@@ -3452,6 +3488,22 @@ namespace StartTor
                 mode = ReadLastMode();
                 if (mode < 0) mode = 1; // obfs4 — only used when the race is off
             }
+            if (mode == 5) // memory
+            {
+                int cachedMode, cachedStrategy;
+                if (ReadLastSuccessCache(out cachedMode, out cachedStrategy))
+                {
+                    mode = cachedMode;
+                    if (strategy < 0) strategy = cachedStrategy;
+                    Console.WriteLine("  [memory] reconnecting with: " + ModeNames[mode] + " / " + StrategyNames[strategy]);
+                }
+                else
+                {
+                    Console.WriteLine("  [memory] no successful connection cached yet.");
+                    WaitForKey();
+                    return menuReturn ? 2 : 1;
+                }
+            }
             if (genOnly)
             {
                 if (!WriteTorrc(mode, strategy)) { WaitForKey(); return 1; }
@@ -3523,6 +3575,7 @@ namespace StartTor
                     Console.WriteLine("Bootstrapped 100% - Tor is UP (auto-restart " + attempt + ").");
                     Console.WriteLine();
                 }
+                WriteLastSuccessCache(mode, strategy);
 
                 if (bootstrapOnly)
                 {

@@ -1133,6 +1133,7 @@ namespace StartTor
                     case "obfs4": return "Obfs4";
                     case "webtunnel": return "WebTunnel";
                     case "snowflake": return "Snowflake";
+                    case "memory": return "Memory";
                     default: return "Direct";
                 }
             }
@@ -1230,6 +1231,27 @@ namespace StartTor
             }
             private void SessionWorker(int mode, int strategy, bool raceStart)
             {
+                if (mode == 5) // memory
+                {
+                    int cachedMode, cachedStrategy;
+                    if (ReadLastSuccessCache(out cachedMode, out cachedStrategy))
+                    {
+                        mode = cachedMode;
+                        if (strategy < 0) strategy = cachedStrategy;
+                        LogLine("[memory] " + ModeNames[mode] + " / " + StrategyNames[strategy]);
+                    }
+                    else
+                    {
+                        sessionBusy = false;
+                        UiInvokeDelegate(delegate
+                        {
+                            bootPct = 0;
+                            SetState(RunState.Idle);
+                            FlashMessage("No cached connection");
+                        });
+                        return;
+                    }
+                }
                 if (raceStart)
                 {
                     torProc = null;
@@ -1312,6 +1334,7 @@ namespace StartTor
                 }) { IsBackground = true };
                 warmupEnd.Start();
 
+                WriteLastSuccessCache(mode, strategy);
                 sessionBusy = false;
                 UiInvokeDelegate(delegate
                 {
