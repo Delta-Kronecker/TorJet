@@ -1,33 +1,11 @@
 // tun-helper.cs - builds to tun-helper.exe (compile with build-start-tor.ps1).
 // TorJet Core License v1.0 (see LICENSE). Using this Core in another program
 // requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
-// Elevated Windows helper for TorJet TUN mode. Compiled as winexe: no console.
-//
-// TUN mode routes ALL system IPv4 traffic through the local tor by creating a
-// Wintun adapter (via tun2socks.exe + wintun.dll), moving the default route into
-// it, pointing system DNS at tor's DNSPort (127.0.0.1:53) and adding per-relay
-// routes on the physical interface so tor's own relay connections bypass the
-// tunnel. Without those relay routes tor's outbound would loop back into itself
-// (tun2socks loopback problem with a local SOCKS proxy).
-//
-// Usage:
-//   tun-helper.exe on     - enable TUN, then keep running. Stops (teardown) when
-//                           data\tun-stop.txt appears, tun2socks exits, or tor
-//                           SOCKS goes down.
-//   tun-helper.exe off    - disable TUN from data\tun-state.txt (best effort).
-//   tun-helper.exe status - write data\tun-result.txt with the current TUN state.
-//
-// Files (next to this exe):
-//   data\tun2socks.exe  data\wintun.dll  data\torrc (patched)  data\data\ (state/log)
-//   data\tun-state.txt  data\tun-stop.txt data\tun-result.txt
-//
-// Routes are added with the modern NetIO API (SetIpForwardEntry2, netioapi.dll)
-// when it is available; otherwise we fall back to the legacy iphlpapi API
-// (CreateIpForwardEntry), which exists on every Windows. Both are fast enough
-// for the several-thousand relay routes.
-//
-// Ports default to the launcher's 9050/9051 but can be overridden with the
-// TUN_SOCKS_PORT / TUN_CTRL_PORT environment variables (used for testing).
+// Elevated supervisor for TorJet TUN mode. The tunnel itself is an Xray-core
+// TUN instance (data\xray-tun.json, written by the launcher): it captures all
+// system traffic, resolves DNS through tor (hijacked port 53), excludes
+// tor.exe/xray.exe by process, and blocks UDP. This helper only supervises:
+// spawn elevated, watch health, tear down cleanly.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -50,43 +28,29 @@ namespace TunHelper
         private static readonly string StateFile = Path.Combine(DataDir, "tun-state.txt");
         private static readonly string StopFile = Path.Combine(DataDir, "tun-stop.txt");
         private static readonly string ResultFile = Path.Combine(DataDir, "tun-result.txt");
-        private static readonly string Torrc = Path.Combine(DataDir, "torrc");
-        private static readonly string TunExe = Path.Combine(DataDir, "tun2socks.exe");
+        private static readonly string XrayExe = Path.Combine(DataDir, "xray.exe");
+        private static readonly string XrayTunConfig = Path.Combine(DataDir, "xray-tun.json");
         private static readonly string WintunDll = Path.Combine(DataDir, "wintun.dll");
-        private static readonly string Consensus1 = Path.Combine(DataDir, "data", "cached-microdesc-consensus");
-        private static readonly string Consensus2 = Path.Combine(DataDir, "data", "cached-consensus");
-        private static readonly string BridgesDir = Path.Combine(DataDir, "bridges");
-        private static readonly string ControlCookie = Path.Combine(DataDir, "data", "control_auth_cookie");
 
         // The launcher knows the data directory for sure; prefer it when the
-        // helper is started by the launcher. Otherwise infer it: the helper used
-        // to sit NEXT TO data\ (AppDir\data = the data dir) but is now shipped
-        // INSIDE data\ (AppDir itself is the data dir). Guessing wrong made TUN
-        // look for tun2socks.exe/state files in data\data\ and fail silently.
+        // helper is started by the launcher.
         private static string ResolveDataDir()
         {
             string env = Environment.GetEnvironmentVariable("TUN_DATA_DIR");
             if (!string.IsNullOrWhiteSpace(env) &&
-                File.Exists(Path.Combine(env, "tun2socks.exe")) &&
+                File.Exists(Path.Combine(env, "xray.exe")) &&
                 File.Exists(Path.Combine(env, "wintun.dll")))
                 return env;
             string d1 = Path.Combine(AppDir, "data");
-            if (File.Exists(Path.Combine(d1, "tun2socks.exe"))) return d1;
-            if (File.Exists(Path.Combine(AppDir, "tun2socks.exe"))) return AppDir;
+            if (File.Exists(Path.Combine(d1, "xray.exe"))) return d1;
+            if (File.Exists(Path.Combine(AppDir, "xray.exe"))) return AppDir;
             return d1;
         }
 
         private const string TunName = "TorJetTun";
-        private const string TunAddr = "10.0.0.1";
-        private const string TunMask = "255.255.255.0";
 
-        private static readonly int SocksPort = GetEnvPort("TUN_SOCKS_PORT", 9050);
-        private static readonly int CtrlPort = GetEnvPort("TUN_CTRL_PORT", 9051);
-
-        // Only one keeper may run at a time: a second "on" (e.g. the user pressing
-        // T twice in a row) used to race the first one, creating a second adapter
-        // named "TorJetTun 1" that the fixed-name netsh calls then mis-targeted,
-        // which made the default-route step fail and left the state file empty.
+        // Only one keeper may run at a time: a second "on" (e.g. the user
+        // pressing T twice in a row) used to race the first one.
         private static readonly Mutex TunMutex = new Mutex(true, @"Local\TorJetTunHelper");
 
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
@@ -110,33 +74,49 @@ namespace TunHelper
             catch { return false; }
         }
 
-        private static void KillStaleTun2Socks()
+        private static string ReadState()
         {
-            try
-            {
-                string dir = DataDir.TrimEnd('\\');
-                foreach (Process p in Process.GetProcessesByName("tun2socks"))
-                {
-                    try
-                    {
-                        if (p.MainModule.FileName.TrimEnd('\\').StartsWith(dir, StringComparison.OrdinalIgnoreCase))
-                            p.Kill();
-                    }
-                    catch { }
-                }
-            }
+            try { if (File.Exists(StateFile)) return File.ReadAllText(StateFile); }
             catch { }
+            return "";
         }
 
+        private static void WriteState(string content)
+        {
+            try { File.WriteAllText(StateFile, content, new UTF8Encoding(false)); } catch { }
+        }
+
+        private static string GetStateValue(string state, string key)
+        {
+            foreach (string raw in state.Split('\n'))
+            {
+                string line = raw.Trim();
+                if (line.StartsWith(key + "=", StringComparison.Ordinal))
+                    return line.Substring(key.Length + 1);
+            }
+            return "";
+        }
+
+        private static string ReadResult()
+        {
+            try { if (File.Exists(ResultFile)) return File.ReadAllText(ResultFile).Trim(); }
+            catch { }
+            return "";
+        }
+
+        private static void WriteResult(string text)
+        {
+            try { File.WriteAllText(ResultFile, text, new UTF8Encoding(false)); } catch { }
+        }
+
+        // ---- relay routes ----------------------------------------------------
+        // Xray's TUN captures everything, including tor's own connections to
+        // guards/bridges — that would deadlock the core. Mainline Xray has no
+        // process-based routing, so tor's destinations (every relay IP in the
+        // cached consensus + every bridge IP) get /32 routes via the physical
+        // gateway, which take precedence over the TUN's default route.
         private const uint NO_ERROR = 0;
-        private const uint MIB_IPPROTO_NETMGMT = 3;
-        private const uint INFINITE_LIFE = 0xFFFFFFFF;
-        private const ushort AF_INET = 2;
 
-        private static readonly bool UseNetio =
-            File.Exists(Path.Combine(Environment.SystemDirectory, "netioapi.dll"));
-
-        // --- NetIO (netioapi.dll) structures for the modern route API ---
         [StructLayout(LayoutKind.Sequential)]
         private struct SockaddrInet
         {
@@ -182,7 +162,6 @@ namespace TunHelper
         [DllImport("netioapi.dll")]
         private static extern uint DeleteIpForwardEntry2(ref MibIpForwardRow2 row);
 
-        // --- legacy iphlpapi struct/API (not used unless netioapi is missing) ---
         [StructLayout(LayoutKind.Sequential)]
         private struct MibIpForwardRow
         {
@@ -198,369 +177,51 @@ namespace TunHelper
             public uint metric1, metric2, metric3, metric4, metric5;
         }
 
-        [DllImport("iphlpapi.dll")]
+        [DllImport("iphlpapi.dll", SetLastError = true)]
         private static extern uint GetBestRoute(uint dest, uint source, out MibIpForwardRow row);
-        [DllImport("iphlpapi.dll")]
-        private static extern uint CreateIpForwardEntry(ref MibIpForwardRow row);
-        [DllImport("iphlpapi.dll")]
-        private static extern uint DeleteIpForwardEntry(ref MibIpForwardRow row);
-
-        private static int GetEnvPort(string name, int def)
-        {
-            try
-            {
-                string v = Environment.GetEnvironmentVariable(name);
-                int p;
-                if (!string.IsNullOrEmpty(v) && int.TryParse(v, out p) && p > 0 && p < 65536) return p;
-            }
-            catch { }
-            return def;
-        }
-
-        private static void WriteResult(string msg)
-        {
-            try { File.WriteAllText(ResultFile, msg, new UTF8Encoding(false)); } catch { }
-        }
-
-        private static void WriteState(string text)
-        {
-            try { File.WriteAllText(StateFile, text, new UTF8Encoding(false)); } catch { }
-        }
-
-        private static string ReadState()
-        {
-            try { if (File.Exists(StateFile)) return File.ReadAllText(StateFile); } catch { }
-            return "";
-        }
-
-        private static string GetStateValue(string state, string key)
-        {
-            foreach (string line in state.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
-            {
-                int i = line.IndexOf('=');
-                if (i > 0 && line.Substring(0, i) == key) return line.Substring(i + 1);
-            }
-            return "";
-        }
-
-        private static string Run(string file, string args)
-        {
-            try
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = file,
-                    Arguments = args,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-                using (Process p = Process.Start(psi))
-                {
-                    var so = new StringBuilder();
-                    var se = new StringBuilder();
-                    p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) so.AppendLine(e.Data); };
-                    p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { if (e.Data != null) se.AppendLine(e.Data); };
-                    p.BeginOutputReadLine();
-                    p.BeginErrorReadLine();
-                    if (!p.WaitForExit(30000)) { try { p.Kill(); } catch { } }
-                    return (so.ToString() + se.ToString()).Trim();
-                }
-            }
-            catch (Exception ex) { return "ERR:" + ex.Message; }
-        }
-
-        private static bool TorUp(int timeoutMs)
-        {
-            try
-            {
-                using (TcpClient c = new TcpClient())
-                {
-                    IAsyncResult ar = c.BeginConnect("127.0.0.1", SocksPort, null, null);
-                    if (!ar.AsyncWaitHandle.WaitOne(timeoutMs)) return false;
-                    c.EndConnect(ar);
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
-        private static string CookieHex()
-        {
-            try
-            {
-                if (!File.Exists(ControlCookie)) return null;
-                byte[] cookie = File.ReadAllBytes(ControlCookie);
-                var sb = new StringBuilder(cookie.Length * 2);
-                foreach (byte b in cookie) sb.Append(b.ToString("x2"));
-                return sb.ToString();
-            }
-            catch { return null; }
-        }
-
-        private static bool ControlSend(string cmd)
-        {
-            try
-            {
-                string hex = CookieHex();
-                if (hex == null) return false;
-                using (TcpClient c = new TcpClient("127.0.0.1", CtrlPort))
-                {
-                    NetworkStream s = c.GetStream();
-                    StreamWriter w = new StreamWriter(s) { NewLine = "\r\n", AutoFlush = true };
-                    StreamReader r = new StreamReader(s);
-                    w.WriteLine("AUTHENTICATE " + hex);
-                    if (!r.ReadLine().StartsWith("250")) return false;
-                    w.WriteLine(cmd);
-                    if (!r.ReadLine().StartsWith("250")) return false;
-                    w.WriteLine("QUIT");
-                    return true;
-                }
-            }
-            catch { return false; }
-        }
-
-        // Port 53 must be free (or be owned by this folder's own tor) before TUN
-        // can use it as the system DNS target. Our tor is expected to keep DNS on
-        // 127.0.0.1:53 after the first enable (the DNSPort line is never removed).
-        // Uses the IP Helper tables (not netstat) so the check is independent of
-        // the Windows display language.
-        [StructLayout(LayoutKind.Sequential)]
-        private struct MibTcpRowOwnerPid
-        {
-            public uint state;
-            public uint localAddr;
-            public uint localPort;
-            public uint remoteAddr;
-            public uint remotePort;
-            public uint owningPid;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct MibUdpRowOwnerPid
-        {
-            public uint localAddr;
-            public uint localPort;
-            public uint owningPid;
-        }
-
-        private const uint MibTcpStateListen = 2;
-        private const uint TcpTableOwnerPidAll = 5;
-        private const uint UdpTableOwnerPid = 1;
-
-        [DllImport("iphlpapi.dll")]
-        private static extern uint GetExtendedTcpTable(IntPtr table, ref int size, bool order, int af, uint tableClass, uint reserved);
-        [DllImport("iphlpapi.dll")]
-        private static extern uint GetExtendedUdpTable(IntPtr table, ref int size, bool order, int af, uint tableClass, uint reserved);
-
-        private static int FromNetPort(uint v)
-        {
-            return (int)(((v & 0xFF) << 8) | ((v >> 8) & 0xFF));
-        }
-
-        private static void CollectPort53Pids(HashSet<int> pids)
-        {
-            int size = 0;
-            uint rc = GetExtendedTcpTable(IntPtr.Zero, ref size, false, AF_INET, TcpTableOwnerPidAll, 0);
-            if (rc == NO_ERROR && size > 0)
-            {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
-                {
-                    if (GetExtendedTcpTable(buf, ref size, false, AF_INET, TcpTableOwnerPidAll, 0) == NO_ERROR)
-                    {
-                        int n = Marshal.ReadInt32(buf);
-                        int rowSize = Marshal.SizeOf(typeof(MibTcpRowOwnerPid));
-                        IntPtr p = IntPtr.Add(buf, sizeof(int));
-                        for (int i = 0; i < n; i++)
-                        {
-                            MibTcpRowOwnerPid row = (MibTcpRowOwnerPid)Marshal.PtrToStructure(p, typeof(MibTcpRowOwnerPid));
-                            if (row.state == MibTcpStateListen && FromNetPort(row.localPort) == 53 && row.owningPid > 0)
-                                pids.Add((int)row.owningPid);
-                            p = IntPtr.Add(p, rowSize);
-                        }
-                    }
-                }
-                finally { Marshal.FreeHGlobal(buf); }
-            }
-
-            size = 0;
-            rc = GetExtendedUdpTable(IntPtr.Zero, ref size, false, AF_INET, UdpTableOwnerPid, 0);
-            if (rc == NO_ERROR && size > 0)
-            {
-                IntPtr buf = Marshal.AllocHGlobal(size);
-                try
-                {
-                    if (GetExtendedUdpTable(buf, ref size, false, AF_INET, UdpTableOwnerPid, 0) == NO_ERROR)
-                    {
-                        int n = Marshal.ReadInt32(buf);
-                        int rowSize = Marshal.SizeOf(typeof(MibUdpRowOwnerPid));
-                        IntPtr p = IntPtr.Add(buf, sizeof(int));
-                        for (int i = 0; i < n; i++)
-                        {
-                            MibUdpRowOwnerPid row = (MibUdpRowOwnerPid)Marshal.PtrToStructure(p, typeof(MibUdpRowOwnerPid));
-                            if (FromNetPort(row.localPort) == 53 && row.owningPid > 0)
-                                pids.Add((int)row.owningPid);
-                            p = IntPtr.Add(p, rowSize);
-                        }
-                    }
-                }
-                finally { Marshal.FreeHGlobal(buf); }
-            }
-        }
-
-        private static bool Port53Free()
-        {
-            string torExe = Path.Combine(DataDir, "tor.exe");
-            try
-            {
-                var pids = new HashSet<int>();
-                CollectPort53Pids(pids);
-                foreach (int pid in pids)
-                {
-                    if (pid <= 0) continue;
-                    try
-                    {
-                        Process p = Process.GetProcessById(pid);
-                        if (p == null || !p.MainModule.FileName.Equals(torExe, StringComparison.OrdinalIgnoreCase))
-                            return false;
-                    }
-                    catch { return false; }
-                }
-            }
-            catch { }
-            return true;
-        }
-
-        // Finds the tun2socks adapter and its REAL name. Windows may display it
-        // as "TorJetTun 1" (or worse) when a stale adapter already exists, so
-        // every netsh call must use the discovered name, never the fixed one.
-        private static bool GetTunAdapter(out int ifIndex, out string name)
-        {
-            ifIndex = -1;
-            name = "";
-            string o = Run("netsh.exe", "interface ipv4 show interfaces");
-            Regex re = new Regex(@"^\s*(\d+)\s+\d+\s+\d+\s+(\S+(?:\s+\S+)?)\s+(.+)$");
-            foreach (string line in o.Split('\n'))
-            {
-                if (line.IndexOf(TunName, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                Match m = re.Match(line);
-                if (!m.Success) continue;
-                ifIndex = int.Parse(m.Groups[1].Value);
-                name = m.Groups[3].Value.Trim();
-                return true;
-            }
-            return false;
-        }
-
-        private static string IfIpToString(uint v)
-        {
-            return new IPAddress(BitConverter.GetBytes(v)).ToString();
-        }
 
         private static uint IpToUInt(string ip)
         {
             byte[] b = IPAddress.Parse(ip).GetAddressBytes();
-            return BitConverter.ToUInt32(b, 0);
+            return (uint)((b[0] << 24) | (b[1] << 16) | (b[2] << 8) | b[3]);
         }
 
-        private static MibIpForwardRow2 MakeRow2(uint dest, byte plen, uint nextHop, int ifIndex, uint metric)
+        private static string UIntToIp(uint v)
         {
-            return new MibIpForwardRow2
-            {
-                InterfaceLuid = 0,
-                InterfaceIndex = (uint)ifIndex,
-                DestinationPrefix = new IpAddressPrefix
-                {
-                    Prefix = new SockaddrInet { si_family = AF_INET, si_addr0 = dest },
-                    PrefixLength = plen
-                },
-                NextHop = new SockaddrInet { si_family = AF_INET, si_addr0 = nextHop },
-                ValidLifetime = INFINITE_LIFE,
-                PreferredLifetime = INFINITE_LIFE,
-                Metric = metric,
-                Protocol = MIB_IPPROTO_NETMGMT,
-                Loopback = 0,
-                AutoconfigureAddress = 0,
-                Publish = 1,
-                Immortal = 1
-            };
+            return string.Format("{0}.{1}.{2}.{3}", (v >> 24) & 255, (v >> 16) & 255,
+                                 (v >> 8) & 255, v & 255);
         }
 
-        private static uint MaskUint(int plen)
+        private static SockaddrInet SockFromUInt(uint v)
         {
-            return plen == 0 ? 0 : (uint)(0xFFFFFFFF << (32 - plen));
+            SockaddrInet s = new SockaddrInet();
+            s.si_family = 2; // AF_INET
+            s.si_addr0 = v;
+            return s;
         }
 
-        // Legacy iphlpapi route API (MIB_IPFORWARDROW). Some trimmed/older
-        // Windows builds lack netioapi.dll, and the old route.exe fallback was
-        // far too slow for the several-thousand relay /32 routes (one spawned
-        // process per route). CreateIpForwardEntry is present on every Windows
-        // but is picky: the route must be MIB_IPROUTE_TYPE_INDIRECT (4) for a
-        // gateway route and dwForwardMetric1 must hold the EFFECTIVE metric
-        // (interface metric + route metric), exactly like route.exe computes it.
-        private static bool LegacyRoute(bool add, uint dest, int plen, uint nextHop, int ifIndex, uint metric)
+        private static bool AddRelayRoute(string ip, int ifIndex, uint nextHop)
         {
-            var row = new MibIpForwardRow
-            {
-                dest = dest,
-                mask = MaskUint(plen),
-                nextHop = nextHop,
-                ifIndex = ifIndex,
-                metric1 = (uint)(InterfaceMetric(ifIndex) + metric),
-                type = 4,  // MIB_IPROUTE_TYPE_INDIRECT (via gateway)
-                proto = 3  // MIB_IPROTO_NETMGMT
-            };
-            uint rc = add ? CreateIpForwardEntry(ref row) : DeleteIpForwardEntry(ref row);
-            return rc == NO_ERROR;
+            MibIpForwardRow2 r = new MibIpForwardRow2();
+            r.InterfaceIndex = (uint)ifIndex;
+            r.DestinationPrefix.Prefix = SockFromUInt(IpToUInt(ip));
+            r.DestinationPrefix.PrefixLength = 32;
+            r.NextHop = SockFromUInt(nextHop);
+            r.SitePrefixLength = 0;
+            r.ValidLifetime = 0xFFFFFFFF;
+            r.PreferredLifetime = 0xFFFFFFFF;
+            r.Protocol = 3; // NETMGMT
+            return SetIpForwardEntry2(ref r) == NO_ERROR;
         }
 
-        private static readonly Dictionary<int, int> IfMetricCache = new Dictionary<int, int>();
-
-        private static int InterfaceMetric(int ifIndex)
+        private static bool DeleteRelayRoute(string ip, int ifIndex, uint nextHop)
         {
-            int m;
-            if (IfMetricCache.TryGetValue(ifIndex, out m)) return m;
-            m = GetInterfaceMetric(ifIndex);
-            IfMetricCache[ifIndex] = m;
-            return m;
-        }
-
-        private static int GetInterfaceMetric(int ifIndex)
-        {
-            string o = Run("netsh.exe", "interface ipv4 show interfaces");
-            Regex re = new Regex(@"^\s*(\d+)\s+(\d+)\s+\d+\s+\S+\s+(.+)$");
-            foreach (string line in o.Split('\n'))
-            {
-                Match m = re.Match(line);
-                if (m.Success && int.Parse(m.Groups[1].Value) == ifIndex)
-                {
-                    int met;
-                    if (int.TryParse(m.Groups[2].Value, out met)) return met;
-                }
-            }
-            return 0;
-        }
-
-        private static bool AddRoute(uint dest, int plen, uint nextHop, int ifIndex, uint metric)
-        {
-            if (UseNetio)
-            {
-                MibIpForwardRow2 r = MakeRow2(dest, (byte)plen, nextHop, ifIndex, metric);
-                return SetIpForwardEntry2(ref r) == NO_ERROR;
-            }
-            return LegacyRoute(true, dest, plen, nextHop, ifIndex, metric);
-        }
-
-        private static bool DeleteRoute(uint dest, int plen, uint nextHop, int ifIndex)
-        {
-            if (UseNetio)
-            {
-                MibIpForwardRow2 r = MakeRow2(dest, (byte)plen, nextHop, ifIndex, 0);
-                return DeleteIpForwardEntry2(ref r) == NO_ERROR;
-            }
-            return LegacyRoute(false, dest, plen, nextHop, ifIndex, 0);
+            MibIpForwardRow2 r = new MibIpForwardRow2();
+            r.InterfaceIndex = (uint)ifIndex;
+            r.DestinationPrefix.Prefix = SockFromUInt(IpToUInt(ip));
+            r.DestinationPrefix.PrefixLength = 32;
+            r.NextHop = SockFromUInt(nextHop);
+            return DeleteIpForwardEntry2(ref r) == NO_ERROR;
         }
 
         private static bool IsPublicIpv4(string s)
@@ -568,27 +229,26 @@ namespace TunHelper
             IPAddress a;
             if (!IPAddress.TryParse(s, out a) || a.AddressFamily != AddressFamily.InterNetwork) return false;
             byte[] b = a.GetAddressBytes();
-            if (b[0] == 0) return false;                                 // 0/8
-            if (b[0] == 10) return false;                                // RFC1918
-            if (b[0] == 127) return false;                               // loopback
-            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return false;  // CGNAT 100.64/10
-            if (b[0] == 169 && b[1] == 254) return false;                // link-local
-            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return false;   // RFC1918
-            if (b[0] == 192 && b[1] == 168) return false;                // RFC1918
-            if (b[0] == 192 && b[1] == 0 && b[2] == 0) return false;     // 192.0.0/24
-            if (b[0] == 192 && b[1] == 0 && b[2] == 2) return false;     // TEST-NET-1
-            if (b[0] == 192 && b[1] == 88 && b[2] == 99) return false;   // 6to4 relay anycast
-            if (b[0] == 198 && (b[1] == 18 || b[1] == 19)) return false; // 198.18/15
-            if (b[0] == 198 && b[1] == 51 && b[2] == 100) return false;  // TEST-NET-2
-            if (b[0] == 203 && b[1] == 0 && b[2] == 113) return false;   // TEST-NET-3
-            if (b[0] >= 224) return false;                               // multicast + reserved
+            if (b[0] == 0 || b[0] == 10 || b[0] == 127) return false;
+            if (b[0] == 100 && b[1] >= 64 && b[1] <= 127) return false;
+            if (b[0] == 169 && b[1] == 254) return false;
+            if (b[0] == 172 && b[1] >= 16 && b[1] <= 31) return false;
+            if (b[0] == 192 && b[1] == 168) return false;
+            if (b[0] >= 224) return false;
             return true;
         }
 
+        // Relay IPs from the cached consensus (microdesc + full) and every
+        // bridge list in data\bridges.
         private static HashSet<string> ParseRelayIps()
         {
             var set = new HashSet<string>(StringComparer.Ordinal);
-            foreach (string f in new[] { Consensus1, Consensus2 })
+            string bridgesDir = Path.Combine(DataDir, "bridges");
+            foreach (string f in new[]
+            {
+                Path.Combine(DataDir, "data", "cached-microdesc-consensus"),
+                Path.Combine(DataDir, "data", "cached-consensus")
+            })
             {
                 if (!File.Exists(f)) continue;
                 try
@@ -596,162 +256,72 @@ namespace TunHelper
                     foreach (string raw in File.ReadAllLines(f))
                     {
                         if (!raw.StartsWith("r ")) continue;
-                        string[] p = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                        // microdesc consensus: r nick id date time ip orport dirport (ip at 5)
-                        // full consensus:      r nick id digest date time ip orport dirport (ip at 6)
-                        for (int i = 5; i <= 6 && i < p.Length; i++)
-                            if (IsPublicIpv4(p[i])) set.Add(p[i]);
+                        string[] parts = raw.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                        for (int i = 5; i <= 6 && i < parts.Length; i++)
+                            if (IsPublicIpv4(parts[i])) set.Add(parts[i]);
                     }
                 }
                 catch { }
             }
-            try
+            if (Directory.Exists(bridgesDir))
             {
-                if (Directory.Exists(BridgesDir))
+                try
                 {
-                    foreach (string f in Directory.GetFiles(BridgesDir, "*.txt"))
+                    foreach (string f in Directory.GetFiles(bridgesDir, "*.txt"))
                     {
-                        foreach (string line in File.ReadAllLines(f))
+                        foreach (string raw in File.ReadAllLines(f))
                         {
-                            foreach (Match m in Regex.Matches(line, @"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"))
+                            foreach (Match m in Regex.Matches(raw, @"\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b"))
                                 if (IsPublicIpv4(m.Groups[1].Value)) set.Add(m.Groups[1].Value);
                         }
                     }
                 }
+                catch { }
             }
-            catch { }
             return set;
         }
 
-        // NOTE: system DNS (pointed at 127.0.0.1 on the TUN adapter) is served
-        // by the launcher's caching DNS stub on 127.0.0.1:53, which forwards to
-        // tor's DNSPort (127.0.0.1:53530). tor itself never binds port 53, so
-        // there is nothing to patch into torrc here anymore.
-
-        private static bool Enable(out Process tun, out int tunIf, out int physIf, out string physGw)
+        private static bool TorUp(int timeoutMs)
         {
-            tun = null;
-            tunIf = -1;
-            physIf = -1;
-            physGw = "";
-            WriteResult("enabling...");
-            if (!File.Exists(TunExe)) { WriteResult("error: tun2socks.exe not found in " + DataDir); return false; }
-            if (!File.Exists(WintunDll)) { WriteResult("error: wintun.dll not found in " + DataDir); return false; }
-            if (!TorUp(2000)) { WriteResult("error: tor SOCKS (127.0.0.1:" + SocksPort + ") is not up"); return false; }
-            if (GetStateValue(ReadState(), "status") == "on") { WriteResult("error: TUN is already on"); return false; }
-            if (!Port53Free()) { WriteResult("error: port 53 is already in use on this machine"); return false; }
-
-            WintunDeleteAdapterByName(TunName);
-            KillStaleTun2Socks();
-
-            MibIpForwardRow physRow;
-            uint rc = GetBestRoute(0, 0, out physRow);
-            if (rc != NO_ERROR) { WriteResult("error: no IPv4 default route (getbestroute " + rc + ")"); return false; }
-            physGw = IfIpToString(physRow.nextHop);
-            physIf = physRow.ifIndex;
-
-            Thread.Sleep(200);
-
-            try
+            var sw = Stopwatch.StartNew();
+            while (sw.ElapsedMilliseconds < timeoutMs)
             {
-                // Larger netstack TCP buffers + receive autotuning: the small
-                // defaults cap TUN-mode throughput on high-bandwidth paths.
-                var psi = new ProcessStartInfo
+                try
                 {
-                    FileName = TunExe,
-                    Arguments = "-device tun://" + TunName +
-                                " -proxy socks5://127.0.0.1:" + SocksPort +
-                                " -mtu 1500 -loglevel error" +
-                                " -tcp-auto-tuning -tcp-rcvbuf 4194304 -tcp-sndbuf 4194304",
-                    WorkingDirectory = DataDir,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true
-                };
-                tun = new Process();
-                tun.StartInfo = psi;
-                tun.OutputDataReceived += delegate(object s, DataReceivedEventArgs e) { };
-                tun.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e) { };
-                tun.Start();
-                tun.BeginOutputReadLine();
-                tun.BeginErrorReadLine();
+                    using (TcpClient c = new TcpClient())
+                    {
+                        IAsyncResult ar = c.BeginConnect(IPAddress.Loopback, 9050, null, null);
+                        if (ar.AsyncWaitHandle.WaitOne(800) && c.Connected) return true;
+                    }
+                }
+                catch { }
+                Thread.Sleep(200);
             }
-            catch (Exception ex)
-            {
-                WriteResult("error: cannot start tun2socks: " + ex.Message);
-                return false;
-            }
-
-            string tunName = "";
-            for (int i = 0; i < 20; i++)
-            {
-                Thread.Sleep(500);
-                if (tun.HasExited) break;
-                if (GetTunAdapter(out tunIf, out tunName)) break;
-            }
-            if (tunIf <= 0 || tunName.Length == 0)
-            {
-                try { tun.Kill(); } catch { }
-                WintunDeleteAdapterByName(TunName);
-                WriteResult("error: wintun adapter was not created (is tun2socks running?)");
-                return false;
-            }
-
-            Run("netsh.exe", "interface ipv4 set address name=" + tunName + " source=static address=" + TunAddr + " mask=" + TunMask);
-            Run("netsh.exe", "interface ipv4 set dnsservers name=" + tunName + " source=static address=127.0.0.1 register=none validate=no");
-            Run("netsh.exe", "interface ipv4 set interface " + tunName + " metric=1");
-
-            AddRoute(0, 0, IpToUInt(TunAddr), tunIf, 1);
-            MibIpForwardRow check = new MibIpForwardRow();
-            bool switched = false;
-            for (int i = 0; i < 10; i++)
-            {
-                Thread.Sleep(500);
-                GetBestRoute(0, 0, out check);
-                if (check.ifIndex == tunIf) { switched = true; break; }
-            }
-            if (!switched)
-            {
-                try { tun.Kill(); } catch { }
-                WintunDeleteAdapterByName(tunName);
-                WriteResult("error: default route did not switch to " + tunName +
-                            " (still ifIndex " + check.ifIndex + ", gw " + IfIpToString(check.nextHop) + ")");
-                return false;
-            }
-
-            HashSet<string> relays = ParseRelayIps();
-            foreach (string ip in relays)
-                AddRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf, 1);
-
-            // DNS-leak fix: Windows sends DNS queries on EVERY adapter that
-            // has DNS servers configured (Smart Multi-Homed Name Resolution),
-            // and those queries ride the PHYSICAL default route that we leave
-            // in place for the relay /32s. Result: the ISP's resolvers answer
-            // in parallel with tor's (classic "browser broken + DNS leak").
-            // Removing the physical default route while tunnelled closes that
-            // escape — the /32 relay routes do not depend on it.
-            DeleteRoute(0, 0, IpToUInt(physGw), physIf);
-            Run("ipconfig.exe", "/flushdns");
-
-            // IPv6 kill switch: with an IPv4-only tunnel, browsers would hang
-            // on IPv6-capable sites (chat apps that use plain TCP keep working,
-            // which looks like "browser broken, everything else fine").
-            SetIp6Binding(false);
-
-            WriteState(BuildState(tun.Id, tunIf, physIf, physGw, relays));
-            WriteResult("on: " + relays.Count + " relay routes, default route now via " + TunName);
-            return true;
+            return false;
         }
 
-        // Toggles the ms_tcpip6 binding on every adapter. The helper runs
-        // elevated, so this is the standard IPv6 kill switch used while the
-        // IPv4-only tunnel is up; re-enabled on teardown.
+        private static void Run(string file, string args)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = file,
+                    Arguments = args,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                });
+            }
+            catch { }
+        }
+
+        // IPv6 kill switch: the tunnel is IPv4-only, so IPv6 traffic would
+        // bypass it (or hang the browser). Toggled while tunnelled.
         private static void SetIp6Binding(bool enable)
         {
             try
             {
-                var psi = new ProcessStartInfo
+                Process.Start(new ProcessStartInfo
                 {
                     FileName = "powershell.exe",
                     Arguments = "-NoProfile -Command " +
@@ -760,60 +330,65 @@ namespace TunHelper
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
-                };
-                Process p = Process.Start(psi);
-                if (p != null) p.WaitForExit(20000);
+                });
             }
             catch { }
         }
 
-        private static string BuildState(int pid, int tunIf, int physIf, string physGw, HashSet<string> relays)
+        private static bool AdapterUp()
         {
-            var sb = new StringBuilder();
-            sb.AppendLine("status=on");
-            sb.AppendLine("pid=" + pid);
-            sb.AppendLine("tunIf=" + tunIf);
-            sb.AppendLine("physIf=" + physIf);
-            sb.AppendLine("physGw=" + physGw);
-            sb.AppendLine("relays=" + string.Join(",", relays));
-            return sb.ToString();
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "netsh.exe",
+                    Arguments = "interface show interface",
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    string outp = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(5000);
+                    return outp.IndexOf(TunName, StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+            catch { return false; }
         }
 
-        private static void TeardownFromState(string state)
+        private static void KillPid(string pid)
         {
-            string pid = GetStateValue(state, "pid");
-            string physIf = GetStateValue(state, "physIf");
-            string physGw = GetStateValue(state, "physGw");
-            string relays = GetStateValue(state, "relays");
-            int ifidx;
-            int.TryParse(physIf, out ifidx);
-
-            int p;
-            if (!string.IsNullOrEmpty(pid) && int.TryParse(pid, out p) && p > 0)
+            int n;
+            if (!string.IsNullOrEmpty(pid) && int.TryParse(pid, out n) && n > 0)
             {
-                try { Process.GetProcessById(p).Kill(); } catch { }
+                try { Process.GetProcessById(n).Kill(); } catch { }
             }
-            Thread.Sleep(2000);
+        }
 
-            if (ifidx > 0 && !string.IsNullOrEmpty(physGw) && !string.IsNullOrEmpty(relays))
+        private static void Teardown()
+        {
+            string st = ReadState();
+            KillPid(GetStateValue(st, "pid"));
+            Thread.Sleep(500);
+            // relay /32 routes reference the physical gateway — remove first
+            string gwStr = GetStateValue(st, "physGw");
+            string ifStr = GetStateValue(st, "physIf");
+            string relays = GetStateValue(st, "relays");
+            int pif;
+            int.TryParse(ifStr, out pif);
+            if (pif > 0 && gwStr.Length > 0 && relays.Length > 0)
             {
+                uint gw = IpToUInt(gwStr);
                 foreach (string ip in relays.Split(','))
                 {
                     string t = ip.Trim();
                     if (t.Length == 0) continue;
-                    DeleteRoute(IpToUInt(t), 32, IpToUInt(physGw), ifidx);
+                    DeleteRelayRoute(t, pif, gw);
                 }
             }
-
-            KillStaleTun2Socks();
             WintunDeleteAdapterByName(TunName);
-            SetIp6Binding(true);   // restore IPv6 bindings
-            // bring the physical default route back (removed while tunnelled
-            // to close the DNS-leak escape; the /32 relay routes never need it)
-            if (ifidx > 0 && !string.IsNullOrEmpty(physGw))
-            {
-                AddRoute(0, 0, IpToUInt(physGw), ifidx, 1);
-            }
+            SetIp6Binding(true);
             Run("ipconfig.exe", "/flushdns");
             WriteState("status=off");
             try { if (File.Exists(StopFile)) File.Delete(StopFile); } catch { }
@@ -821,56 +396,96 @@ namespace TunHelper
 
         private static int RunKeeper()
         {
-            Process tun;
-            int tunIf, physIf;
-            string physGw;
-            if (!Enable(out tun, out tunIf, out physIf, out physGw)) return 1;
-            if (GetStateValue(ReadState(), "status") != "on")
+            WriteResult("enabling...");
+            if (!File.Exists(XrayExe)) { WriteResult("error: xray.exe not found in " + DataDir); return 1; }
+            if (!File.Exists(WintunDll)) { WriteResult("error: wintun.dll not found in " + DataDir); return 1; }
+            if (!File.Exists(XrayTunConfig)) { WriteResult("error: xray-tun.json not found (reconnect from TorJet)"); return 1; }
+            if (!TorUp(2000)) { WriteResult("error: tor SOCKS (127.0.0.1:9050) is not up"); return 1; }
+            if (GetStateValue(ReadState(), "status") == "on") { WriteResult("error: TUN is already on"); return 1; }
+
+            // clean leftovers from a previous (crashed) run
+            KillPid(GetStateValue(ReadState(), "pid"));
+            WintunDeleteAdapterByName(TunName);
+            SetIp6Binding(false);
+
+            // physical gateway for the relay /32 routes (TUN is not up yet,
+            // so the best route to 0/0 IS the physical default)
+            MibIpForwardRow phys;
+            if (GetBestRoute(0, 0, out phys) != NO_ERROR)
             {
-                try { tun.Kill(); } catch { }
+                WriteResult("error: no IPv4 default route");
+                return 1;
+            }
+            uint physGw = phys.nextHop;
+            int physIf = phys.ifIndex;
+
+            Process xray;
+            try
+            {
+                xray = Process.Start(new ProcessStartInfo
+                {
+                    FileName = XrayExe,
+                    Arguments = "run -c \"" + XrayTunConfig + "\"",
+                    WorkingDirectory = DataDir,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                });
+            }
+            catch (Exception ex)
+            {
+                WriteResult("error: cannot start xray: " + ex.Message);
                 return 1;
             }
 
-            var known = new HashSet<string>(StringComparer.Ordinal);
-            foreach (string ip in ParseRelayIps()) known.Add(ip);
-            DateTime deadline = DateTime.UtcNow.AddMinutes(2);
-            int torDown = 0;
+            // wait for the adapter (Xray autoRoute sets the default route itself)
+            bool up = false;
+            for (int i = 0; i < 30; i++)
+            {
+                Thread.Sleep(500);
+                try { xray.Refresh(); if (xray.HasExited) break; } catch { break; }
+                if (AdapterUp() && TorUp(300)) { up = true; break; }
+            }
+            if (!up)
+            {
+                try { xray.Kill(); } catch { }
+                WintunDeleteAdapterByName(TunName);
+                SetIp6Binding(true);
+                WriteResult("error: TUN adapter did not come up (is xray-tun.json valid?)");
+                return 1;
+            }
 
+            // tor must reach its guards/bridges outside the tunnel
+            var relays = ParseRelayIps();
+            int relayOk = 0;
+            foreach (string ip in relays)
+                if (AddRelayRoute(ip, physIf, physGw)) relayOk++;
+
+            WriteState("status=on\r\npid=" + xray.Id +
+                       "\r\nphysGw=" + UIntToIp(physGw) +
+                       "\r\nphysIf=" + physIf +
+                       "\r\nrelays=" + string.Join(",", relays));
+            WriteResult("on: xray TUN active (" + relayOk + "/" + relays.Count +
+                        " relay routes, DNS hijacked, UDP blocked)");
+            Run("ipconfig.exe", "/flushdns");
+
+            int torDown = 0;
             try
             {
                 while (true)
                 {
                     Thread.Sleep(4000);
                     if (File.Exists(StopFile)) break;
-                    try { tun.Refresh(); } catch { }
-                    if (tun.HasExited) break;
+                    try { xray.Refresh(); if (xray.HasExited) break; } catch { break; }
                     if (TorUp(1500)) torDown = 0; else torDown++;
                     if (torDown >= 4) break;
-                    if (DateTime.UtcNow >= deadline)
-                    {
-                        deadline = DateTime.UtcNow.AddMinutes(2);
-                        var fresh = ParseRelayIps();
-                        foreach (string ip in fresh)
-                        {
-                            if (known.Add(ip))
-                                AddRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf, 1);
-                        }
-                        foreach (string ip in known.ToList())
-                        {
-                            if (!fresh.Contains(ip))
-                            {
-                                known.Remove(ip);
-                                DeleteRoute(IpToUInt(ip), 32, IpToUInt(physGw), physIf);
-                            }
-                        }
-                        WriteState(BuildState(tun.Id, tunIf, physIf, physGw, known));
-                    }
                 }
             }
             finally
             {
-                try { tun.Kill(); } catch { }
-                TeardownFromState(ReadState());
+                try { xray.Kill(); } catch { }
+                Thread.Sleep(500);
+                Teardown();
                 WriteResult("off");
             }
             return 0;
@@ -894,7 +509,7 @@ namespace TunHelper
             }
             if (arg == "off")
             {
-                TeardownFromState(ReadState());
+                Teardown();
                 WriteResult("off");
                 return 0;
             }

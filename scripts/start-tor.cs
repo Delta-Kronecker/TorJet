@@ -395,6 +395,52 @@ namespace StartTor
         // freeze the caller forever — route cleanup of a few thousand /32s
         // can legitimately take a while, so the default stays unbounded for
         // the interactive CLI path and callers pass explicit budgets).
+        // Xray TUN config: everything the system sends enters the tun device
+        // and is routed through tor's SOCKS; tor.exe/xray.exe are excluded by
+        // process; DNS (port 53, tcp+udp) is hijacked into the DNS module,
+        // which resolves via tor's own DNSPort on loopback; UDP is dropped
+        // (tor has no UDP).
+        private static string BuildXrayTunConfig()
+        {
+            return
+@"{
+  ""log"": { ""loglevel"": ""warning"" },
+  ""inbounds"": [
+    {
+      ""tag"": ""tun-in"",
+      ""protocol"": ""tun"",
+      ""sniffing"": { ""enabled"": true, ""destOverride"": [""http"", ""tls"", ""quic""] },
+      ""settings"": {
+        ""name"": ""TorJetTun"",
+        ""mtu"": 1500,
+        ""address"": [""172.19.0.1/30""],
+        ""autoRoute"": true
+      }
+    }
+  ],
+  ""outbounds"": [
+    {
+      ""tag"": ""tor"",
+      ""protocol"": ""socks"",
+      ""settings"": { ""servers"": [ { ""address"": ""127.0.0.1"", ""port"": 9050 } ] }
+    },
+    { ""tag"": ""direct"", ""protocol"": ""freedom"", ""settings"": {} },
+    { ""tag"": ""blackhole"", ""protocol"": ""blackhole"", ""settings"": {} },
+    { ""tag"": ""dns-out"", ""protocol"": ""dns"", ""settings"": {} }
+  ],
+  ""dns"": {
+    ""queryStrategy"": ""UseIPv4"",
+    ""servers"": [ { ""address"": ""127.0.0.1"", ""port"": 53530 } ]
+  },
+  ""routing"": {
+    ""rules"": [
+      { ""type"": ""field"", ""port"": 53, ""network"": ""tcp,udp"", ""outboundTag"": ""dns-out"" },
+      { ""type"": ""field"", ""network"": ""udp"", ""outboundTag"": ""blackhole"" }
+    ]
+  }
+}";
+        }
+
         private static bool SpawnElevated(string args, bool wait, int waitMs = -1)
         {
             try
@@ -431,7 +477,7 @@ namespace StartTor
             {
                 if (!IsAdmin()) Console.WriteLine("  TUN mode needs Administrator - accept the UAC prompt.");
                 Console.WriteLine("  Turning TUN ON (all traffic via Tor)...");
-                DnsCacheStart();   // port 53 live before Windows points DNS at it
+                try { Directory.CreateDirectory(DataDir); File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"), BuildXrayTunConfig(), new UTF8Encoding(false)); } catch { }
                 if (!SpawnElevated("on", false))
                 {
                     Console.WriteLine("  TUN enable cancelled.");
@@ -445,15 +491,12 @@ namespace StartTor
                     if (last.StartsWith("on:") || last.StartsWith("error:")) break;
                 }
                 Console.WriteLine("  " + last);
-                if (last.StartsWith("on:"))
-                    DnsCacheStart();   // system DNS now points at our caching stub
             }
         }
 
         private static void TurnTunOff()
         {
             Console.WriteLine("  Turning TUN OFF...");
-            DnsCacheStop();
             try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
             for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
             if (!TunActive()) { Console.WriteLine("  TUN OFF"); return; }
@@ -470,7 +513,6 @@ namespace StartTor
             cleaned = true;
             StopKeepAlive();
             circuitWatchStop = true;
-            DnsCacheStop();
             if (TunActive())
             {
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
@@ -2715,305 +2757,6 @@ namespace StartTor
             }
         }
 
-        // --- DNS cache for TUN mode ------------------------------------------
-        // While TUN routes all traffic through tor, system DNS points at
-        // 127.0.0.1:53. This tiny stub answers from an in-memory TTL cache and
-        // otherwise forwards the raw UDP datagram to tor's DNSPort
-        // (127.0.0.1:53530), cutting the full-circuit latency of repeated
-        // lookups. Started when TUN comes up, stopped on TUN off / cleanup.
-        private const int DnsCachePort = 53;
-        private const int DnsUpstreamPort = 53530;
-        // The DNS stub forwards here; the auto race re-points it at the
-        // winner's DNS port so tor's own DNSPort listener never has to move.
-        private static int dnsUpstreamActive = DnsUpstreamPort;
-        private const int DnsCacheMaxEntries = 4096;
-        private static volatile bool dnsCacheStop;
-        private static Thread dnsCacheThread;
-        private static UdpClient dnsListener;
-        private static Thread dnsTcpThread;
-        private static TcpListener dnsTcpListener;
-        private static readonly object dnsLock = new object();
-
-        private sealed class DnsEntry { public byte[] Reply; public DateTime Expires; }
-        private static readonly Dictionary<string, DnsEntry> dnsCache =
-            new Dictionary<string, DnsEntry>(StringComparer.Ordinal);
-
-        // Key for the question section: lowercased qname + qtype (transaction
-        // ID excluded - it is rewritten per reply).
-        private static string DnsQuestionKey(byte[] q, int len)
-        {
-            try
-            {
-                if (len < 13) return null;
-                int idx = 12;
-                var sb = new StringBuilder();
-                while (idx < len && q[idx] != 0)
-                {
-                    int l = q[idx];
-                    if ((l & 0xC0) != 0 || idx + 1 + l > len) return null;
-                    sb.Append(Encoding.ASCII.GetString(q, idx + 1, l).ToLowerInvariant());
-                    sb.Append('.');
-                    idx += l + 1;
-                }
-                if (idx + 5 > len) return null;
-                int qtype = (q[idx + 1] << 8) | q[idx + 2];
-                return sb.ToString() + "|" + qtype;
-            }
-            catch { return null; }
-        }
-
-        // Skips a (possibly compressed) DNS name; returns index after it.
-        private static int DnsSkipName(byte[] r, int idx, int len)
-        {
-            while (idx < len)
-            {
-                int l = r[idx];
-                if (l == 0) return idx + 1;
-                if ((l & 0xC0) == 0xC0) return idx + 2;
-                idx += l + 1;
-            }
-            return idx;
-        }
-
-        // Smallest TTL across all answer records, or -1 when unparsable.
-        private static int DnsMinTtl(byte[] r, int len)
-        {
-            try
-            {
-                if (len < 12) return -1;
-                int qd = (r[4] << 8) | r[5];
-                int an = (r[6] << 8) | r[7];
-                int idx = 12;
-                for (int i = 0; i < qd && idx < len; i++)
-                {
-                    idx = DnsSkipName(r, idx, len);
-                    idx += 4;
-                }
-                int best = -1;
-                for (int i = 0; i < an && idx + 10 <= len; i++)
-                {
-                    idx = DnsSkipName(r, idx, len);
-                    if (idx + 10 > len) break;
-                    int ttl = (r[idx + 4] << 24) | (r[idx + 5] << 16) |
-                              (r[idx + 6] << 8) | r[idx + 7];
-                    if (ttl < 0) ttl = 0;
-                    if (best < 0 || ttl < best) best = ttl;
-                    int rdlen = (r[idx + 8] << 8) | r[idx + 9];
-                    idx += 10 + rdlen;
-                }
-                return best;
-            }
-            catch { return -1; }
-        }
-
-        private static void DnsCacheLoop()
-        {
-            UdpClient listener = null;
-            try { listener = new UdpClient(new IPEndPoint(IPAddress.Loopback, DnsCachePort)); }
-            catch (Exception ex)
-            {
-                Log("dns-cache: cannot bind 127.0.0.1:" + DnsCachePort +
-                    " (" + ex.Message + ") - DNS will bypass the cache.");
-                lock (dnsLock) { dnsCacheThread = null; }
-                return;
-            }
-            lock (dnsLock)
-            {
-                if (dnsCacheStop) { try { listener.Close(); } catch { } return; }
-                dnsListener = listener;
-            }
-            Log("dns-cache: listening on 127.0.0.1:" + DnsCachePort +
-                " -> tor 127.0.0.1:" + dnsUpstreamActive);
-            while (!dnsCacheStop)
-            {
-                IPEndPoint from = new IPEndPoint(IPAddress.Loopback, 0);
-                byte[] query;
-                try { query = listener.Receive(ref from); }
-                catch { break; } // closed by Stop()
-                ThreadPool.QueueUserWorkItem(delegate(object o)
-                {
-                    object[] a = (object[])o;
-                    HandleDnsQuery(listener, (byte[])a[0], (IPEndPoint)a[1]);
-                }, new object[] { query, from });
-            }
-            lock (dnsLock) { if (dnsListener == listener) dnsListener = null; }
-            try { listener.Close(); } catch { }
-        }
-
-        private static void HandleDnsQuery(UdpClient listener, byte[] query, IPEndPoint from)
-        {
-            try
-            {
-                string key = DnsQuestionKey(query, query.Length);
-                DnsEntry hit = null;
-                if (key != null)
-                    lock (dnsLock)
-                    {
-                        DnsEntry e;
-                        if (dnsCache.TryGetValue(key, out e))
-                        {
-                            if (e.Expires > DateTime.UtcNow) hit = e;
-                            else dnsCache.Remove(key);
-                        }
-                    }
-                if (hit != null)
-                {
-                    byte[] reply = new byte[hit.Reply.Length];   // patch in THIS query's ID
-                    Buffer.BlockCopy(hit.Reply, 0, reply, 0, reply.Length);
-                    reply[0] = query[0];
-                    reply[1] = query[1];
-                    listener.Send(reply, reply.Length, from);
-                    Interlocked.Increment(ref dnsCacheHits);
-                    return;
-                }
-                using (UdpClient up = new UdpClient())
-                {
-                    up.Client.ReceiveTimeout = 5000;
-                    up.Connect(IPAddress.Loopback, dnsUpstreamActive);
-                    up.Send(query, query.Length);
-                    IPEndPoint any = new IPEndPoint(IPAddress.Any, 0);
-                    byte[] resp = up.Receive(ref any);
-                    listener.Send(resp, resp.Length, from);
-                    // Cache only successful answers with a parsable positive TTL.
-                    if (key != null && resp.Length > 3 && (resp[3] & 0x0F) == 0)
-                    {
-                        int ttl = DnsMinTtl(resp, resp.Length);
-                        if (ttl > 0)
-                        {
-                            if (ttl < 10) ttl = 10;
-                            if (ttl > 3600) ttl = 3600;
-                            lock (dnsLock)
-                            {
-                                if (dnsCache.Count >= DnsCacheMaxEntries) dnsCache.Clear();
-                                dnsCache[key] = new DnsEntry
-                                {
-                                    Reply = resp,
-                                    Expires = DateTime.UtcNow.AddSeconds(ttl)
-                                };
-                            }
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        private static long dnsCacheHits;
-
-        private static void DnsCacheStart()
-        {
-            lock (dnsLock)
-            {
-                if (dnsCacheThread != null) return;
-                dnsCacheStop = false;
-                dnsCacheThread = new Thread(DnsCacheLoop) { IsBackground = true };
-                dnsCacheThread.Start();
-                dnsTcpThread = new Thread(DnsTcpLoop) { IsBackground = true };
-                dnsTcpThread.Start();
-            }
-        }
-
-        // Some resolvers fall back to DNS-over-TCP when a UDP reply is
-        // truncated; without a TCP listener those domains would hang in the
-        // browser while lighter apps (chat) keep working.
-        private static void DnsTcpLoop()
-        {
-            try
-            {
-                dnsTcpListener = new TcpListener(IPAddress.Loopback, DnsCachePort);
-                dnsTcpListener.Start();
-            }
-            catch (Exception ex)
-            {
-                Log("dns-tcp: bind failed (" + ex.Message + ")");
-                return;
-            }
-            while (!dnsCacheStop)
-            {
-                TcpClient c;
-                try { c = dnsTcpListener.AcceptTcpClient(); }
-                catch { break; }
-                ThreadPool.QueueUserWorkItem(delegate { HandleDnsTcp(c); });
-            }
-            try { dnsTcpListener.Stop(); } catch { }
-        }
-
-        private static bool ReadExactNet(NetworkStream s, byte[] buf, int n)
-        {
-            int got = 0;
-            while (got < n)
-            {
-                int r = s.Read(buf, got, n - got);
-                if (r <= 0) return false;
-                got += r;
-            }
-            return true;
-        }
-
-        // One DNS message per TCP connection (what every resolver does).
-        private static void HandleDnsTcp(TcpClient client)
-        {
-            try
-            {
-                client.ReceiveTimeout = 5000;
-                client.SendTimeout = 5000;
-                using (TcpClient up = new TcpClient())
-                {
-                    up.Connect(IPAddress.Loopback, dnsUpstreamActive);
-                    up.ReceiveTimeout = 5000;
-                    up.SendTimeout = 5000;
-                    NetworkStream cs = client.GetStream();
-                    NetworkStream us = up.GetStream();
-                    byte[] lenBuf = new byte[2];
-                    if (!ReadExactNet(cs, lenBuf, 2)) return;
-                    int len = (lenBuf[0] << 8) | lenBuf[1];
-                    if (len <= 0 || len > 4096) return;
-                    byte[] query = new byte[len];
-                    if (!ReadExactNet(cs, query, len)) return;
-                    us.Write(lenBuf, 0, 2);
-                    us.Write(query, 0, len);
-                    byte[] rlen = new byte[2];
-                    if (!ReadExactNet(us, rlen, 2)) return;
-                    int rn = (rlen[0] << 8) | rlen[1];
-                    if (rn <= 0 || rn > 8192) return;
-                    byte[] resp = new byte[rn];
-                    if (!ReadExactNet(us, resp, rn)) return;
-                    cs.Write(rlen, 0, 2);
-                    cs.Write(resp, 0, rn);
-                }
-            }
-            catch { }
-            finally
-            {
-                try { client.Close(); } catch { }
-            }
-        }
-
-        private static void DnsCacheStop()
-        {
-            Thread t, tt;
-            lock (dnsLock)
-            {
-                t = dnsCacheThread;
-                tt = dnsTcpThread;
-                dnsCacheThread = null;
-                dnsTcpThread = null;
-                dnsCacheStop = true;
-                if (dnsListener != null)
-                {
-                    try { dnsListener.Close(); } catch { }
-                    dnsListener = null;
-                }
-                if (dnsTcpListener != null)
-                {
-                    try { dnsTcpListener.Stop(); } catch { }
-                    dnsTcpListener = null;
-                }
-            }
-            if (t != null) { try { t.Join(2000); } catch { } }
-            if (tt != null) { try { tt.Join(2000); } catch { } }
-        }
-
         // Picks the first speed endpoint reachable through the proxy.
         private static void ProbeBenchUrl()
         {
@@ -3571,7 +3314,6 @@ namespace StartTor
                 AutoEmit("[auto] live switch rejected by tor — falling back to restart");
                 return false;
             }
-            dnsUpstreamActive = w.Dns;
             Thread.Sleep(700);   // let the new control listener come up
             int pct; string tag, summ;
             if (!BootstrapPhaseFor(9051, AutoRacerLog(w), ControlCookie,
@@ -4104,7 +3846,6 @@ namespace StartTor
                 circuitWatchStop = true;
                 watchdogStop = true;
                 StopKeepAlive();
-                DnsCacheStop();
                 try { torProc.Kill(); torProc.WaitForExit(5000); } catch { }
                 for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
                 try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
@@ -4227,11 +3968,8 @@ namespace StartTor
                 Console.Error.Flush();
             }
             catch { }
-            if (consoleAttached)
-            {
-                try { FreeConsole(); } catch { }
-                Thread.Sleep(60);
-            }
+            // NOTE: no FreeConsole here — freeing before the CLR finalizers run
+            // makes Console.ControlCHooker.Unhook throw at exit (winexe).
         }
 
         private static int Main(string[] args)
@@ -4263,7 +4001,8 @@ namespace StartTor
             // Recover the user's pre-TorJet proxy settings if a previous run
             // crashed while the TorJet system proxy was still enabled.
             LoadProxyBackup();
-            Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
+            if (consoleAttached && !consoleOwned)
+                Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs e)
             {
                 e.Cancel = true;
                 Cleanup();
@@ -4344,6 +4083,16 @@ namespace StartTor
                 }
                 TurnTunOff();
                 return TunActive() ? 1 : 0;
+            }
+            if (args.Length > 0 && args[0] == "--gen-xray-tun")
+            {
+                // Writes the TUN-mode Xray config (used by tun-helper). Also
+                // handy for validating it: xray.exe run -test -c xray-tun.json
+                Directory.CreateDirectory(DataDir);
+                File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"),
+                                  BuildXrayTunConfig(), new UTF8Encoding(false));
+                Console.WriteLine("xray-tun.json written to " + DataDir);
+                return 0;
             }
             if (args.Length > 0 && args[0] == "--tun-status")
             {

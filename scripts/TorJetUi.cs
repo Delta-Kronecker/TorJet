@@ -1186,7 +1186,13 @@ namespace StartTor
 
             private void EnableTunAndWait()
             {
-                DnsCacheStart();   // port 53 live before Windows points DNS at it
+                try
+                {
+                    Directory.CreateDirectory(DataDir);
+                    File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"),
+                                      BuildXrayTunConfig(), new UTF8Encoding(false));
+                }
+                catch { }
                 try
                 {
                     Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir, EnvironmentVariableTarget.Process);
@@ -1212,7 +1218,6 @@ namespace StartTor
                     if (r.StartsWith("on:") || r.StartsWith("error:"))
                     {
                         if (r.StartsWith("error:")) FlashMessage("TUN failed");
-                        DnsCacheStart();
                         return;
                     }
                 }
@@ -1221,7 +1226,6 @@ namespace StartTor
 
             private void DisableTunAndWait()
             {
-                DnsCacheStop();
                 try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
                 // Route cleanup of a few thousand relay /32s can take a while;
                 // the state file flipping to "off" is the authoritative signal.
@@ -1402,7 +1406,6 @@ namespace StartTor
                 watchdogStop = true;
                 circuitWatchStop = true;
                 StopKeepAlive();
-                DnsCacheStop();
                 try { if (torProc != null) torProc.Kill(); } catch { }
                 torProc = null;
                 LogLine("tor stopped (" + why + ")");
@@ -1462,7 +1465,6 @@ namespace StartTor
                             watchdogStop = true;
                             circuitWatchStop = true;
                             StopKeepAlive();
-                            DnsCacheStop();
                             tunWasOnBeforeRestart = TunActive();
                             LogLine("watchdog: restarting tor (" + restartAttempts + "/3)");
                             // reconnect with the winning mode — never re-race
@@ -1551,7 +1553,6 @@ namespace StartTor
                     watchdogStop = true;
                     circuitWatchStop = true;
                     StopKeepAlive();
-                    DnsCacheStop();
                     try { if (torProc != null) torProc.Kill(); } catch { }
                     Cleanup();
                 }
@@ -1717,7 +1718,6 @@ namespace StartTor
                     watchdogStop = true;
                     circuitWatchStop = true;
                     StopKeepAlive();
-                    DnsCacheStop();
                     try { if (torProc != null) torProc.Kill(); } catch { }
                     Cleanup();
                 }

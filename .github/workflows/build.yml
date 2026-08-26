@@ -59,12 +59,7 @@ jobs:
             go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@v0.0.6
           cp "$GOPATH_BIN/client.exe" out/webtunnel.exe
 
-          echo "=== tun2socks (TUN mode) ==="
-          GOOS=windows GOARCH=amd64 \
-            go install github.com/xjasonlyu/tun2socks/v2@v2.6.0
-          cp "$GOPATH_BIN/tun2socks.exe" out/tun2socks.exe
-
-          echo "=== wintun driver ==="
+          echo "=== wintun driver (Xray TUN) ==="
           curl -fsSL -o wintun.zip https://www.wintun.net/builds/wintun-0.14.1.zip
           echo "$WINTUN_ZIP_SHA256  wintun.zip" | sha256sum -c -
           unzip -o wintun.zip wintun/bin/amd64/wintun.dll
