@@ -428,8 +428,9 @@ namespace StartTor
       ""settings"": {
         ""name"": ""TorJetTun"",
         ""mtu"": 1500,
-        ""address"": [""172.19.0.1/30""],
-        ""autoRoute"": true
+        ""gateway"": [""172.19.0.1/30""],
+        ""autoSystemRoutingTable"": [""main""],
+        ""autoOutboundsInterface"": ""auto""
       }
     }
   ],

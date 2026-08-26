@@ -238,8 +238,12 @@ namespace TunHelper
             r.Protocol = 3; // NETMGMT
             uint rc = _CreateIpForwardEntry2(ref r);
             if (rc == 183) return true;
-            return rc == NO_ERROR;
+            if (rc == NO_ERROR) return true;
+            if (_lastRouteError == 0) _lastRouteError = (int)rc;
+            return false;
         }
+
+        private static int _lastRouteError;
 
         private static bool DeleteRelayRoute(string ip, int ifIndex, uint nextHop)
         {
@@ -523,7 +527,8 @@ namespace TunHelper
                        "\r\nphysIf=" + physIf +
                        "\r\nrelays=" + string.Join(",", relays));
             WriteResult("on: xray TUN active (" + relayOk + "/" + relays.Count +
-                        " relay routes, DNS hijacked, UDP blocked)");
+                        " relay routes" + (_lastRouteError != 0 ? ", first error=" + _lastRouteError : "") +
+                        ", DNS hijacked, UDP blocked)");
             Run("ipconfig.exe", "/flushdns");
 
             int torDown = 0;
