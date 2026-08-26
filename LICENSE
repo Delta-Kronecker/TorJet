@@ -10,9 +10,9 @@ https://github.com/Delta-Kronecker/TorJet (the "Repository").
 "The Core" means all source code, configuration templates, build scripts,
 workflow definitions, and documentation authored by the TorJet project for the
 TorJet launcher — including, without limitation, scripts/start-tor.cs,
-scripts/tun-helper.cs, scripts/build-start-tor.ps1, scripts/bench.ps1,
+scripts/build-start-tor.ps1, scripts/bench.ps1,
 configs/torrc.jet, and .github/workflows/build.yml — but EXCLUDING third-party
-components (tor, pluggable transports, tun2socks, wintun, and any other
+components (tor, pluggable transports, and any other
 binaries or sources imported from upstream projects), which remain under their
 own respective licenses.
 

@@ -11,13 +11,12 @@
 // The user picks a connection mode (direct / webtunnel / obfs4 / vanilla / snowflake); the
 // program writes data\torrc and starts tor. Tor is NOT set as the system proxy
 // automatically: press P to toggle the Windows system proxy
-// (HTTP 127.0.0.1:8118) on/off. T toggles TUN mode (routes ALL system traffic
-// through tor - needs Administrator, spawns the elevated tun-helper.exe).
-// C stops tor (TUN + system proxy + core) and returns to the main menu.
-// Subcommands: --newcircuit, --stop, --tun-off, --tun-status, --update-bridges,
+// (HTTP 127.0.0.1:8118) on/off. C stops tor (system proxy + core) and returns
+// to the main menu.
+// Subcommands: --newcircuit, --stop, --update-bridges,
 // --bootstrap-only [mode].
-// A trailing `proxy` or `tun` argument auto-enables the Windows system proxy or
-// TUN mode right after bootstrap, e.g. `TorJet.exe obfs4 aggressive proxy`.
+// A trailing `proxy` argument auto-enables the Windows system proxy
+// right after bootstrap, e.g. `TorJet.exe obfs4 aggressive proxy`.
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -172,11 +171,6 @@ namespace StartTor
         private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "snowflake_tested.txt" };
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
-
-        private static readonly string TunHelperExe = Path.Combine(DataDir, "tun-helper.exe");
-        private static readonly string TunStateFile = Path.Combine(DataDir, "tun-state.txt");
-        private static readonly string TunStopFile = Path.Combine(DataDir, "tun-stop.txt");
-        private static readonly string TunResultFile = Path.Combine(DataDir, "tun-result.txt");
 
         // Ports used by this program's tor (torrc.template / torrc.jet).
         // Occupied ports at startup mean a previous tor instance is still alive.
@@ -348,116 +342,10 @@ namespace StartTor
             InternetSetOption(IntPtr.Zero, InternetOptionRefresh, IntPtr.Zero, 0);
         }
 
-        private static bool IsAdmin()
-        {
-            try
-            {
-                using (var id = System.Security.Principal.WindowsIdentity.GetCurrent())
-                {
-                    var p = new System.Security.Principal.WindowsPrincipal(id);
-                    return p.IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
-                }
-            }
-            catch { return false; }
-        }
-
-        private static string ReadTunState()
-        {
-            try
-            {
-                if (File.Exists(TunStateFile))
-                {
-                    foreach (string line in File.ReadAllLines(TunStateFile))
-                        if (line.TrimStart().StartsWith("status="))
-                            return line.TrimStart().Substring(7).Trim();
-                }
-            }
-            catch { }
-            return "off";
-        }
-
-        // TUN counts as ON when the state file says so OR a tun-helper keeper is
-        // actually running. The state file can be emptied/left stale by a failed
-        // enable; only trusting it made "T" keep re-enabling instead of turning
-        // the tunnel off.
-        private static bool TunActive()
-        {
-            // The state file is the single source of truth: the helper writes
-            // "status=off" only AFTER routes/adapter are restored, and a
-            // lingering helper process must never keep "on" alive past that.
-            string st = ReadTunState();
-            if (st == "off") return false;
-            if (st == "on") return true;
-            try
-            {
-                foreach (Process p in Process.GetProcessesByName("tun-helper"))
-                    if (!p.HasExited &&
-                        p.MainModule.FileName.Equals(TunHelperExe, StringComparison.OrdinalIgnoreCase))
-                        return true;
-            }
-            catch { }
-            return false;
-        }
-
-        private static string ReadTunResult()
-        {
-            try { if (File.Exists(TunResultFile)) return File.ReadAllText(TunResultFile).Trim(); }
-            catch { }
-            return "";
-        }
-
         // waitMs: bounded wait when >= 0 (a hung elevated helper must never
         // freeze the caller forever — route cleanup of a few thousand /32s
         // can legitimately take a while, so the default stays unbounded for
         // the interactive CLI path and callers pass explicit budgets).
-        // Xray TUN config: everything the system sends enters the tun device
-        // and is routed through tor's SOCKS; tor.exe/xray.exe are excluded by
-        // process; DNS (port 53, tcp+udp) is hijacked into the DNS module,
-        // which resolves via tor's own DNSPort on loopback; UDP is dropped
-        // (tor has no UDP).
-        private static string BuildXrayTunConfig()
-        {
-            return
-@"{
-  ""log"": { ""loglevel"": ""warning"" },
-  ""inbounds"": [
-    {
-      ""tag"": ""tun-in"",
-      ""protocol"": ""tun"",
-      ""sniffing"": { ""enabled"": true, ""destOverride"": [""http"", ""tls"", ""quic""] },
-      ""settings"": {
-        ""name"": ""TorJetTun"",
-        ""mtu"": 1500,
-        ""gateway"": [""172.19.0.1/30""],
-        ""autoSystemRoutingTable"": [""main""],
-        ""autoOutboundsInterface"": ""auto""
-      }
-    }
-  ],
-  ""outbounds"": [
-    {
-      ""tag"": ""tor"",
-      ""protocol"": ""socks"",
-      ""settings"": { ""servers"": [ { ""address"": ""127.0.0.1"", ""port"": 9050 } ] }
-    },
-    { ""tag"": ""direct"", ""protocol"": ""freedom"", ""settings"": {} },
-    { ""tag"": ""blackhole"", ""protocol"": ""blackhole"", ""settings"": {} },
-    { ""tag"": ""dns-out"", ""protocol"": ""dns"", ""settings"": {} }
-  ],
-  ""dns"": {
-    ""queryStrategy"": ""UseIPv4"",
-    ""servers"": [ { ""address"": ""127.0.0.1"", ""port"": 53530 } ]
-  },
-  ""routing"": {
-    ""domainStrategy"": ""AsIs"",
-    ""rules"": [
-      { ""type"": ""field"", ""port"": 53, ""network"": ""tcp,udp"", ""outboundTag"": ""dns-out"" },
-      { ""type"": ""field"", ""network"": ""udp"", ""outboundTag"": ""blackhole"" }
-    ]
-  }
-}";
-        }
-
         // Runs data\TorJetCli.exe (console subsystem) with the same args so
         // the calling shell waits and keyboard input reaches the session.
         // Returns false when the companion is missing (dev builds fall back
@@ -469,8 +357,6 @@ namespace StartTor
                 string cli = Path.Combine(DataDir, "TorJetCli.exe");
                 if (!File.Exists(cli)) return false;
                 Environment.SetEnvironmentVariable("TORJET_DATA_DIR", DataDir,
-                                                   EnvironmentVariableTarget.Process);
-                Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir,
                                                    EnvironmentVariableTarget.Process);
                 var psi = new ProcessStartInfo
                 {
@@ -488,89 +374,12 @@ namespace StartTor
             catch { return false; }
         }
 
-        private static bool SpawnElevated(string args, bool wait, int waitMs = -1)
-        {
-            try
-            {
-                // Tell the elevated helper where the data dir is. It used to sit
-                // next to data\ and derive it from its own location; now it ships
-                // inside data\, so this keeps state/result/stop files in sync.
-                Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir,
-                                                   EnvironmentVariableTarget.Process);
-                var psi = new ProcessStartInfo
-                {
-                    FileName = TunHelperExe,
-                    Arguments = args,
-                    UseShellExecute = true,
-                    Verb = "runas",
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-                using (Process p = Process.Start(psi))
-                {
-                    if (wait) p.WaitForExit(waitMs < 0 ? int.MaxValue : waitMs);
-                }
-                return true;
-            }
-            catch { return false; }
-        }
-
-        private static void ToggleTun()
-        {
-            if (TunActive())
-            {
-                TurnTunOff();
-            }
-            else
-            {
-                if (!IsAdmin()) Console.WriteLine("  TUN mode needs Administrator - accept the UAC prompt.");
-                Console.WriteLine("  Turning TUN ON (all traffic via Tor)...");
-                try { Directory.CreateDirectory(DataDir); File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"), BuildXrayTunConfig(), new UTF8Encoding(false)); } catch { }
-                if (!SpawnElevated("on", false))
-                {
-                    Console.WriteLine("  TUN enable cancelled.");
-                    return;
-                }
-                string last = "";
-                for (int i = 0; i < 20; i++)
-                {
-                    Thread.Sleep(1000);
-                    last = ReadTunResult();
-                    if (last.StartsWith("on:") || last.StartsWith("error:")) break;
-                }
-                Console.WriteLine("  " + last);
-            }
-        }
-
-        private static void TurnTunOff()
-        {
-            Console.WriteLine("  Turning TUN OFF...");
-            try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-            for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
-            if (!TunActive()) { Console.WriteLine("  TUN OFF"); return; }
-            Console.WriteLine("  keeper did not stop; forcing teardown (UAC)...");
-            if (SpawnElevated("off", true, 20000))
-                Console.WriteLine("  " + (TunActive() ? "TUN still ON - check data\\tun-result.txt" : "TUN OFF"));
-            else
-                Console.WriteLine("  teardown cancelled - TUN still ON");
-        }
-
         private static void Cleanup()
         {
             if (cleaned) return;
             cleaned = true;
             StopKeepAlive();
             circuitWatchStop = true;
-            if (TunActive())
-            {
-                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                for (int i = 0; i < 8; i++)
-                {
-                    Thread.Sleep(500);
-                    if (!TunActive()) break;
-                }
-                if (TunActive())
-                    try { SpawnElevated("off", true, 20000); } catch { }
-            }
             if (torProc != null)
             {
                 try { if (!torProc.HasExited) { torProc.Kill(); torProc.WaitForExit(5000); } }
@@ -3089,7 +2898,7 @@ namespace StartTor
 
         // --- startup port check --------------------------------------------
         // If the TorJet ports are already occupied, a previous tor instance is
-        // still running: stop it (and any leftover TUN/system proxy), then carry
+        // still running: stop it (and any leftover system proxy), then carry
         // on with a fresh start instead of refusing to launch.
         private static bool TcpPortBusy(int port)
         {
@@ -3130,18 +2939,9 @@ namespace StartTor
         {
             Process running = FindTor();
             bool prev = running != null || PreviousRunActive();
-            if (!prev && !TunActive()) return;
+            if (!prev) return;
 
             Console.WriteLine("  A previous TorJet run is still active - stopping it.");
-
-            if (TunActive())
-            {
-                Console.WriteLine("  Stopping previous TUN...");
-                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                for (int i = 0; i < 16 && TunActive(); i++) Thread.Sleep(500);
-                if (TunActive())
-                    try { SpawnElevated("off", true, 20000); } catch { }
-            }
 
             if (prev)
             {
@@ -3186,7 +2986,7 @@ namespace StartTor
         // Independent probe every WatchdogProbeIntervalS seconds once the
         // post-bootstrap grace window has passed. After WatchdogFailuresToRestart
         // consecutive failures it kills tor so the session's restart loop
-        // rebuilds monitor, keep-alive and TUN. --no-watchdog disables it.
+        // rebuilds monitor and keep-alive. --no-watchdog disables it.
         private static bool watchdogEnabled = true;
         private const int WatchdogProbeIntervalS = 15;
         private const int WatchdogFailuresToRestart = 4;
@@ -3635,7 +3435,7 @@ namespace StartTor
         // Runs one Tor session: writes torrc, boots tor with a live progress
         // bar, then serves the P/T/S/C keys until the user presses C or tor
         // dies. A hung tunnel is detected by the watchdog and automatically
-        // restarted (up to 3 attempts, TUN restored afterwards).
+        // restarted (up to 3 attempts).
         // Returns 0 (clean exit), 1 (error) or 2 (return to main menu).
         private static int RunTorSession(int mode, int strategy,
                                          bool genOnly, bool bootstrapOnly, string autoMode,
@@ -3661,7 +3461,6 @@ namespace StartTor
 
             string startErr = null;
             bool aborted = false;
-            bool tunWasOn = false;
             bool showBanners = true;
             for (int attempt = 1; ; attempt++)
             {
@@ -3772,20 +3571,7 @@ namespace StartTor
                         SetSystemProxy(true);
                         Console.WriteLine("  System proxy ON  (127.0.0.1:8118)");
                     }
-                    else if (autoMode == "tun")
-                    {
-                        if (TunActive())
-                            Console.WriteLine("  TUN already ON");
-                        else
-                            ToggleTun();
-                    }
                 }
-                else if (tunWasOn && !TunActive())
-                {
-                    Console.WriteLine("  [watchdog] restoring TUN mode...");
-                    ToggleTun();
-                }
-                tunWasOn = TunActive();
 
                 if (attempt == 1)
                 {
@@ -3797,7 +3583,6 @@ namespace StartTor
                     Console.WriteLine("  J   keep-alive on/off");
                     Console.WriteLine();
                     Console.WriteLine("\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705\u2705");
-                    Console.WriteLine("  T    :     On / Off  TUN mode");
                     Console.WriteLine("  P    :     On / Off  system proxy");
                     Console.WriteLine("  C    :     Stop Tor, back to menu");
                     Console.WriteLine();
@@ -3860,11 +3645,6 @@ namespace StartTor
                             {
                                 lock (consoleLock) ViewLog();
                             }
-                            else if (ki.Key == ConsoleKey.T)
-                            {
-                                ToggleTun();
-                                tunWasOn = TunActive();
-                            }
                             else if (ki.Key == ConsoleKey.C)
                             {
                                 Console.WriteLine();
@@ -3886,9 +3666,7 @@ namespace StartTor
                     break;   // tor genuinely exited -> normal teardown below
 
                 // Watchdog path: rebuild the session without touching the
-                // system-proxy state. Snapshot TUN now - the keeper dies with
-                // tor, so this is the last reliable moment to observe it.
-                tunWasOn = TunActive();
+                // system-proxy state.
                 Log("watchdog: restarting tor (attempt " + attempt + ")");
                 circuitWatchStop = true;
                 watchdogStop = true;
@@ -4134,31 +3912,6 @@ namespace StartTor
             {
                 return UpdateBridges();
             }
-            if (args.Length > 0 && args[0] == "--tun-off")
-            {
-                if (!TunActive())
-                {
-                    Console.WriteLine("TUN OFF");
-                    return 0;
-                }
-                TurnTunOff();
-                return TunActive() ? 1 : 0;
-            }
-            if (args.Length > 0 && args[0] == "--gen-xray-tun")
-            {
-                // Writes the TUN-mode Xray config (used by tun-helper). Also
-                // handy for validating it: xray.exe run -test -c xray-tun.json
-                Directory.CreateDirectory(DataDir);
-                File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"),
-                                  BuildXrayTunConfig(), new UTF8Encoding(false));
-                Console.WriteLine("xray-tun.json written to " + DataDir);
-                return 0;
-            }
-            if (args.Length > 0 && args[0] == "--tun-status")
-            {
-                Console.WriteLine("TUN " + (TunActive() ? "ON" : "OFF"));
-                return 0;
-            }
 
             int mode = -1;
             int strategy = -1;
@@ -4187,7 +3940,6 @@ namespace StartTor
                 else if (a == "--watch-interval" && i + 1 < args.Length) { int.TryParse(args[++i], out watchIntervalS); }
                 else if (a == "--watch-cooldown" && i + 1 < args.Length) { int.TryParse(args[++i], out watchCooldownS); }
                 else if (a == "proxy" || a == "--proxy") autoMode = "proxy";
-                else if (a == "tun" || a == "--tun") autoMode = "tun";
                 else
                 {
                     int m = ParseMode(a);

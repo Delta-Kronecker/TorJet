@@ -304,7 +304,6 @@ namespace StartTor
             private DateTime errorMsgUntil = DateTime.MinValue;
             private int restartAttempts;
             private volatile bool sessionBusy;
-            private bool tunWasOnBeforeRestart;
             private bool showUpdateBanner;
             private string updateVersion = "";
             private DateTime nextUpdateCheck = DateTime.UtcNow.AddMinutes(2);
@@ -321,7 +320,7 @@ namespace StartTor
             private System.Windows.Forms.ContextMenuStrip trayMenu;
 
             private Rectangle rcClose, rcMin, rcModePrev, rcModeNext, rcModeVal,
-                              rcProxy, rcTun, rcSettings, rcPower, rcBack, rcUpdateBtn;
+                              rcProxy, rcSettings, rcPower, rcBack, rcUpdateBtn;
             private readonly Rectangle[] rcRowVal = new Rectangle[9];
             private readonly Rectangle[] rcRowPrev = new Rectangle[9];
             private readonly Rectangle[] rcRowNext = new Rectangle[9];
@@ -420,8 +419,7 @@ namespace StartTor
                 rcModeNext = new Rectangle(modeX + modeGroupW - 30, 232, 30, 30);
 
                 int half = (w - 24 * 2 - 10) / 2;
-                rcProxy = new Rectangle(24, 276, half, 42);
-                rcTun = new Rectangle(24 + half + 10, 276, half, 42);
+                rcProxy = new Rectangle(24, 276, w - 48, 42);
 
                 rcSettings = new Rectangle(24, 332, w - 48, 38);
                 rcUpdateBtn = new Rectangle(24, 380, w - 48, 38);
@@ -662,8 +660,6 @@ namespace StartTor
                 DrawChevron(g, rcModeNext, true, hoverId == 11);
 
                 PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20, false);
-                PaintTogglePill(g, rcTun, tunPending ? "TUN…" : "TUN",
-                    TunActive(), hoverId == 21, tunPending);
 
                 bool hovSet = hoverId == 30;
                 Theme.PillGradient(g, rcSettings,
@@ -992,7 +988,6 @@ namespace StartTor
                     case 10: CycleMode(-1); break;
                     case 11: CycleMode(1); break;
                     case 20: ApplyProxyToggle(!ProxyIsOurs()); break;
-                    case 21: ApplyTunToggle(!TunActive()); break;
                     case 30: page = Page.Settings; CancelEdit(); LayoutPass(); Invalidate(); break;
                     case 40: page = Page.Main; CancelEdit(); LayoutPass(); Invalidate(); break;
                     default:
@@ -1079,7 +1074,6 @@ namespace StartTor
                     if (rcModePrev.Contains(p)) return 10;
                     if (rcModeNext.Contains(p)) return 11;
                     if (rcProxy.Contains(p)) return 20;
-                    if (rcTun.Contains(p)) return 21;
                     if (rcSettings.Contains(p)) return 30;
                 }
                 else
@@ -1165,77 +1159,6 @@ namespace StartTor
                     FlashMessage("system proxy off");
                 }
                 Invalidate();
-            }
-
-            private volatile bool tunPending;
-
-            private void ApplyTunToggle(bool want)
-            {
-                if (sessionBusy || tunPending) return;
-                tunPending = true;
-                Invalidate();   // instant feedback: TUN… while the helper works
-                RunBg(delegate
-                {
-                    bool active = TunActive();
-                    if (want && !active) EnableTunAndWait();
-                    else if (!want && active) DisableTunAndWait();
-                    tunPending = false;
-                    UiInvokeDelegate(delegate { Invalidate(); });
-                });
-            }
-
-            private void EnableTunAndWait()
-            {
-                try
-                {
-                    Directory.CreateDirectory(DataDir);
-                    File.WriteAllText(Path.Combine(DataDir, "xray-tun.json"),
-                                      BuildXrayTunConfig(), new UTF8Encoding(false));
-                }
-                catch { }
-                try
-                {
-                    Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir, EnvironmentVariableTarget.Process);
-                    var psi = new ProcessStartInfo
-                    {
-                        FileName = TunHelperExe,
-                        Arguments = "on",
-                        UseShellExecute = true,
-                        Verb = "runas",
-                        WindowStyle = ProcessWindowStyle.Hidden
-                    };
-                    Process.Start(psi);
-                }
-                catch
-                {
-                    FlashMessage("TUN needs admin approval");
-                    return;
-                }
-                for (int i = 0; i < 25; i++)
-                {
-                    Thread.Sleep(1000);
-                    string r = ReadTunResult();
-                    if (r.StartsWith("on:") || r.StartsWith("error:"))
-                    {
-                        if (r.StartsWith("error:")) FlashMessage("TUN failed");
-                        return;
-                    }
-                }
-                FlashMessage("TUN timed out");
-            }
-
-            private void DisableTunAndWait()
-            {
-                try { File.WriteAllText(TunStopFile, "stop", new UTF8Encoding(false)); } catch { }
-                // Route cleanup of a few thousand relay /32s can take a while;
-                // the state file flipping to "off" is the authoritative signal.
-                for (int i = 0; i < 40 && TunActive(); i++) Thread.Sleep(500);
-                if (TunActive())
-                {
-                    SpawnElevated("off", true, 20000);
-                    for (int i = 0; i < 12 && TunActive(); i++) Thread.Sleep(500);
-                }
-                Run("ipconfig.exe", "/flushdns");
             }
 
             private void Run(string file, string args)
@@ -1465,7 +1388,6 @@ namespace StartTor
                             watchdogStop = true;
                             circuitWatchStop = true;
                             StopKeepAlive();
-                            tunWasOnBeforeRestart = TunActive();
                             LogLine("watchdog: restarting tor (" + restartAttempts + "/3)");
                             // reconnect with the winning mode — never re-race
                             int mode = lastWinnerMode >= 0 ? lastWinnerMode :
@@ -1479,11 +1401,6 @@ namespace StartTor
                                 try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
                                 cleaned = false;
                                 SessionWorker(mode, strat, false);
-                                if (tunWasOnBeforeRestart && !TunActive())
-                                {
-                                    EnableTunAndWait();
-                                    tunWasOnBeforeRestart = TunActive();
-                                }
                                 UiInvokeDelegate(delegate { SetState(RunState.Connected); });
                             });
                         }

@@ -2,12 +2,11 @@
 # TorJet Core License v1.0 (see LICENSE). Using this Core in another program
 # requires the mandatory attribution of https://github.com/Delta-Kronecker/TorJet.
 .SYNOPSIS
-  Compile scripts\start-tor.cs and scripts\tun-helper.cs using the .NET
-  Framework csc. start-tor.cs -> TorJet.exe (console exe), tun-helper.cs -> gui/winexe.
+  Compile scripts\start-tor.cs using the .NET
+  Framework csc. start-tor.cs -> TorJet.exe (windowed exe) + TorJetCli.exe.
 
 .PARAMETER OutFile
   Output path for TorJet.exe (default: scripts\TorJet.exe).
-  tun-helper.exe is written to the data\ folder next to it.
 
 .PARAMETER Version
   Version embedded into the launcher and shown in the menu
@@ -70,11 +69,3 @@ try {
 } finally {
     Remove-Item $versionSrc -ErrorAction SilentlyContinue
 }
-
-$helperDir = Join-Path (Split-Path -Parent $OutFile) "data"
-New-Item -ItemType Directory -Path $helperDir -Force | Out-Null
-$helperOut = Join-Path $helperDir "tun-helper.exe"
-$helperSrc = Join-Path $PSScriptRoot "tun-helper.cs"
-& $csc -nologo -optimize+ -target:winexe -out:$helperOut $helperSrc
-if ($LASTEXITCODE -ne 0) { Write-Host "[x] tun-helper compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
-Write-Host "[ok] built $helperOut"
