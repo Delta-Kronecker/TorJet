@@ -37,7 +37,22 @@ namespace StartTor
     {
         private static readonly string AppDir =
             Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location);
-        private static readonly string DataDir = Path.Combine(AppDir, "data");
+
+        // The console companion lives in data\ and is told the real data dir
+        // by the windowed launcher through TORJET_DATA_DIR. When run directly
+        // (no env), a companion sitting INSIDE data\ detects that via tor.exe.
+        private static string ResolveDataDir()
+        {
+            string env = Environment.GetEnvironmentVariable("TORJET_DATA_DIR");
+            if (!string.IsNullOrEmpty(env) && File.Exists(Path.Combine(env, "tor.exe")))
+                return env;
+            string d = Path.Combine(AppDir, "data");
+            if (File.Exists(Path.Combine(d, "tor.exe"))) return d;
+            if (File.Exists(Path.Combine(AppDir, "tor.exe"))) return AppDir;
+            return d;
+        }
+
+        private static readonly string DataDir = ResolveDataDir();
         private static readonly string TorExe = Path.Combine(DataDir, "tor.exe");
         private static readonly string TorrcTemplate = Path.Combine(DataDir, "torrc.template");
         private static readonly string Torrc = Path.Combine(DataDir, "torrc");
@@ -439,6 +454,36 @@ namespace StartTor
     ]
   }
 }";
+        }
+
+        // Runs data\TorJetCli.exe (console subsystem) with the same args so
+        // the calling shell waits and keyboard input reaches the session.
+        // Returns false when the companion is missing (dev builds fall back
+        // to an inline session).
+        private static bool SpawnCliChild(string[] args)
+        {
+            try
+            {
+                string cli = Path.Combine(DataDir, "TorJetCli.exe");
+                if (!File.Exists(cli)) return false;
+                Environment.SetEnvironmentVariable("TORJET_DATA_DIR", DataDir,
+                                                   EnvironmentVariableTarget.Process);
+                Environment.SetEnvironmentVariable("TUN_DATA_DIR", DataDir,
+                                                   EnvironmentVariableTarget.Process);
+                var psi = new ProcessStartInfo
+                {
+                    FileName = cli,
+                    Arguments = string.Join(" ", args),
+                    UseShellExecute = false,
+                    CreateNoWindow = false   // inherit the attached console
+                };
+                using (Process p = Process.Start(psi))
+                {
+                    if (p != null) p.WaitForExit();
+                }
+                return true;
+            }
+            catch { return false; }
         }
 
         private static bool SpawnElevated(string args, bool wait, int waitMs = -1)
@@ -3974,6 +4019,14 @@ namespace StartTor
 
         private static int Main(string[] args)
         {
+#if CONSOLE_BUILD
+            // Console companion (data\TorJetCli.exe): always a real console
+            // app, so shells wait on it and keyboard input reaches the session.
+            AttachParentConsole();
+            int cliRc = MainCli(args);
+            DetachConsole();
+            return cliRc;
+#else
             // GUI when launched bare (double-click) or with --gui; the classic
             // console flows stay available for every other invocation and via
             // --cli. A bare GUI launch never shows a console window.
@@ -3985,7 +4038,12 @@ namespace StartTor
                 RunGui();
                 return 0;
             }
+            // A windowed exe doesn't block the shell — interactive CLI sessions
+            // (auto race output, P/T/S/C hotkeys) run in the console companion,
+            // which the shell DOES wait on.
+            if (SpawnCliChild(args)) return 0;
             AttachParentConsole();
+#endif
             int rc = MainCli(args);
             DetachConsole();
             return rc;

@@ -56,6 +56,17 @@ try {
         -out:$OutFile $src $srcUi $versionSrc
     if ($LASTEXITCODE -ne 0) { Write-Host "[x] compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
     Write-Host "[ok] built $OutFile (version $Version)"
+
+    # Console companion: the shell waits on this one, so CLI sessions
+    # (auto race, hotkeys) keep working even though TorJet.exe is windowed.
+    $cliDir = Join-Path (Split-Path -Parent $OutFile) "data"
+    New-Item -ItemType Directory -Path $cliDir -Force | Out-Null
+    $cliOut = Join-Path $cliDir "TorJetCli.exe"
+    & $csc -nologo -optimize+ -target:exe -define:CONSOLE_BUILD `
+        -r:System.Windows.Forms.dll -r:System.Drawing.dll `
+        -out:$cliOut $src $srcUi $versionSrc
+    if ($LASTEXITCODE -ne 0) { Write-Host "[x] TorJetCli compile failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
+    Write-Host "[ok] built $cliOut (version $Version)"
 } finally {
     Remove-Item $versionSrc -ErrorAction SilentlyContinue
 }
