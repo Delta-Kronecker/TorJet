@@ -1320,13 +1320,16 @@ namespace StartTor
                     }
                     else
                     {
-                        sessionBusy = false;
-                        UiInvokeDelegate(delegate
+                        if (!stoppingBusy)
                         {
-                            bootPct = 0;
-                            SetState(RunState.Idle);
-                            FlashMessage("No cached connection");
-                        });
+                            sessionBusy = false;
+                            UiInvokeDelegate(delegate
+                            {
+                                bootPct = 0;
+                                SetState(RunState.Idle);
+                                FlashMessage("No cached connection");
+                            });
+                        }
                         return;
                     }
                 }
@@ -1347,19 +1350,35 @@ namespace StartTor
                     uiRaceActive = false;
                     if (!ok)
                     {
-                        sessionBusy = false;
-                        UiInvokeDelegate(delegate
+                        if (!stoppingBusy && !autoAbort)
                         {
-                            bootPct = 0;
-                            SetState(RunState.Idle);
-                            FlashMessage(raceErr);
-                        });
+                            sessionBusy = false;
+                            UiInvokeDelegate(delegate
+                            {
+                                bootPct = 0;
+                                SetState(RunState.Idle);
+                                FlashMessage(raceErr);
+                            });
+                        }
                         return;
                     }
                     mode = winnerMode;
                     lastWinnerMode = winnerMode;
                     if (autoLiveProc != null)
                         torProc = autoLiveProc;   // winner kept alive — skip the restart
+                    if (stoppingBusy)
+                    {
+                        // user asked to stop while the race was claiming the
+                        // winner — don't bring the session up, let Disconnect
+                        // drive the state back to Idle
+                        if (autoLiveProc != null)
+                        {
+                            try { autoLiveProc.Kill(); } catch { }
+                            autoLiveProc = null;
+                        }
+                        torProc = null;
+                        return;
+                    }
                 }
                 if (torProc == null)
                 {
@@ -1443,10 +1462,21 @@ namespace StartTor
                     Thread.Sleep(5000);
                     UiInvokeDelegate(delegate
                     {
-                        bootPct = 0;
-                        stoppingBusy = false;
-                        SetState(RunState.Idle);
-                        sessionBusy = false;
+                        if (state == RunState.Stopping)
+                        {
+                            bootPct = 0;
+                            stoppingBusy = false;
+                            sessionBusy = false;
+                            SetState(RunState.Idle);
+                        }
+                        else
+                        {
+                            // a newer session already took over (reconnect
+                            // during the 5 s window) — release the stop flags
+                            // without stomping its state or progress
+                            stoppingBusy = false;
+                            sessionBusy = false;
+                        }
                     });
                 });
             }
