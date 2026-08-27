@@ -206,7 +206,9 @@ namespace StartTor
 
             internal static GraphicsPath RoundRect(Rectangle r, int radius)
             {
+                if (r.Width <= 0 || r.Height <= 0) return new GraphicsPath();
                 int maxR = Math.Max(1, Math.Min(r.Width, r.Height) / 2);
+                if (radius < 1) radius = 1;
                 if (radius > maxR) radius = maxR;
                 int d = radius * 2;
                 GraphicsPath p = new GraphicsPath();
@@ -220,6 +222,7 @@ namespace StartTor
 
             internal static void FillGradient(Graphics g, Rectangle r, Color top, Color bottom)
             {
+                if (r.Width <= 0 || r.Height <= 0) return;
                 using (LinearGradientBrush br = new LinearGradientBrush(
                     new Point(r.X, r.Y), new Point(r.X, r.Bottom), top, bottom))
                     g.FillRectangle(br, r);
@@ -228,6 +231,7 @@ namespace StartTor
             internal static void FillGradientPath(Graphics g, GraphicsPath path, Color top, Color bottom)
             {
                 RectangleF boundsF = path.GetBounds();
+                if (boundsF.Width < 1 || boundsF.Height < 1) return;
                 Rectangle bounds = Rectangle.Round(boundsF);
                 using (LinearGradientBrush br = new LinearGradientBrush(
                     new Point(bounds.X, bounds.Y), new Point(bounds.X, bounds.Bottom), top, bottom))
@@ -432,19 +436,20 @@ namespace StartTor
                 int y = 78 + Math.Max(0, (ClientSize.Height - 24 - 78 - total) / 2);
                 rcPower = new Rectangle(cx - 52, y, 104, 104);
                 y += 104 + 30 + 24;
+                int pw = Math.Max(32, w - 48);
                 if (showProxy)
                 {
-                    rcProxy = new Rectangle(24, y, w - 48, 42);
+                    rcProxy = new Rectangle(24, y, pw, 42);
                     y += 42 + 14;
                 }
                 else
                     rcProxy = new Rectangle(0, 0, 0, 0);
-                rcSettings = new Rectangle(24, y, w - 48, 38);
+                rcSettings = new Rectangle(24, y, pw, 38);
                 y += 38;
                 if (showUpd)
                 {
                     y += 14;
-                    rcUpdateBtn = new Rectangle(24, y, w - 48, 38);
+                    rcUpdateBtn = new Rectangle(24, y, pw, 38);
                 }
                 else
                     rcUpdateBtn = new Rectangle(0, 0, 0, 0);
