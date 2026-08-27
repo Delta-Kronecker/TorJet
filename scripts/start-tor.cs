@@ -3811,7 +3811,7 @@ namespace StartTor
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
-                    "https://api.github.com/repos/Delta-Kronecker/TorJet/releases");
+                    "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
                 req.UserAgent = "torjet-update-check/" + TorJetVersion.App;
                 req.Timeout = 8000;
                 req.ReadWriteTimeout = 8000;
