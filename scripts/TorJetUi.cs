@@ -376,7 +376,10 @@ namespace StartTor
                 trayIcon.Text = "TorJet";
                 trayIcon.Icon = LoadAppIcon() ?? CreateTrayIcon();
                 trayIcon.ContextMenuStrip = trayMenu;
-                trayIcon.DoubleClick += delegate { ShowFromTray(); };
+                trayIcon.MouseClick += delegate(object s, MouseEventArgs e)
+                {
+                    if (e.Button == MouseButtons.Left) ShowFromTray();
+                };
 
                 Icon appIcon = LoadAppIcon() ?? CreateTrayIcon();
                 Icon = appIcon;
@@ -1028,7 +1031,7 @@ namespace StartTor
                 switch (h)
                 {
                     case 1: HandleCloseRequest(); break;
-                    case 2: MinimizeToTray(); break;
+                    case 2: WindowState = FormWindowState.Minimized; break;
                     case 5: OnConnectButton(); break;
                     case 20: ApplyProxyToggle(!ProxyIsOurs()); break;
                     case 30: page = Page.Settings; settingsScrollY = 0; CancelEdit(); LayoutPass(); Invalidate(); break;
