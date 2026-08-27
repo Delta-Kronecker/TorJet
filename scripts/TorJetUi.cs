@@ -342,7 +342,7 @@ namespace StartTor
                 Text = "TorJet";
                 FormBorderStyle = FormBorderStyle.None;
                 StartPosition = FormStartPosition.CenterScreen;
-                ClientSize = new Size(380, 350);
+                ClientSize = new Size(400, 470);
                 BackColor = Theme.Bg;
                 ForeColor = Theme.Text;
                 Font = Theme.Body();
