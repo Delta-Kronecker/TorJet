@@ -416,19 +416,35 @@ namespace StartTor
                 rcMin = new Rectangle(w - 78, 0, 38, 36);
 
                 int cx = w / 2;
-                rcPower = new Rectangle(cx - 52, 88, 104, 104);
+                bool showProxy = !autoProxyEnabled;
+                bool showUpd = showUpdateBanner && updateVersion.Length > 0;
 
-                int yBelowRing = 204;
-                if (autoProxyEnabled)
-                    rcProxy = new Rectangle(0, 0, 0, 0);
-                else
+                // vertical flow: ring -> connect -> proxy? -> settings -> update?
+                // connect text is drawn at rcPower.Bottom + 8 with height 22.
+                int total = 104 + 30 + 24;              // ring + connect region + gap
+                if (showProxy) total += 42 + 14;        // proxy row + gap
+                total += 38;                            // settings row
+                if (showUpd) total += 14 + 38;          // gap + update banner row
+
+                int y = 78 + Math.Max(0, (ClientSize.Height - 24 - 78 - total) / 2);
+                rcPower = new Rectangle(cx - 52, y, 104, 104);
+                y += 104 + 30 + 24;
+                if (showProxy)
                 {
-                    rcProxy = new Rectangle(24, yBelowRing, w - 48, 42);
-                    yBelowRing += 50;
+                    rcProxy = new Rectangle(24, y, w - 48, 42);
+                    y += 42 + 14;
                 }
-                rcSettings = new Rectangle(24, yBelowRing, w - 48, 38);
-                yBelowRing += 44;
-                rcUpdateBtn = new Rectangle(24, yBelowRing, w - 48, 38);
+                else
+                    rcProxy = new Rectangle(0, 0, 0, 0);
+                rcSettings = new Rectangle(24, y, w - 48, 38);
+                y += 38;
+                if (showUpd)
+                {
+                    y += 14;
+                    rcUpdateBtn = new Rectangle(24, y, w - 48, 38);
+                }
+                else
+                    rcUpdateBtn = new Rectangle(0, 0, 0, 0);
 
                 int ry = 78 - settingsScrollY;
                 int rowCount = SettingLabels.Length;
@@ -567,7 +583,7 @@ namespace StartTor
                 string stateTxt = StateText();
                 Color stateCol = StateColor();
                 Theme.DrawTextShadow(g, stateTxt, Theme.Big(),
-                    new Rectangle(0, 46, ClientSize.Width, 36), stateCol,
+                    new Rectangle(0, 58, ClientSize.Width, 36), stateCol,
                     Color.FromArgb(60, 0, 0, 0),
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter,
                     1, 2);
@@ -1016,6 +1032,7 @@ namespace StartTor
                     case 5: OnConnectButton(); break;
                     case 20: ApplyProxyToggle(!ProxyIsOurs()); break;
                     case 30: page = Page.Settings; settingsScrollY = 0; CancelEdit(); LayoutPass(); Invalidate(); break;
+                    case 50: OpenReleases(); break;
                     case 40: page = Page.Main; CancelEdit(); LayoutPass(); Invalidate(); break;
                     default:
                         if (page != Page.Settings || h < 100) break;
@@ -1119,6 +1136,8 @@ namespace StartTor
                 {
                     if (!autoProxyEnabled && rcProxy.Contains(p)) return 20;
                     if (rcSettings.Contains(p)) return 30;
+                    if (showUpdateBanner && updateVersion.Length > 0 &&
+                        rcUpdateBtn.Contains(p)) return 50;
                 }
                 else
                 {
@@ -1219,6 +1238,17 @@ namespace StartTor
                         CreateNoWindow = true
                     };
                     Process.Start(psi);
+                }
+                catch { }
+            }
+
+            private void OpenReleases()
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(
+                        "https://github.com/Delta-Kronecker/TorJet/releases")
+                    { UseShellExecute = true });
                 }
                 catch { }
             }
