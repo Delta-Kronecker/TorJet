@@ -311,6 +311,9 @@ namespace StartTor
             private int hoverId = -1;
             private bool anyHover;
 
+            private bool autoProxyEnabled;
+            private int settingsScrollY;
+
             private int editRow = -1;
             private string editBuf = "";
             private bool caretOn;
@@ -319,15 +322,16 @@ namespace StartTor
             private System.Windows.Forms.NotifyIcon trayIcon;
             private System.Windows.Forms.ContextMenuStrip trayMenu;
 
-            private Rectangle rcClose, rcMin, rcModePrev, rcModeNext, rcModeVal,
+            private Rectangle rcClose, rcMin,
                               rcProxy, rcSettings, rcPower, rcBack, rcUpdateBtn;
-            private readonly Rectangle[] rcRowVal = new Rectangle[9];
-            private readonly Rectangle[] rcRowPrev = new Rectangle[9];
-            private readonly Rectangle[] rcRowNext = new Rectangle[9];
-            private readonly Rectangle[] rcRowBody = new Rectangle[9];
+            private readonly Rectangle[] rcRowVal = new Rectangle[11];
+            private readonly Rectangle[] rcRowPrev = new Rectangle[11];
+            private readonly Rectangle[] rcRowNext = new Rectangle[11];
+            private readonly Rectangle[] rcRowBody = new Rectangle[11];
 
             private static readonly string[] SettingLabels =
             {
+                "Mode", "Auto proxy",
                 "Strategy level", "Conflux sets", "Conflux legs", "Linked-set cap",
                 "Keep-alive", "Set select", "Skip slow sets (RTT)", "Best % of sets",
                 "Weak legs (top %)"
@@ -338,7 +342,7 @@ namespace StartTor
                 Text = "TorJet";
                 FormBorderStyle = FormBorderStyle.None;
                 StartPosition = FormStartPosition.CenterScreen;
-                ClientSize = new Size(380, 442);
+                ClientSize = new Size(380, 350);
                 BackColor = Theme.Bg;
                 ForeColor = Theme.Text;
                 Font = Theme.Body();
@@ -358,6 +362,7 @@ namespace StartTor
                 Paint += OnPaintAll;
                 MouseMove += OnMouseMoveAll;
                 MouseDown += OnMouseDownAll;
+                MouseWheel += OnMouseWheelAll;
                 MouseLeave += delegate { anyHover = false; hoverId = -1; Invalidate(); };
                 KeyDown += OnKeyDownAll;
                 FormClosing += OnFormClosing;
@@ -399,6 +404,7 @@ namespace StartTor
                 {
                     uiModePos = ModeNames.Length;   // Auto race
                 }
+                autoProxyEnabled = ReadAutoProxySetting();
                 LogLine("TorJet " + TorJetVersion.App);
             }
 
@@ -412,20 +418,21 @@ namespace StartTor
                 int cx = w / 2;
                 rcPower = new Rectangle(cx - 52, 88, 104, 104);
 
-                int modeGroupW = 180;
-                int modeX = cx - modeGroupW / 2;
-                rcModePrev = new Rectangle(modeX, 232, 30, 30);
-                rcModeVal = new Rectangle(modeX + 34, 232, modeGroupW - 64, 30);
-                rcModeNext = new Rectangle(modeX + modeGroupW - 30, 232, 30, 30);
+                int yBelowRing = 204;
+                if (!autoProxyEnabled)
+                    rcProxy = new Rectangle(0, 0, 0, 0);
+                else
+                {
+                    rcProxy = new Rectangle(24, yBelowRing, w - 48, 42);
+                    yBelowRing += 50;
+                }
+                rcSettings = new Rectangle(24, yBelowRing, w - 48, 38);
+                yBelowRing += 44;
+                rcUpdateBtn = new Rectangle(24, yBelowRing, w - 48, 38);
 
-                int half = (w - 24 * 2 - 10) / 2;
-                rcProxy = new Rectangle(24, 276, w - 48, 42);
-
-                rcSettings = new Rectangle(24, 332, w - 48, 38);
-                rcUpdateBtn = new Rectangle(24, 380, w - 48, 38);
-
-                int ry = 78;
-                for (int i = 0; i < 9; i++)
+                int ry = 78 - settingsScrollY;
+                int rowCount = SettingLabels.Length;
+                for (int i = 0; i < rowCount; i++)
                 {
                     rcRowBody[i] = new Rectangle(18, ry, w - 36, 36);
                     int valW = 152;
@@ -649,17 +656,8 @@ namespace StartTor
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis);
 
-                string modeLabel = uiModePos < ModeNames.Length
-                    ? PrettyMode(ModeNames[uiModePos])
-                    : "Auto race";
-                Theme.PillGradient(g, rcModeVal, Theme.SurfaceAlt, Theme.Surface, Theme.Border);
-                TextRenderer.DrawText(g, modeLabel, Theme.Body(),
-                    rcModeVal, Theme.Text, TextFormatFlags.HorizontalCenter |
-                    TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
-                DrawChevron(g, rcModePrev, false, hoverId == 10);
-                DrawChevron(g, rcModeNext, true, hoverId == 11);
-
-                PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20, false);
+                if (!autoProxyEnabled)
+                    PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20, false);
 
                 bool hovSet = hoverId == 30;
                 Theme.PillGradient(g, rcSettings,
@@ -770,9 +768,16 @@ namespace StartTor
                     new Rectangle(0, 4, ClientSize.Width, 28), Theme.Text,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
 
-                for (int i = 0; i < 9; i++)
+                int rowCount = SettingLabels.Length;
+                int settingsTop = 78;
+                int settingsBottom = ClientSize.Height - 8;
+                Region prevClip = g.Clip;
+                g.SetClip(new Rectangle(0, settingsTop, ClientSize.Width, settingsBottom - settingsTop));
+
+                for (int i = 0; i < rowCount; i++)
                 {
                     Rectangle body = rcRowBody[i];
+                    if (body.Bottom < settingsTop || body.Y > settingsBottom) continue;
                     bool selected = editRow == i;
 
                     Color bgTop = i % 2 == 0 ? Theme.Surface : Theme.SurfaceAlt;
@@ -794,17 +799,23 @@ namespace StartTor
                         TextFormatFlags.EndEllipsis);
                     PaintSettingValue(g, i);
                 }
-                TextRenderer.DrawText(g, "applies on next connect", Theme.Small(),
-                    new Rectangle(0, rcRowBody[8].Bottom + 8, ClientSize.Width, 18),
-                    Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
+                g.Clip = prevClip;
+
+                int lastRow = rowCount - 1;
+                if (rcRowBody[lastRow].Bottom < settingsBottom)
+                {
+                    TextRenderer.DrawText(g, "applies on next connect", Theme.Small(),
+                        new Rectangle(0, rcRowBody[lastRow].Bottom + 8, ClientSize.Width, 18),
+                        Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.Top);
+                }
             }
 
             private void PaintSettingValue(Graphics g, int i)
             {
                 Rectangle v = rcRowVal[i];
-                if (i == 4)
+                if (i == 1 || i == 6)
                 {
-                    bool on = keepAliveEnabled;
+                    bool on = i == 1 ? autoProxyEnabled : keepAliveEnabled;
                     int swW = 44, swH = 22, swX = v.Right - 52, swY = v.Y + (v.Height - swH) / 2;
                     Rectangle sw = new Rectangle(swX, swY, swW, swH);
                     Color bg = on ? Theme.Green : Theme.SurfaceLight;
@@ -826,7 +837,9 @@ namespace StartTor
                         TextFormatFlags.Right | TextFormatFlags.VerticalCenter);
                     return;
                 }
-                string text = SettingDisplay(i);
+                string text = i == 0
+                    ? (uiModePos < ModeNames.Length ? PrettyMode(ModeNames[uiModePos]) : "Auto race")
+                    : SettingDisplay(i);
                 bool editing = editRow == i;
 
                 Theme.PillGradient(g, v,
@@ -863,14 +876,14 @@ namespace StartTor
             {
                 switch (i)
                 {
-                    case 0: return StrategyNames[Math.Max(0, comboStrategyIndexSafe())];
-                    case 1: return confluxSets == 0 ? "consensus" : confluxSets.ToString();
-                    case 2: return confluxLegs == 0 ? "consensus" : confluxLegs.ToString();
-                    case 3: return confluxLinkedSets == 0 ? "consensus" : confluxLinkedSets.ToString();
-                    case 5: return SetSelectionNames[Math.Max(0, Math.Min(3, confluxSelection))];
-                    case 6: return confluxRttMax == 0 ? "off" : confluxRttMax + " ms";
-                    case 7: return confluxRttPct == 0 ? "off" : confluxRttPct + "%";
-                    case 8: return watchRttPct == 0 ? "off" : watchRttPct + "%";
+                    case 2: return StrategyNames[Math.Max(0, comboStrategyIndexSafe())];
+                    case 3: return confluxSets == 0 ? "consensus" : confluxSets.ToString();
+                    case 4: return confluxLegs == 0 ? "consensus" : confluxLegs.ToString();
+                    case 5: return confluxLinkedSets == 0 ? "consensus" : confluxLinkedSets.ToString();
+                    case 7: return SetSelectionNames[Math.Max(0, Math.Min(3, confluxSelection))];
+                    case 8: return confluxRttMax == 0 ? "off" : confluxRttMax + " ms";
+                    case 9: return confluxRttPct == 0 ? "off" : confluxRttPct + "%";
+                    case 10: return watchRttPct == 0 ? "off" : watchRttPct + "%";
                     default: return "";
                 }
             }
@@ -879,7 +892,7 @@ namespace StartTor
             {
                 switch (i)
                 {
-                    case 0:
+                    case 2:
                     {
                         int idx = Math.Max(0, comboStrategyIndexSafe());
                         idx = Wrap(idx + dir, StrategyNames.Length);
@@ -887,16 +900,16 @@ namespace StartTor
                         ApplyConfluxPresetForStrategy(idx);
                         break;
                     }
-                    case 1: confluxSets = ClampCycle(confluxSets + dir, 0, 32); WriteConfluxSetting(ConfluxSetsFile, confluxSets); break;
-                    case 2: confluxLegs = ClampCycle(confluxLegs + dir, 0, 16); WriteConfluxSetting(ConfluxLegsFile, confluxLegs); break;
-                    case 3: confluxLinkedSets = ClampCycle(confluxLinkedSets + dir, 0, 32); WriteConfluxSetting(ConfluxLinkedSetsFile, confluxLinkedSets); break;
-                    case 5:
+                    case 3: confluxSets = ClampCycle(confluxSets + dir, 0, 32); WriteConfluxSetting(ConfluxSetsFile, confluxSets); break;
+                    case 4: confluxLegs = ClampCycle(confluxLegs + dir, 0, 16); WriteConfluxSetting(ConfluxLegsFile, confluxLegs); break;
+                    case 5: confluxLinkedSets = ClampCycle(confluxLinkedSets + dir, 0, 32); WriteConfluxSetting(ConfluxLinkedSetsFile, confluxLinkedSets); break;
+                    case 7:
                         confluxSelection = Wrap(confluxSelection + dir, SetSelectionNames.Length);
                         WriteConfluxSetting(ConfluxSelectionFile, confluxSelection);
                         break;
-                    case 6: confluxRttMax = StepRtt(confluxRttMax, dir); WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax); break;
-                    case 7: confluxRttPct = StepClamp(confluxRttPct, dir * 5, 0, 100); WriteConfluxSetting(ConfluxRttPctFile, confluxRttPct); break;
-                    case 8: watchRttPct = StepClamp(watchRttPct, dir * 5, 0, 100); WriteConfluxSetting(WatchRttPctFile, watchRttPct); break;
+                    case 8: confluxRttMax = StepRtt(confluxRttMax, dir); WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax); break;
+                    case 9: confluxRttPct = StepClamp(confluxRttPct, dir * 5, 0, 100); WriteConfluxSetting(ConfluxRttPctFile, confluxRttPct); break;
+                    case 10: watchRttPct = StepClamp(watchRttPct, dir * 5, 0, 100); WriteConfluxSetting(WatchRttPctFile, watchRttPct); break;
                 }
                 Invalidate();
             }
@@ -927,7 +940,7 @@ namespace StartTor
 
             private bool RowIsNumeric(int i)
             {
-                return i == 1 || i == 2 || i == 3 || i == 6 || i == 7 || i == 8;
+                return i == 3 || i == 4 || i == 5 || i == 8 || i == 9 || i == 10;
             }
 
             private void CommitEdit()
@@ -939,12 +952,12 @@ namespace StartTor
                 {
                     switch (i)
                     {
-                        case 1: confluxSets = Math.Max(0, Math.Min(32, v)); WriteConfluxSetting(ConfluxSetsFile, confluxSets); break;
-                        case 2: confluxLegs = Math.Max(0, Math.Min(16, v)); WriteConfluxSetting(ConfluxLegsFile, confluxLegs); break;
-                        case 3: confluxLinkedSets = Math.Max(0, Math.Min(32, v)); WriteConfluxSetting(ConfluxLinkedSetsFile, confluxLinkedSets); break;
-                        case 6: confluxRttMax = Math.Max(0, Math.Min(10000, v)); WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax); break;
-                        case 7: confluxRttPct = Math.Max(0, Math.Min(100, v)); WriteConfluxSetting(ConfluxRttPctFile, confluxRttPct); break;
-                        case 8: watchRttPct = Math.Max(0, Math.Min(100, v)); WriteConfluxSetting(WatchRttPctFile, watchRttPct); break;
+                        case 3: confluxSets = Math.Max(0, Math.Min(32, v)); WriteConfluxSetting(ConfluxSetsFile, confluxSets); break;
+                        case 4: confluxLegs = Math.Max(0, Math.Min(16, v)); WriteConfluxSetting(ConfluxLegsFile, confluxLegs); break;
+                        case 5: confluxLinkedSets = Math.Max(0, Math.Min(32, v)); WriteConfluxSetting(ConfluxLinkedSetsFile, confluxLinkedSets); break;
+                        case 8: confluxRttMax = Math.Max(0, Math.Min(10000, v)); WriteConfluxSetting(ConfluxRttMaxFile, confluxRttMax); break;
+                        case 9: confluxRttPct = Math.Max(0, Math.Min(100, v)); WriteConfluxSetting(ConfluxRttPctFile, confluxRttPct); break;
+                        case 10: watchRttPct = Math.Max(0, Math.Min(100, v)); WriteConfluxSetting(WatchRttPctFile, watchRttPct); break;
                     }
                 }
                 editRow = -1;
@@ -963,6 +976,22 @@ namespace StartTor
                     Invalidate();
                 }
                 Cursor = h != -1 ? Cursors.Hand : Cursors.Default;
+            }
+
+            private void OnMouseWheelAll(object s, MouseEventArgs e)
+            {
+                if (page != Page.Settings) return;
+                int rowCount = SettingLabels.Length;
+                int contentHeight = rowCount * 37 + 40;
+                int visibleHeight = ClientSize.Height - 78;
+                int maxScroll = Math.Max(0, contentHeight - visibleHeight);
+                int delta = e.Delta > 0 ? -37 : 37;
+                int newScroll = Math.Max(0, Math.Min(maxScroll, settingsScrollY + delta));
+                if (newScroll != settingsScrollY)
+                {
+                    settingsScrollY = newScroll;
+                    LayoutPass();
+                }
             }
 
             private void OnMouseDownAll(object s, MouseEventArgs e)
@@ -985,31 +1014,48 @@ namespace StartTor
                     case 1: HandleCloseRequest(); break;
                     case 2: MinimizeToTray(); break;
                     case 5: OnConnectButton(); break;
-                    case 10: CycleMode(-1); break;
-                    case 11: CycleMode(1); break;
                     case 20: ApplyProxyToggle(!ProxyIsOurs()); break;
-                    case 30: page = Page.Settings; CancelEdit(); LayoutPass(); Invalidate(); break;
+                    case 30: page = Page.Settings; settingsScrollY = 0; CancelEdit(); LayoutPass(); Invalidate(); break;
                     case 40: page = Page.Main; CancelEdit(); LayoutPass(); Invalidate(); break;
                     default:
                         if (page != Page.Settings || h < 100) break;
-                        int baseIdx = (h - 100) / 3;
-                        int part = (h - 100) % 3;
-                        if (baseIdx == 4)
+                        if (h >= 200 && h < 300)
                         {
-                            keepAliveEnabled = !keepAliveEnabled;
-                            WriteKeepAliveFile(keepAliveEnabled);
-                            if (!keepAliveEnabled) StopKeepAlive();
-                            else if (state == RunState.Connected) StartKeepAlive();
-                            Invalidate();
+                            int row = h - 200;
+                            if (row == 1)
+                            {
+                                autoProxyEnabled = !autoProxyEnabled;
+                                WriteAutoProxyFile(autoProxyEnabled);
+                                if (autoProxyEnabled && state == RunState.Connected)
+                                    ApplyProxyToggle(true);
+                                else if (!autoProxyEnabled && ProxyIsOurs())
+                                    ApplyProxyToggle(false);
+                                LayoutPass();
+                                Invalidate();
+                            }
+                            else if (row == 6)
+                            {
+                                keepAliveEnabled = !keepAliveEnabled;
+                                WriteKeepAliveFile(keepAliveEnabled);
+                                if (!keepAliveEnabled) StopKeepAlive();
+                                else if (state == RunState.Connected) StartKeepAlive();
+                                Invalidate();
+                            }
                         }
-                        else if (part == 1) CycleSetting(baseIdx, -1);
-                        else if (part == 2) CycleSetting(baseIdx, 1);
-                        else if (RowIsNumeric(baseIdx))
+                        else
                         {
-                            CommitEdit();
-                            editRow = baseIdx;
-                            editBuf = RawNumeric(baseIdx);
-                            Invalidate();
+                            int baseIdx = (h - 100) / 3;
+                            int part = (h - 100) % 3;
+                            if (baseIdx == 0) CycleMode(part == 1 ? -1 : 1);
+                            else if (part == 1) CycleSetting(baseIdx, -1);
+                            else if (part == 2) CycleSetting(baseIdx, 1);
+                            else if (RowIsNumeric(baseIdx))
+                            {
+                                CommitEdit();
+                                editRow = baseIdx;
+                                editBuf = RawNumeric(baseIdx);
+                                Invalidate();
+                            }
                         }
                         break;
                 }
@@ -1019,12 +1065,12 @@ namespace StartTor
             {
                 switch (i)
                 {
-                    case 1: return confluxSets.ToString();
-                    case 2: return confluxLegs.ToString();
-                    case 3: return confluxLinkedSets.ToString();
-                    case 6: return confluxRttMax.ToString();
-                    case 7: return confluxRttPct.ToString();
-                    case 8: return watchRttPct.ToString();
+                    case 3: return confluxSets.ToString();
+                    case 4: return confluxLegs.ToString();
+                    case 5: return confluxLinkedSets.ToString();
+                    case 8: return confluxRttMax.ToString();
+                    case 9: return confluxRttPct.ToString();
+                    case 10: return watchRttPct.ToString();
                     default: return "";
                 }
             }
@@ -1071,19 +1117,18 @@ namespace StartTor
                 if (page == Page.Main && rcPower.Contains(p)) return 5;
                 if (page == Page.Main)
                 {
-                    if (rcModePrev.Contains(p)) return 10;
-                    if (rcModeNext.Contains(p)) return 11;
-                    if (rcProxy.Contains(p)) return 20;
+                    if (!autoProxyEnabled && rcProxy.Contains(p)) return 20;
                     if (rcSettings.Contains(p)) return 30;
                 }
                 else
                 {
                     if (rcBack.Contains(p)) return 40;
-                    for (int i = 0; i < 9; i++)
+                    int rowCount = SettingLabels.Length;
+                    for (int i = 0; i < rowCount; i++)
                     {
-                        if (i == 4)
+                        if (i == 1 || i == 6)
                         {
-                            if (rcRowVal[i].Contains(p)) return 104;
+                            if (rcRowVal[i].Contains(p)) return 200 + i;
                             continue;
                         }
                         if (rcRowPrev[i].Contains(p)) return 100 + i * 3 + 1;
@@ -1335,6 +1380,8 @@ namespace StartTor
                 warmupEnd.Start();
 
                 WriteLastSuccessCache(mode, strategy);
+                if (autoProxyEnabled)
+                    UiInvokeDelegate(delegate { ApplyProxyToggle(true); });
                 sessionBusy = false;
                 UiInvokeDelegate(delegate
                 {
@@ -1352,6 +1399,7 @@ namespace StartTor
                 watchdogStop = true;
                 circuitWatchStop = true;
                 StopKeepAlive();
+                if (autoProxyEnabled && ProxyIsOurs()) SetSystemProxy(false);
                 try { if (torProc != null) torProc.Kill(); } catch { }
                 torProc = null;
                 LogLine("tor stopped (" + why + ")");

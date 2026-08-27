@@ -67,6 +67,7 @@ namespace StartTor
         private static readonly string ConfluxRttPctFile = Path.Combine(DataDir, "conflux-set-rtt-pct.txt");
         private static readonly string WatchRttPctFile = Path.Combine(DataDir, "circuit-watch-pct.txt");
         private static readonly string KeepAliveFile = Path.Combine(DataDir, "keepalive.txt");
+        private static readonly string AutoProxyFile = Path.Combine(DataDir, "auto-proxy.txt");
         private const int KeepAliveSocksPort = 9052;
         private const string KeepAliveUsername = "torjet-keepalive";
         private const int MaxSpeedTestStreams = 4;
@@ -592,6 +593,23 @@ namespace StartTor
         private static void WriteKeepAliveFile(bool on)
         {
             try { File.WriteAllText(KeepAliveFile, on ? "on" : "off", new UTF8Encoding(false)); }
+            catch { }
+        }
+
+        private static bool ReadAutoProxySetting()
+        {
+            try
+            {
+                if (File.Exists(AutoProxyFile))
+                    return File.ReadAllText(AutoProxyFile).Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { }
+            return false;
+        }
+
+        private static void WriteAutoProxyFile(bool on)
+        {
+            try { File.WriteAllText(AutoProxyFile, on ? "on" : "off", new UTF8Encoding(false)); }
             catch { }
         }
 
@@ -3593,6 +3611,7 @@ namespace StartTor
                     Console.WriteLine();
                 }
                 WriteLastSuccessCache(mode, strategy);
+                if (ReadAutoProxySetting()) SetSystemProxy(true);
 
                 if (bootstrapOnly)
                 {
