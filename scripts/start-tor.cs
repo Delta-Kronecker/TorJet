@@ -3172,6 +3172,11 @@ namespace StartTor
         // port stays put on purpose; the DNS stub re-points at it instead.
         private static bool AutoSwitchWinnerToPrimaryPorts(AutoRacer w)
         {
+            if (TcpPortBusy(9050) || TcpPortBusy(8118) || TcpPortBusy(9051))
+            {
+                AutoEmit("[auto] live switch: primary port busy (9050/8118/9051)");
+                return false;
+            }
             try { File.Copy(AutoRacerCookie(w), ControlCookie, true); }
             catch (Exception ex)
             {
@@ -3197,16 +3202,28 @@ namespace StartTor
                 AutoEmit("[auto] live switch rejected by tor — falling back to restart");
                 return false;
             }
-            Thread.Sleep(700);   // let the new control listener come up
-            int pct; string tag, summ;
-            if (!BootstrapPhaseFor(9051, AutoRacerLog(w), ControlCookie,
-                                   out pct, out tag, out summ))
+            // Tor regenerates the auth cookie when ControlPort changes.
+            // Re-copy the NEW cookie before verifying on the new port.
+            Thread.Sleep(500);
+            try { File.Copy(AutoRacerCookie(w), ControlCookie, true); }
+            catch { }
+            for (int attempt = 1; attempt <= 4; attempt++)
             {
-                AutoEmit("[auto] live switch: control 9051 not answering — falling back");
-                return false;
+                int waitMs = attempt == 1 ? 500 : attempt == 2 ? 1000 : 2000;
+                Thread.Sleep(waitMs);
+                int pct; string tag, summ;
+                if (BootstrapPhaseFor(9051, AutoRacerLog(w), ControlCookie,
+                                     out pct, out tag, out summ))
+                {
+                    AutoEmit("[auto] live switch OK — winner stays up on 9050/8118 (no restart)");
+                    return true;
+                }
+                // Re-copy cookie on each retry (tor may still be writing it)
+                try { File.Copy(AutoRacerCookie(w), ControlCookie, true); } catch { }
+                AutoEmit("[auto] live switch: attempt " + attempt + "/4 — 9051 not ready, retrying...");
             }
-            AutoEmit("[auto] live switch OK — winner stays up on 9050/8118 (no restart)");
-            return true;
+            AutoEmit("[auto] live switch: control 9051 not answering after 4 attempts — falling back");
+            return false;
         }
 
         private static void AutoEmit(string line)
