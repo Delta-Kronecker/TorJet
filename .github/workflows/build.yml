@@ -10,11 +10,6 @@ on:
         description: 'Release tag (e.g. v1.0.0). Leave empty for a build-only run.'
         required: false
         default: ''
-      beta:
-        description: 'Publish this release as a beta (pre-release) instead of latest'
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -238,7 +233,7 @@ jobs:
     permissions:
       contents: write
     env:
-      BETA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.beta || 'false' }}
+      BETA: 'true'
     steps:
       - name: Validate and resolve tag
         id: tag
