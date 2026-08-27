@@ -92,7 +92,7 @@ namespace StartTor
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate", "lowlatency" };
         // The shipped default when no data\strategy.txt exists yet. Looked up by
         // NAME (not "last array element") so appending presets never shifts it.
-        private const string DefaultStrategyName = "lowlatency";
+        private const string DefaultStrategyName = "ultimate";
         private static int DefaultStrategy()
         {
             for (int i = 0; i < StrategyNames.Length; i++)
