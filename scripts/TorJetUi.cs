@@ -1554,7 +1554,7 @@ namespace StartTor
                 {
                     ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
                     HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
-                        "https://api.github.com/repos/Delta-Kronecker/TorJet/releases/latest");
+                        "https://api.github.com/repos/Delta-Kronecker/TorJet/releases");
                     req.UserAgent = "torjet-ui/" + TorJetVersion.App;
                     req.Timeout = 8000;
                     req.ReadWriteTimeout = 8000;
