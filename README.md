@@ -33,8 +33,10 @@ data\
       2. **balanced** — long-lived reused circuits (fewer handshakes)
       3. **aggressive** — more guards + faster scheduler + deeper reuse
       4. **ultimate** — max concurrency + greedy (Vanilla) scheduler
-      5. **lowlatency** — lowest ping: KISTLite pacing and RTT set filters
-         (skip ≥400 ms, best 20%) — **the shipped default strategy**
+       5. **lowlatency** — lowest ping: KISTLite pacing and RTT set filters
+          (skip ≥400 ms, best 20%)
+    - The **shipped default strategy** is **ultimate** — if no
+      `data\strategy.txt` exists yet, TorJet picks the fastest preset.
     - **Conflux topology** (from the Settings submenu) — how many conflux
       circuit sets tor keeps:
      - **Conflux sets** (`ConfluxNumSets`, 0=consensus default) — how many
@@ -141,6 +143,21 @@ circuit  guard -> middle -> exit
 destination
 ```
 
+### Tunneling apps that don't support proxy
+
+Some applications (games, CLI tools, etc.) don't have built-in proxy settings.
+You can route their traffic through Tor using **V2rayN** as a TUN wrapper:
+
+1. Start TorJet and wait for 100% bootstrap.
+2. Open V2rayN and add a new server with this address:
+   ```
+   socks://Og@127.0.0.1:9050#TorJet
+   ```
+3. Select the TorJet server and enable **Tun** mode.
+
+V2rayN will create a virtual network interface that captures all system
+traffic and sends it through TorJet's SOCKS5 proxy (127.0.0.1:9050).
+
 ### Circuit health monitor
 
 While Tor is up, TorJet watches the conflux legs via the control port. Every
@@ -194,7 +211,7 @@ would normally skip them. The loop runs
 in the background while the menu is served (so the menu appears immediately) and
 stops only when you press **C**, tor exits, or the app is closed. It keeps
 circuits warm and honest: if tor dies, the pings start failing (details go to
-`data\data\jet.log`). The old 1 MiB download check was replaced: it gave false
+`data\jet.log`). The old 1 MiB download check was replaced: it gave false
 negatives on cold single-stream circuits and added ~1 MiB of padding traffic.
 During the first 90 s after bootstrap the monitor's close cooldown is relaxed,
 so weak legs are replaced immediately.
