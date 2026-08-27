@@ -419,7 +419,7 @@ namespace StartTor
                 rcPower = new Rectangle(cx - 52, 88, 104, 104);
 
                 int yBelowRing = 204;
-                if (!autoProxyEnabled)
+                if (autoProxyEnabled)
                     rcProxy = new Rectangle(0, 0, 0, 0);
                 else
                 {
