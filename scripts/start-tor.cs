@@ -59,6 +59,21 @@ namespace StartTor
         private static readonly string ModeFile = Path.Combine(DataDir, "mode.txt");
         private static readonly string StrategyFile = Path.Combine(DataDir, "strategy.txt");
         private static readonly string LastSuccessFile = Path.Combine(DataDir, "last-success.txt");
+        // Full backup of the last successful 100% connection. Holds a complete
+        // snapshot of the live data directory (cached descriptors / consensus /
+        // microdescs, keys, state, auth cookie) plus a rich meta.txt, so the
+        // memory mode can restore the EXACT prior experience and boot in
+        // seconds instead of re-downloading the directory from scratch.
+        private static readonly string MemoryBackupDir = Path.Combine(DataDir, "memory");
+        private static readonly string MemoryMetaFile = Path.Combine(MemoryBackupDir, "meta.txt");
+        // Persisted, per-mode set of bridges that proved healthy in a previous
+        // successful run. Survives tor.log being overwritten each run (warm
+        // restarts skip the "new bridge descriptor (cached)" log lines), so the
+        // memory mode can always lead with the bridges that previously won.
+        private static string HealthyBridgesFile(int mode)
+        {
+            return Path.Combine(BridgesDir, "healthy-" + ModeNames[mode] + ".txt");
+        }
         private static readonly string ConfluxSetsFile = Path.Combine(DataDir, "conflux-sets.txt");
         private static readonly string ConfluxLegsFile = Path.Combine(DataDir, "conflux-legs.txt");
         private static readonly string ConfluxLinkedSetsFile = Path.Combine(DataDir, "conflux-linked-sets.txt");
@@ -170,7 +185,7 @@ namespace StartTor
 
         private static readonly string[] ModeNames = { "vanilla", "obfs4", "webtunnel", "snowflake", "direct", "memory" };
         private static readonly string[] BridgeFiles = { "vanilla_tested.txt", "obfs4_tested.txt", "webtunnel_tested.txt", "snowflake_tested.txt", "", "" };
-        private static readonly string[] AllBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt", "snowflake_tested.txt" };
+        private static readonly string[] UpdateBridgeFiles = { "obfs4_tested.txt", "webtunnel_tested.txt", "vanilla_tested.txt" };
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
 
@@ -178,6 +193,59 @@ namespace StartTor
         // Occupied ports at startup mean a previous tor instance is still alive.
         private static readonly int[] TcpPorts = { 9050, 9051, 8118, 9052 };
         private const int UdpDnsPort = 53530;
+
+        // The session's LIVE listener endpoints. Normally the primary ports;
+        // after an auto-race the winner KEEPS its own racer ports (no control
+        // -port move, no restart), and every subsystem (control port, keep-
+        // alive, watchdog, speed test, system proxy, log) re-points here.
+        // StartTorAndWait resets these to the primary set for a fresh single
+        // -mode run; AdoptRacerPorts swings them to a race winner.
+        private static int liveSocksPort = 9050;
+        private static int liveKeepPort = KeepAliveSocksPort;
+        private static int liveHttpPort = 8118;
+        private static int liveCtrlPort = 9051;
+        private static int liveDnsPort = UdpDnsPort;
+        private static string liveCookiePath = ControlCookie;
+        private static string liveLogPath = TorLog;
+
+        private static void ResetLivePorts()
+        {
+            liveSocksPort = 9050;
+            liveKeepPort = KeepAliveSocksPort;
+            liveHttpPort = 8118;
+            liveCtrlPort = 9051;
+            liveDnsPort = UdpDnsPort;
+            liveCookiePath = ControlCookie;
+            liveLogPath = TorLog;
+        }
+
+        private static void LivePortNames(out string socks, out string http,
+                                          out string dns, out string ctrl)
+        {
+            socks = "127.0.0.1:" + liveSocksPort;
+            http = "127.0.0.1:" + liveHttpPort;
+            dns = "127.0.0.1:" + liveDnsPort;
+            ctrl = "127.0.0.1:" + liveCtrlPort;
+        }
+
+        // The three racer port tuples (shared by AutoRace and the standalone
+        // probes so --newcircuit / --conflux-* can reach a winner that lives in
+        // another process). Ctrl = Socks+1, Keep = Socks+2.
+        private static readonly string[] RacerDirs = { "data-v", "data-o", "data-w" };
+        private static readonly int[] RacerSocksPorts = { 9150, 9250, 9350 };
+        private static readonly int[] RacerHttpPorts = { 8150, 8250, 8350 };
+        private static readonly int[] RacerDnsPorts = { 61530, 62530, 63530 };
+
+        private static void AdoptRacerPorts(AutoRacer w)
+        {
+            liveSocksPort = w.Socks;
+            liveKeepPort = w.Keep;
+            liveHttpPort = w.Http;
+            liveCtrlPort = w.Ctrl;
+            liveDnsPort = w.Dns;
+            liveCookiePath = AutoRacerCookie(w);
+            liveLogPath = AutoRacerLog(w);
+        }
 
         private static Process torProc;
         private static bool cleaned;
@@ -245,12 +313,24 @@ namespace StartTor
                     object en = k.GetValue("ProxyEnable");
                     object ps = k.GetValue("ProxyServer");
                     return en is int && (int)en == 1 &&
-                           ps is string &&
-                           ((string)ps).IndexOf("127.0.0.1:8118",
-                                                StringComparison.OrdinalIgnoreCase) >= 0;
+                           ps is string && OurProxyServer((string)ps);
                 }
             }
             catch { return false; }
+        }
+
+        // True when `server` points at any HTTP tunnel we ever bind: the
+        // primary 8118 or one of the three racer HTTP ports (a race winner can
+        // leave the system proxy pointing at 8150/8250/8350 across restarts).
+        private static bool OurProxyServer(string server)
+        {
+            if (server == null) return false;
+            if (server.IndexOf("127.0.0.1:8118", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            foreach (int p in RacerHttpPorts)
+                if (server.IndexOf("127.0.0.1:" + p, StringComparison.OrdinalIgnoreCase) >= 0)
+                    return true;
+            return false;
         }
 
         private static string savedProxy;
@@ -327,7 +407,7 @@ namespace StartTor
                             SaveProxyBackup();
                         }
                         k.SetValue("ProxyEnable", 1, RegistryValueKind.DWord);
-                        k.SetValue("ProxyServer", "127.0.0.1:8118", RegistryValueKind.String);
+                        k.SetValue("ProxyServer", "127.0.0.1:" + liveHttpPort, RegistryValueKind.String);
                         k.SetValue("ProxyOverride", "<local>", RegistryValueKind.String);
                     }
                     else
@@ -448,9 +528,10 @@ namespace StartTor
         {
             try
             {
-                string hex = CookieHex();
+                LocateLiveControl();
+                string hex = CookieHexFor(liveCookiePath);
                 if (hex == null) return false;
-                using (TcpClient c = new TcpClient("127.0.0.1", 9051))
+                using (TcpClient c = new TcpClient("127.0.0.1", liveCtrlPort))
                 {
                     NetworkStream s = c.GetStream();
                     s.ReadTimeout = 5000;
@@ -513,14 +594,218 @@ namespace StartTor
             catch { }
         }
 
+        // Full backup of a successful 100% connection. Snapshots the ENTIRE live
+        // data directory (all cached descriptors / microdesc consensus / keys /
+        // state / auth cookie) into MemoryBackupDir plus a rich meta.txt. Restoring
+        // that snapshot before the next boot makes tor reuse the exact prior state
+        // (warm directory cache + guards + long-lived keys) and reach 100% in
+        // seconds. mode/strategy from the successful run are recorded too, so the
+        // memory mode reproduces the same connection experience exactly.
+        private static void BackupLastSuccessFull(int mode, int strategy)
+        {
+            try
+            {
+                string src = Path.Combine(DataDir, "data");
+                if (!Directory.Exists(src)) return;
+                if (Directory.Exists(MemoryBackupDir))
+                    try { Directory.Delete(MemoryBackupDir, true); } catch { }
+                CopyDirectory(src, MemoryBackupDir);
+                // Never hand tor a stale live lock or bulky logs on restore.
+                try { File.Delete(Path.Combine(MemoryBackupDir, "lock")); } catch { }
+                try { File.Delete(Path.Combine(MemoryBackupDir, "tor.log")); } catch { }
+                try { File.Delete(Path.Combine(MemoryBackupDir, "jet.log")); } catch { }
+                WriteLastSuccessCache(mode, strategy);
+                try
+                {
+                    if (mode < 0 || mode >= ModeNames.Length) return;
+                    string strat = (strategy >= 0 && strategy < StrategyNames.Length)
+                        ? StrategyNames[strategy] : "";
+                    string SocksS, HttpS, DnsS, CtrlS;
+                    LivePortNames(out SocksS, out HttpS, out DnsS, out CtrlS);
+                    string meta =
+                        "mode=" + ModeNames[mode] + "\r\n" +
+                        "strategy=" + strat + "\r\n" +
+                        "backup=" + DateTime.UtcNow.ToString("o") + "\r\n" +
+                        "socks=" + SocksS + "\r\n" +
+                        "http=" + HttpS + "\r\n" +
+                        "dns=" + DnsS + "\r\n" +
+                        "control=" + CtrlS;
+                    File.WriteAllText(MemoryMetaFile, meta, new UTF8Encoding(false));
+                }
+                catch { }
+                RePrioritizeBridgeFile(mode);
+            }
+            catch { }
+        }
+
+        // Look in the previous run's tor log for bridges that ACTUALLY worked
+        // (tor obtained a "new bridge descriptor ... (cached)" for them, meaning
+        // the pluggable-transport handshake and descriptor fetch succeeded).
+        // Returns the set of 40-hex fingerprints that reached that stage.
+        private static HashSet<string> ScanHealthyBridgesFromLog()
+        {
+            var healthy = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                if (!File.Exists(TorLog)) return healthy;
+                // Read with FileShare.ReadWrite|Delete so an in-flight tor that is
+                // still appending to its log (this runs right after a 100% connect,
+                // while tor is alive) can never block us with a share violation.
+                using (var fs = new FileStream(TorLog, FileMode.Open, FileAccess.Read,
+                                               FileShare.ReadWrite | FileShare.Delete))
+                using (var sr = new StreamReader(fs))
+                {
+                    string line;
+                    while ((line = sr.ReadLine()) != null)
+                    {
+                        if (line.IndexOf("bridge descriptor", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        int i = line.IndexOf("(cached): $", StringComparison.Ordinal);
+                        int fpStartLen;
+                        if (i >= 0) fpStartLen = "(cached): $".Length;
+                        else
+                        {
+                            i = line.IndexOf("(fresh): $", StringComparison.Ordinal);
+                            if (i < 0) continue;
+                            fpStartLen = "(fresh): $".Length;
+                        }
+                        // ... new bridge descriptor 'NAME' (cached|fresh): $FINGERPRINT~NAME [...]
+                        int j = i + fpStartLen;
+                        string hx = "";
+                        for (; j < line.Length && line[j] != '~' && hx.Length < 40; j++)
+                            if (char.IsLetterOrDigit(line[j])) hx += line[j];
+                        if (hx.Length == 32 || hx.Length == 40)
+                            healthy.Add(hx);
+                    }
+                }
+            }
+            catch { }
+            return healthy;
+        }
+
+        // Rewrite a *_tested.txt bridge file so that the bridges proven healthy in
+        // PREVIOUS successful runs come first. tor connects to bridges in roughly
+        // listed order and gives up fast on ones that fail, so leading with the
+        // healthy set means the next connect starts with the bridges that just won
+        // a 100% bootstrap instead of churning through hundreds of stale ones.
+        private static void RePrioritizeBridgeFile(int mode)
+        {
+            try
+            {
+                if (mode < 0 || mode >= BridgeFiles.Length || BridgeFiles[mode].Length == 0) return;
+                string bf = Path.Combine(BridgesDir, BridgeFiles[mode]);
+                if (!File.Exists(bf)) return;
+                // Union: fingerprints logged this run (cold restart logs them)
+                // plus the persistent pool from earlier runs (warm restarts do
+                // NOT log them, so the pool is what carries them forward).
+                var healthy = ScanHealthyBridgesFromLog();
+                foreach (string fp in LoadHealthyBridges(mode))
+                    healthy.Add(fp.Trim());
+                var fast = new List<string>();
+                var rest = new List<string>();
+                var saved = new List<string>();
+                foreach (string line in File.ReadAllLines(bf))
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t.StartsWith("#")) continue;
+                    string fp = BridgeFingerprint(t);
+                    bool isHealthy = fp != null && healthy.Count > 0 && healthy.Contains(fp);
+                    if (isHealthy) { fast.Add(line); saved.Add(fp); }
+                    else rest.Add(line);
+                }
+                SaveHealthyBridges(mode, saved);
+                if (fast.Count == 0) return; // don't rewrite when nothing proved healthy
+                var outLines = new List<string>();
+                outLines.Add("# === healthy (worked in a previous successful run) ===");
+                outLines.AddRange(fast);
+                outLines.Add("");
+                outLines.Add("# === remaining (fallback) ===");
+                outLines.AddRange(rest);
+                File.WriteAllLines(bf, outLines, new UTF8Encoding(false));
+                Log("prioritized " + fast.Count + " healthy " + ModeNames[mode] + " bridges to the top of " + BridgeFiles[mode]);
+            }
+            catch { }
+        }
+
+        private static HashSet<string> LoadHealthyBridges(int mode)
+        {
+            var s = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                string f = HealthyBridgesFile(mode);
+                if (File.Exists(f))
+                    foreach (string l in File.ReadAllLines(f))
+                    {
+                        string t = l.Trim();
+                        if (t.Length > 0) s.Add(t);
+                    }
+            }
+            catch { }
+            return s;
+        }
+
+        private static void SaveHealthyBridges(int mode, List<string> fps)
+        {
+            try
+            {
+                var all = LoadHealthyBridges(mode);
+                foreach (string f in fps) all.Add(f.Trim());
+                File.WriteAllLines(HealthyBridgesFile(mode), new List<string>(all), new UTF8Encoding(false));
+            }
+            catch { }
+        }
+
+        // Extract the bridge fingerprint (40-hex identity) from a line of ANY
+        // *_tested.txt format. Formatted lines carry the transport prefix first,
+        // so the fingerprint sits at index 2 (obfs4/webtunnel/snowflake); the
+        // unprefixed vanilla lines put it at index 1. We detect by looking at the
+        // first token so each mode is handled correctly.
+        private static string BridgeFingerprint(string line)
+        {
+            string[] p = line.Split((char[])null, StringSplitOptions.RemoveEmptyEntries);
+            if (p.Length == 0) return null;
+            string first = p[0].ToLowerInvariant();
+            int idx = (first == "obfs4" || first == "webtunnel" || first == "snowflake") ? 2 : 1;
+            return p.Length > idx ? p[idx] : null;
+        }
+
+        // Restore the snapshot taken at the last successful 100% connection over
+        // the live data directory, then report the recorded mode/strategy. This is
+        // what makes "memory" reconnect in the fastest possible time: the exact
+        // prior state (cached directory info, guards, keys, cookie) is back in
+        // place before tor boots, so no cold start wait is needed.
+        private static bool RestoreLastSuccessFull(out int mode, out int strategy)
+        {
+            mode = -1;
+            strategy = -1;
+            ReadLastSuccessCache(out mode, out strategy);
+            if (mode < 0) return false;
+            try
+            {
+                if (Directory.Exists(MemoryBackupDir))
+                {
+                    string dst = Path.Combine(DataDir, "data");
+                    if (Directory.Exists(dst))
+                        try { Directory.Delete(dst, true); } catch { }
+                    CopyDirectory(MemoryBackupDir, dst);
+                }
+                return true;
+            }
+            catch { return true; } // mode alone still boots (cold); data is bonus
+        }
+
         private static bool ReadLastSuccessCache(out int mode, out int strategy)
         {
             mode = -1;
             strategy = -1;
             try
             {
-                if (!File.Exists(LastSuccessFile)) return false;
-                string[] lines = File.ReadAllLines(LastSuccessFile);
+                // Prefer the richer memory meta when present; fall back to the
+                // legacy last-success.txt so old installs keep working.
+                string cache = File.Exists(MemoryMetaFile) && File.Exists(LastSuccessFile)
+                    ? MemoryMetaFile
+                    : (File.Exists(LastSuccessFile) ? LastSuccessFile : null);
+                if (cache == null) return false;
+                string[] lines = File.ReadAllLines(cache);
                 string modeName = null, stratName = null;
                 foreach (string line in lines)
                 {
@@ -972,12 +1257,32 @@ namespace StartTor
                     Console.WriteLine("[x] bridge file not found: " + bf);
                     return null;
                 }
+                // Prefer ONLY the bridges proven healthy in a previous successful
+                // run (listed first in *_tested.txt via RePrioritizeBridgeFile).
+                // tor then stops churning through stale bridges and connects in
+                // seconds. Fall back to every bridge only when none are healthy yet.
+                var healthyFp = LoadHealthyBridges(mode);
                 var bridges = new List<string>();
                 foreach (string line in File.ReadAllLines(bf))
                 {
                     string t = line.Trim();
                     if (t.Length == 0 || t.StartsWith("#")) continue;
+                    if (healthyFp.Count > 0)
+                    {
+                        string fp = BridgeFingerprint(t);
+                        if (fp == null || !healthyFp.Contains(fp)) continue;
+                    }
                     bridges.Add("Bridge " + t);
+                }
+                if (bridges.Count == 0)
+                {
+                    healthyFp.Clear();
+                    foreach (string line in File.ReadAllLines(bf))
+                    {
+                        string t = line.Trim();
+                        if (t.Length == 0 || t.StartsWith("#")) continue;
+                        bridges.Add("Bridge " + t);
+                    }
                 }
                 if (bridges.Count == 0)
                 {
@@ -1098,28 +1403,40 @@ namespace StartTor
             Console.WriteLine();
 
             int ok = 0;
-            foreach (string f in AllBridgeFiles)
+            foreach (string f in UpdateBridgeFiles)
             {
                 string dest = Path.Combine(BridgesDir, f);
-                string tmp = dest + ".tmp";
-                string url = BridgesBaseUrl + "/" + f;
+                string baseName = f.Replace("_tested.txt", "");
+                string urlV4 = BridgesBaseUrl + "/" + baseName + "_tested.txt";
+                string urlV6 = BridgesBaseUrl + "/" + baseName + "_ipv6_tested.txt";
                 try
                 {
+                    StringBuilder content = new StringBuilder();
+                    int total = 0;
+
                     using (WebClient wc = new WebClient())
                     {
                         wc.Headers[HttpRequestHeader.UserAgent] = "torjet-updater/1.0";
-                        wc.DownloadFile(url, tmp);
+                        string v4 = wc.DownloadString(urlV4);
+                        total += AppendBridgeLines(content, v4);
+                        try
+                        {
+                            string v6 = wc.DownloadString(urlV6);
+                            total += AppendBridgeLines(content, v6);
+                        }
+                        catch
+                        {
+                            Console.WriteLine("  (note: " + baseName + "_ipv6_tested.txt unavailable)");
+                        }
                     }
-                    int n = CountBridgeLines(tmp);
-                    if (n == 0)
+
+                    if (total == 0)
                     {
-                        Console.WriteLine("[!] " + f + ": downloaded file has no usable bridges - keeping old.");
-                        try { File.Delete(tmp); } catch { }
+                        Console.WriteLine("[!] " + f + ": downloaded files have no usable bridges - keeping old.");
                         continue;
                     }
-                    File.Copy(tmp, dest, true);
-                    try { File.Delete(tmp); } catch { }
-                    Console.WriteLine("" + f + ": " + n + " bridges - updated.");
+                    File.WriteAllText(dest, content.ToString());
+                    Console.WriteLine("" + f + ": " + total + " bridges - updated.");
                     ok++;
                 }
                 catch (Exception ex)
@@ -1129,14 +1446,32 @@ namespace StartTor
             }
 
             Console.WriteLine();
-            if (ok == AllBridgeFiles.Length)
+            if (ok == UpdateBridgeFiles.Length)
             {
                 Console.WriteLine("All bridge files are up to date.");
                 return 0;
             }
-            Console.WriteLine("Updated " + ok + " of " + AllBridgeFiles.Length +
+            Console.WriteLine("Updated " + ok + " of " + UpdateBridgeFiles.Length +
                               " bridge files (restart tor to use the new bridges).");
             return ok > 0 ? 0 : 1;
+        }
+
+        private static int AppendBridgeLines(StringBuilder sb, string text)
+        {
+            int count = 0;
+            using (StringReader sr = new StringReader(text))
+            {
+                string line;
+                while ((line = sr.ReadLine()) != null)
+                {
+                    string t = line.Trim();
+                    if (t.Length == 0 || t.StartsWith("#")) continue;
+                    if (t.Contains("2001:db8")) continue;
+                    sb.AppendLine(t);
+                    count++;
+                }
+            }
+            return count;
         }
 
         private static string FormatSpeed(double bytesPerSec)
@@ -1154,12 +1489,12 @@ namespace StartTor
             catch { }
 
             Console.WriteLine();
-            Console.WriteLine("Speed test: downloading 10 MB through Tor (HTTP 127.0.0.1:8118)...");
+            Console.WriteLine("Speed test: downloading 10 MB through Tor (HTTP 127.0.0.1:" + liveHttpPort + ")...");
             try
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
                     "https://speed.cloudflare.com/__down?bytes=10000000");
-                req.Proxy = new WebProxy("127.0.0.1", 8118);
+                req.Proxy = new WebProxy("127.0.0.1", liveHttpPort);
                 req.Method = "GET";
                 req.Timeout = 60000;
                 req.ReadWriteTimeout = 60000;
@@ -1217,7 +1552,7 @@ namespace StartTor
         private static NetworkStream Socks5Connect(string host, int port, string username)
         {
             TcpClient tc = new TcpClient();
-            tc.Connect(IPAddress.Loopback, 9050);
+            tc.Connect(IPAddress.Loopback, liveSocksPort);
             NetworkStream ns = tc.GetStream();
             ns.ReadTimeout = 90000;
             ns.WriteTimeout = 90000;
@@ -1395,7 +1730,7 @@ namespace StartTor
         {
             Console.WriteLine();
             Console.WriteLine("  Speed test:");
-            Console.WriteLine("    1) Single stream down (HTTP 8118)");
+            Console.WriteLine("    1) Single stream down (HTTP " + liveHttpPort + ")");
             Console.WriteLine("    2) Max down: " + MaxSpeedTestStreams +
                               " parallel SOCKS5 streams, each own circuit");
             Console.WriteLine("    3) Max up:   " + MaxSpeedTestStreams +
@@ -1424,12 +1759,40 @@ namespace StartTor
             return b;
         }
 
+        // Re-points the live endpoints at a running tor from another process
+        // (e.g. a race winner started by a separate TorJet/Cli instance sitting
+        // on its own racer ports). Once a control port answers, the whole
+        // live-* set is adjusted so control/keep-alive/proxy talk to that tor.
+        // No-op when the current live endpoint already answers.
+        private static void LocateLiveControl()
+        {
+            if (ControlRawFor(liveCtrlPort, "GETINFO version", liveCookiePath) != null)
+                return;
+            for (int i = 0; i < RacerDirs.Length; i++)
+            {
+                string cookie = Path.Combine(DataDir, RacerDirs[i], "control_auth_cookie");
+                int ctrl = RacerSocksPorts[i] + 1;
+                if (ControlRawFor(ctrl, "GETINFO version", cookie) != null)
+                {
+                    liveCtrlPort = ctrl;
+                    liveCookiePath = cookie;
+                    liveSocksPort = RacerSocksPorts[i];
+                    liveKeepPort = RacerSocksPorts[i] + 2;
+                    liveHttpPort = RacerHttpPorts[i];
+                    liveDnsPort = RacerDnsPorts[i];
+                    liveLogPath = Path.Combine(DataDir, RacerDirs[i], "tor.log");
+                    return;
+                }
+            }
+        }
+
         // Sends a command to the tor control port and returns every raw reply
         // line, including the terminating status line ("250 OK" and friends).
         // Returns null when the port is unreachable or auth fails.
         private static List<string> ControlRaw(string cmd)
         {
-            return ControlRawFor(9051, cmd, ControlCookie);
+            LocateLiveControl();
+            return ControlRawFor(liveCtrlPort, cmd, liveCookiePath);
         }
 
         private static List<string> ControlRawFor(int port, string cmd, string cookiePath)
@@ -1471,7 +1834,8 @@ namespace StartTor
         // payload lines (without the terminating status line).
         private static List<string> ControlCommand(string cmd)
         {
-            return ControlCommandFor(9051, cmd, ControlCookie);
+            LocateLiveControl();
+            return ControlCommandFor(liveCtrlPort, cmd, liveCookiePath);
         }
 
         private static List<string> ControlCommandFor(int port, string cmd, string cookiePath)
@@ -1615,7 +1979,7 @@ namespace StartTor
             var legList = ConfluxQuery();
             if (legList == null)
             {
-                Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
+                Console.WriteLine("[x] cannot reach tor control port (127.0.0.1:" + liveCtrlPort + ") (is tor running?).");
                 return 1;
             }
             if (legList.Count == 0)
@@ -1683,7 +2047,7 @@ namespace StartTor
             var legList = ConfluxQuery();
             if (legList == null)
             {
-                Console.WriteLine("[x] cannot reach tor control port on 127.0.0.1:9051 (is tor running?).");
+                Console.WriteLine("[x] cannot reach tor control port (127.0.0.1:" + liveCtrlPort + ") (is tor running?).");
                 return 1;
             }
             bool debug = detailed || Environment.GetEnvironmentVariable("BENCH_DEBUG") == "1";
@@ -2037,7 +2401,7 @@ namespace StartTor
         // Returns false when neither source has a percentage yet.
         private static bool BootstrapPhase(out int pct, out string tag, out string summary)
         {
-            return BootstrapPhaseFor(9051, TorLog, ControlCookie, out pct, out tag, out summary);
+            return BootstrapPhaseFor(liveCtrlPort, liveLogPath, liveCookiePath, out pct, out tag, out summary);
         }
 
         private static bool BootstrapPhaseFor(int controlPort, string logPath, string cookiePath,
@@ -2186,7 +2550,7 @@ namespace StartTor
                 for (int i = Math.Max(0, jet.Length - maxLines); i < jet.Length; i++)
                     Console.WriteLine("  " + jet[i]);
                 Console.WriteLine();
-                string[] tor = ReadLogTailFile(TorLog, 16384);
+                string[] tor = ReadLogTailFile(liveLogPath, 16384);
                 Console.WriteLine(Stamp() + "tor log - last " +
                                   Math.Min(tor.Length, maxLines) + " of " +
                                   tor.Length + " line(s):");
@@ -2207,6 +2571,7 @@ namespace StartTor
         {
             errorMessage = null;
             aborted = false;
+            ResetLivePorts();
             if (!File.Exists(TorExe))
             {
                 errorMessage = "tor.exe not found in " + DataDir;
@@ -2451,7 +2816,7 @@ namespace StartTor
             try
             {
                 tc = new TcpClient();
-                IAsyncResult ar = tc.BeginConnect(IPAddress.Loopback, KeepAliveSocksPort, null, null);
+                IAsyncResult ar = tc.BeginConnect(IPAddress.Loopback, liveKeepPort, null, null);
                 if (!ar.AsyncWaitHandle.WaitOne(4000))
                 {
                     tc.Close();
@@ -2603,7 +2968,7 @@ namespace StartTor
             }
             keepAliveThread = new Thread(KeepAliveLoop) { IsBackground = true };
             keepAliveThread.Start();
-            Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:9052, 5 s timeout");
+            Log("keep-alive: started - 1 request/s via SOCKS 127.0.0.1:" + liveKeepPort + ", 5 s timeout");
         }
 
         private static void StopKeepAlive()
@@ -2675,7 +3040,7 @@ namespace StartTor
                 try
                 {
                     HttpWebRequest req = (HttpWebRequest)WebRequest.Create(u);
-                    req.Proxy = new WebProxy("127.0.0.1", 8118);
+                    req.Proxy = new WebProxy("127.0.0.1", liveHttpPort);
                     req.Method = "GET";
                     req.Timeout = 30000;
                     req.ReadWriteTimeout = 30000;
@@ -2723,7 +3088,7 @@ namespace StartTor
                     {
                         HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
                             benchUrl ?? BenchEndpoints[0]);
-                        req.Proxy = new WebProxy("127.0.0.1", 8118);
+                        req.Proxy = new WebProxy("127.0.0.1", liveHttpPort);
                         req.Method = "GET";
                         req.Timeout = 180000;
                         req.ReadWriteTimeout = 180000;
@@ -2803,7 +3168,7 @@ namespace StartTor
                     {
                         HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
                             "https://speed.cloudflare.com/__up");
-                        req.Proxy = new WebProxy("127.0.0.1", 8118);
+                        req.Proxy = new WebProxy("127.0.0.1", liveHttpPort);
                         req.Method = "POST";
                         req.ContentType = "application/octet-stream";
                         req.ContentLength = bytesPerStream;
@@ -2986,6 +3351,22 @@ namespace StartTor
             foreach (int p in TcpPorts)
                 if (TcpPortBusy(p)) return true;
             if (UdpPortBusy(UdpDnsPort)) return true;
+            return false;
+        }
+
+        // True while any of our own ports — primary or the three racer port
+        // tuples — is still bound. Machinery waits on this after killing a
+        // previous run/winner so a fresh start or race never hits "in use".
+        private static bool AllTorPortsActive()
+        {
+            if (PreviousRunActive()) return true;
+            foreach (int p in RacerSocksPorts)
+            {
+                if (TcpPortBusy(p) || TcpPortBusy(p + 1) || TcpPortBusy(p + 2))
+                    return true;
+                if (UdpPortBusy(RacerDnsPorts[System.Array.IndexOf(RacerSocksPorts, p)]))
+                    return true;
+            }
             return false;
         }
 
@@ -3184,65 +3565,7 @@ namespace StartTor
         // reached 100% and its cache has been moved to the primary data dir.
         private static Action<string> autoLineSink;
         private static volatile bool autoAbort;
-        private static Process autoLiveProc;   // non-null when the winner survived the switch
-
-        // Moves a live winner onto the primary ports via SETCONF. The DNS
-        // port stays put on purpose; the DNS stub re-points at it instead.
-        private static bool AutoSwitchWinnerToPrimaryPorts(AutoRacer w)
-        {
-            if (TcpPortBusy(9050) || TcpPortBusy(8118) || TcpPortBusy(9051))
-            {
-                AutoEmit("[auto] live switch: primary port busy (9050/8118/9051)");
-                return false;
-            }
-            try { File.Copy(AutoRacerCookie(w), ControlCookie, true); }
-            catch (Exception ex)
-            {
-                AutoEmit("[auto] live switch: cookie copy failed (" + ex.Message + ")");
-                return false;
-            }
-            string setconf =
-                "SETCONF SocksPort=\"127.0.0.1:9050 IsolateSOCKSAuth\" " +
-                "SocksPort=\"127.0.0.1:9052 NoIsolateSOCKSAuth\" " +
-                "HTTPTunnelPort=127.0.0.1:8118 " +
-                "ControlPort=127.0.0.1:9051";
-            var reply = ControlRawFor(w.Ctrl, setconf, AutoRacerCookie(w));
-            if (reply == null)
-            {
-                AutoEmit("[auto] live switch: control port unreachable");
-                return false;
-            }
-            bool ok = false;
-            foreach (string l in reply)
-                if (l.StartsWith("250")) { ok = true; break; }
-            if (!ok)
-            {
-                AutoEmit("[auto] live switch rejected by tor — falling back to restart");
-                return false;
-            }
-            // Tor regenerates the auth cookie when ControlPort changes.
-            // Re-copy the NEW cookie before verifying on the new port.
-            Thread.Sleep(500);
-            try { File.Copy(AutoRacerCookie(w), ControlCookie, true); }
-            catch { }
-            for (int attempt = 1; attempt <= 4; attempt++)
-            {
-                int waitMs = attempt == 1 ? 500 : attempt == 2 ? 1000 : 2000;
-                Thread.Sleep(waitMs);
-                int pct; string tag, summ;
-                if (BootstrapPhaseFor(9051, AutoRacerLog(w), ControlCookie,
-                                     out pct, out tag, out summ))
-                {
-                    AutoEmit("[auto] live switch OK — winner stays up on 9050/8118 (no restart)");
-                    return true;
-                }
-                // Re-copy cookie on each retry (tor may still be writing it)
-                try { File.Copy(AutoRacerCookie(w), ControlCookie, true); } catch { }
-                AutoEmit("[auto] live switch: attempt " + attempt + "/4 — 9051 not ready, retrying...");
-            }
-            AutoEmit("[auto] live switch: control 9051 not answering after 4 attempts — falling back");
-            return false;
-        }
+        private static Process autoLiveProc;   // non-null when the winner is kept alive
 
         private static void AutoEmit(string line)
         {
@@ -3268,6 +3591,15 @@ namespace StartTor
             raceError = null;
             string[] names = { "vanilla", "obfs4", "webtunnel" };
             string[] suffixes = { "v", "o", "w" };
+
+            // A previous race winner / session may still be holding these
+            // ports from an aborted or crashed run. Stop every tor from this
+            // folder and wait for both the primary and the racer ports to free
+            // before respawning, so a fresh race never dies with "in use".
+            StopPreviousRun();
+            ResetLivePorts();
+            for (int i = 0; i < 40 && AllTorPortsActive(); i++) Thread.Sleep(500);
+
             var racers = new List<AutoRacer>();
             for (int i = 0; i < 3; i++)
             {
@@ -3276,12 +3608,11 @@ namespace StartTor
                 r.Mode = i; // ModeNames: vanilla, obfs4, webtunnel, ...
                 r.Dir = "data-" + suffixes[i];
                 r.TorrcFile = "torrc-auto-" + names[i];
-                int basePort = 9150 + i * 100;
-                r.Socks = basePort;
-                r.Ctrl = basePort + 1;
-                r.Keep = basePort + 2;
-                r.Http = 8150 + i * 100;
-                r.Dns = 61530 + i * 1000;
+                r.Socks = RacerSocksPorts[i];
+                r.Keep = RacerSocksPorts[i] + 2;
+                r.Http = RacerHttpPorts[i];
+                r.Ctrl = RacerSocksPorts[i] + 1;
+                r.Dns = RacerDnsPorts[i];
                 racers.Add(r);
             }
 
@@ -3451,53 +3782,58 @@ namespace StartTor
                 }
             }
 
-            // Preferred: keep the winner ALIVE and move its SOCKS/HTTP/Control
-            // ports to the primary ones via SETCONF. Its conflux sets stay up,
-            // so the session continues at full speed with zero downtime.
-            // DNSPort is intentionally never touched (closing the DNS listener
-            // has crashed tor on some Windows builds) — the DNS stub simply
-            // forwards to the winner's existing DNS port instead.
+            // The winner keeps running right where it is, on its OWN racer
+            // ports — no control-port SETCONF move and no restart, so its
+            // conflux sets stay up and the session is live at 100% with zero
+            // downtime. Every subsystem (control port, keep-alive, watchdog,
+            // speed test, system proxy, log) is re-pointed at the winner via
+            // the live-* endpoints. DNSPort is untouched by design.
             autoLiveProc = null;
-            if (AutoSwitchWinnerToPrimaryPorts(winner))
+            if (winner.Proc == null || winner.Proc.HasExited)
             {
-                autoLiveProc = winner.Proc;
-                try { WriteTorrc(winner.Mode, strategy); } catch { }
-                // warm the primary data dir for future restarts (best effort —
-                // some files are open in the live winner and are skipped)
-                Thread copyWarm = new Thread(delegate()
+                // The winner died the moment it crossed 100% — fall back to
+                // the warm-cache restart path (standard single-core start).
+                AutoEmit("[auto] winner " + winner.Name + " exited right after winning — restarting on primary ports");
+                try
                 {
-                    try
-                    {
-                        string dst = Path.Combine(DataDir, "data");
-                        CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
-                        try { File.Delete(Path.Combine(dst, "lock")); } catch { }
-                    }
-                    catch { }
-                });
-                copyWarm.IsBackground = true;
-                copyWarm.Start();
+                    string dst = Path.Combine(DataDir, "data");
+                    CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
+                    try { File.Delete(Path.Combine(dst, "lock")); } catch { }
+                }
+                catch (Exception ex)
+                {
+                    Log("auto: cache copy failed (" + ex.Message + ") — cold bootstrap");
+                }
+                ResetLivePorts();
                 winnerMode = winner.Mode;
                 autoLineSink = null;
                 return true;
             }
 
-            // Fallback: stop everyone, move the winner's cache to the primary
-            // data directory and let the standard single-core start take over.
-            try { if (winner.Proc != null && !winner.Proc.HasExited) { winner.Proc.Kill(); winner.Proc.WaitForExit(3000); } }
-            catch { }
-            Thread.Sleep(800);
-
-            AutoEmit("[auto] switching " + winner.Name + " to primary ports (9050/8118)…");
-            try
+            // Winner is alive — adopt its ports and keep it running.
+            AdoptRacerPorts(winner);
+            autoLiveProc = winner.Proc;
+            try { WriteTorrc(winner.Mode, strategy); } catch { }
+            AutoEmit("[auto] KEPT " + winner.Name + " live on primary-for-this-session ports:");
+            AutoEmit("[auto]   SOCKS 127.0.0.1:" + liveSocksPort +
+                     "  (keep-alive " + liveKeepPort + ")");
+            AutoEmit("[auto]   HTTP  127.0.0.1:" + liveHttpPort);
+            AutoEmit("[auto]   DNS   127.0.0.1:" + liveDnsPort +
+                     "  (control " + liveCtrlPort + ")");
+            // warm the primary data dir for future restarts (best effort —
+            // some files are open in the live winner and are skipped)
+            Thread copyWarm = new Thread(delegate()
             {
-                string dst = Path.Combine(DataDir, "data");
-                CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
-                try { File.Delete(Path.Combine(dst, "lock")); } catch { }
-            }
-            catch (Exception ex)
-            {
-                Log("auto: cache copy failed (" + ex.Message + ") — cold bootstrap");
-            }
+                try
+                {
+                    string dst = Path.Combine(DataDir, "data");
+                    CopyDirectory(Path.Combine(DataDir, winner.Dir), dst);
+                    try { File.Delete(Path.Combine(dst, "lock")); } catch { }
+                }
+                catch { }
+            });
+            copyWarm.IsBackground = true;
+            copyWarm.Start();
             winnerMode = winner.Mode;
             autoLineSink = null;
             return true;
@@ -3526,11 +3862,13 @@ namespace StartTor
             if (mode == 5) // memory
             {
                 int cachedMode, cachedStrategy;
-                if (ReadLastSuccessCache(out cachedMode, out cachedStrategy))
+                if (RestoreLastSuccessFull(out cachedMode, out cachedStrategy))
                 {
                     mode = cachedMode;
                     if (strategy < 0) strategy = cachedStrategy;
                     Console.WriteLine("  [memory] reconnecting with: " + ModeNames[mode] + " / " + StrategyNames[strategy]);
+                    if (Directory.Exists(MemoryBackupDir))
+                        Console.WriteLine("  [memory] restored warm state from " + MemoryBackupDir);
                 }
                 else
                 {
@@ -3601,6 +3939,10 @@ namespace StartTor
                 {
                     Console.WriteLine();
                     Console.WriteLine("Bootstrapped 100% - Tor is UP.");
+                    Console.WriteLine("  SOCKS 127.0.0.1:" + liveSocksPort +
+                                      "   HTTP 127.0.0.1:" + liveHttpPort +
+                                      "   DNS 127.0.0.1:" + liveDnsPort +
+                                      "   control 127.0.0.1:" + liveCtrlPort);
                     Console.WriteLine();
                     showBanners = false;
                 }
@@ -3610,7 +3952,7 @@ namespace StartTor
                     Console.WriteLine("Bootstrapped 100% - Tor is UP (auto-restart " + attempt + ").");
                     Console.WriteLine();
                 }
-                WriteLastSuccessCache(mode, strategy);
+                BackupLastSuccessFull(mode, strategy);
                 if (ReadAutoProxySetting()) SetSystemProxy(true);
 
                 if (bootstrapOnly)
@@ -3658,7 +4000,7 @@ namespace StartTor
                     {
                         proxyOn = true;
                         SetSystemProxy(true);
-                        Console.WriteLine("  System proxy ON  (127.0.0.1:8118)");
+                        Console.WriteLine("  System proxy ON  (127.0.0.1:" + liveHttpPort + ")");
                     }
                 }
 
@@ -3704,7 +4046,7 @@ namespace StartTor
                             {
                                 proxyOn = !proxyOn;
                                 SetSystemProxy(proxyOn);
-                                Console.WriteLine("  System proxy " + (proxyOn ? "ON  (127.0.0.1:8118)" : "OFF"));
+                                Console.WriteLine("  System proxy " + (proxyOn ? "ON  (127.0.0.1:" + liveHttpPort + ")" : "OFF"));
                             }
                             else if (ki.Key == ConsoleKey.S)
                             {
@@ -3989,7 +4331,7 @@ namespace StartTor
             {
                 Console.WriteLine(ControlSend("SIGNAL NEWNYM")
                     ? "New identity requested (NEWNYM)."
-                    : "No tor control port on 127.0.0.1:9051. Is tor running?");
+                    : "No tor control port (127.0.0.1:" + liveCtrlPort + ") . Is tor running?");
                 return 0;
             }
             if (args.Length > 0 && args[0] == "--stop")
@@ -4042,7 +4384,7 @@ namespace StartTor
             {
                 Console.WriteLine(ControlSend("SIGNAL NEWNYM")
                     ? "New identity requested (NEWNYM)."
-                    : "No tor control port on 127.0.0.1:9051. Is tor running?");
+                    : "No tor control port (127.0.0.1:" + liveCtrlPort + ") . Is tor running?");
                 return 0;
             }
             if (mode < 0 && !raceStart)

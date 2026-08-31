@@ -124,6 +124,26 @@ TorJet exposes three local entry points, all bound to 127.0.0.1:
 | 9052 | keep-alive SOCKS5 (internal) | TorJet's background pings |
 | 8118 | HTTP CONNECT tunnel proxy (HTTPTunnelPort — CONNECT only, not a full HTTP proxy) | Windows system proxy (pressed **P**) |
 
+### Auto race mode (`TorJet.exe auto` or the default GUI mode)
+
+In auto mode TorJet launches three tor instances **side by side** — vanilla,
+obfs4 and webtunnel — each with its own data directory and listener ports:
+
+| Racer | SOCKS | HTTP | DNS | Control |
+|-------|-------|------|-----|---------|
+| vanilla | 9150 | 8150 | 61530 | 9151 |
+| obfs4 | 9250 | 8250 | 62530 | 9251 |
+| webtunnel | 9350 | 8350 | 63530 | 9351 |
+
+The first instance to reach **100%** wins and the other two are stopped. The
+winner **keeps running on its own racer ports** — TorJet re-points the whole
+session (control port, keep-alive, watchdog, speed test) at those ports, so
+the tunnel is live immediately with zero restart and the system proxy is set
+to that winner's HTTP port. The exact ports are shown on screen when the
+session comes up. Because the addresses are dynamic in this mode, point your
+apps at the SOCKS5/HTTP ports printed by the session (the fixed 9050/8118 below
+apply to fixed single-mode starts).
+
 Point your browser (or any app) at the **SOCKS5 proxy 127.0.0.1:9050**, or press
 **P** to set Windows' system proxy to the HTTP CONNECT tunnel on
 127.0.0.1:8118. These ports

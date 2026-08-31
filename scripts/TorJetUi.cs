@@ -680,6 +680,15 @@ namespace StartTor
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis);
 
+                if (state == RunState.Connected)
+                {
+                    TextRenderer.DrawText(g, "SOCKS 127.0.0.1:" + liveSocksPort +
+                        "   HTTP 127.0.0.1:" + liveHttpPort +
+                        "   DNS 127.0.0.1:" + liveDnsPort,
+                        Theme.Small(), new Rectangle(0, rcPower.Bottom + 30, ClientSize.Width, 18),
+                        Theme.Muted, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter);
+                }
+
                 if (!autoProxyEnabled)
                     PaintTogglePill(g, rcProxy, "PROXY", ProxyIsOurs(), hoverId == 20, false);
 
@@ -1317,11 +1326,13 @@ namespace StartTor
                 if (mode == 5) // memory
                 {
                     int cachedMode, cachedStrategy;
-                    if (ReadLastSuccessCache(out cachedMode, out cachedStrategy))
+                    if (RestoreLastSuccessFull(out cachedMode, out cachedStrategy))
                     {
                         mode = cachedMode;
                         if (strategy < 0) strategy = cachedStrategy;
                         LogLine("[memory] " + ModeNames[mode] + " / " + StrategyNames[strategy]);
+                        if (Directory.Exists(MemoryBackupDir))
+                            LogLine("[memory] restored warm state");
                     }
                     else
                     {
@@ -1370,7 +1381,17 @@ namespace StartTor
                     mode = winnerMode;
                     lastWinnerMode = winnerMode;
                     if (autoLiveProc != null)
+                    {
                         torProc = autoLiveProc;   // winner kept alive — skip the restart
+                        LogLine("connected - " + ModeNames[mode] +
+                                " | SOCKS 127.0.0.1:" + liveSocksPort +
+                                " | HTTP 127.0.0.1:" + liveHttpPort +
+                                " | DNS 127.0.0.1:" + liveDnsPort);
+                    }
+                    else
+                    {
+                        LogLine("[auto] " + ModeNames[mode] + " won — restarting on primary ports");
+                    }
                     if (stoppingBusy)
                     {
                         // user asked to stop while the race was claiming the
@@ -1436,7 +1457,7 @@ namespace StartTor
                 }) { IsBackground = true };
                 warmupEnd.Start();
 
-                WriteLastSuccessCache(mode, strategy);
+                BackupLastSuccessFull(mode, strategy);
                 if (autoProxyEnabled)
                     UiInvokeDelegate(delegate { ApplyProxyToggle(true); });
                 sessionBusy = false;

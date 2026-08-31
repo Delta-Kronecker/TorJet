@@ -193,12 +193,51 @@ jobs:
           Copy-Item "transports\*.exe" -Destination "dist\data\" -Force
           Get-ChildItem "dist" -Recurse -File | Select-Object FullName, Length
 
-      - name: Copy config template, bridges, README
+      - name: Copy config template, snowflake bridge, README
         shell: pwsh
         run: |
           Copy-Item "configs\torrc.jet" "dist\data\torrc.template" -Force
-          Copy-Item "bridges\*.txt" "dist\data\bridges\" -Force
+          Copy-Item "bridges\snowflake_tested.txt" "dist\data\bridges\" -Force
           Copy-Item "README.md" "dist\data\README.md" -Force
+
+      - name: Download and combine bridges
+        shell: pwsh
+        run: |
+          $base = "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge"
+          $outDir = "dist\data\bridges"
+          $pairs = @(
+            @{ Name = "obfs4_tested.txt";    V4 = "$base/obfs4_tested.txt";    V6 = "$base/obfs4_ipv6_tested.txt" },
+            @{ Name = "webtunnel_tested.txt"; V4 = "$base/webtunnel_tested.txt"; V6 = "$base/webtunnel_ipv6_tested.txt" },
+            @{ Name = "vanilla_tested.txt";   V4 = "$base/vanilla_tested.txt";   V6 = "$base/vanilla_ipv6_tested.txt" }
+          )
+          foreach ($p in $pairs) {
+            $dest = Join-Path $outDir $p.Name
+            $tmpV4 = "$dest.v4.tmp"
+            $tmpV6 = "$dest.v6.tmp"
+            try {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $p.V4 -OutFile $tmpV4 -UseBasicParsing -ErrorAction Stop
+              Write-Host "$($p.Name): IPv4 downloaded."
+            } catch {
+              Write-Host "[!] $($p.Name): IPv4 download failed: $_"
+              $tmpV4 = $null
+            }
+            try {
+              [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+              Invoke-WebRequest -Uri $p.V6 -OutFile $tmpV6 -UseBasicParsing -ErrorAction Stop
+              Write-Host "$($p.Name): IPv6 downloaded."
+            } catch {
+              Write-Host "[!] $($p.Name): IPv6 download failed: $_"
+              $tmpV6 = $null
+            }
+            $lines = @()
+            if ($tmpV4 -and (Test-Path $tmpV4)) { $lines += Get-Content $tmpV4 }
+            if ($tmpV6 -and (Test-Path $tmpV6)) { $lines += Get-Content $tmpV6 }
+            $lines | Where-Object { $_.Trim() -ne "" } | Set-Content -Path $dest -Encoding UTF8
+            Write-Host "$($p.Name): $([int]((Get-Content $dest | Measure-Object -Line).Lines)) bridges combined."
+            if ($tmpV4 -and (Test-Path $tmpV4)) { Remove-Item $tmpV4 -Force }
+            if ($tmpV6 -and (Test-Path $tmpV6)) { Remove-Item $tmpV6 -Force }
+          }
 
       - name: Compile TorJet.exe
         shell: pwsh
