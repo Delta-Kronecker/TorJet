@@ -1239,7 +1239,7 @@ namespace StartTor
         // Builds the torrc content for a mode/strategy (template + bridges +
         // strategy + conflux blocks). Returns null when the template or the
         // bridge file is missing (reason already printed).
-        private static string BuildTorrc(int mode, int strategy, out int bridgeCount)
+        private static string BuildTorrc(int mode, int strategy, out int bridgeCount, bool healthyOnly = false)
         {
             bridgeCount = 0;
             if (!File.Exists(TorrcTemplate))
@@ -1266,7 +1266,17 @@ namespace StartTor
                 foreach (string line in File.ReadAllLines(bf))
                 {
                     string t = line.Trim();
-                    if (t.Length == 0 || t.StartsWith("#")) continue;
+                    if (t.Length == 0) continue;
+                    if (t.StartsWith("#"))
+                    {
+                        // healthyOnly: stop at the fallback section so only the
+                        // healthy bridges are tried first; if we never reached it
+                        // (no section header) everything above is "the list".
+                        if (healthyOnly && t.IndexOf("remaining", StringComparison.OrdinalIgnoreCase) >= 0)
+                            break;
+                        continue;
+                    }
+                    if (healthyOnly) { bridges.Add("Bridge " + t); continue; }
                     if (healthyFp.Count > 0)
                     {
                         string fp = BridgeFingerprint(t);
@@ -1274,7 +1284,7 @@ namespace StartTor
                     }
                     bridges.Add("Bridge " + t);
                 }
-                if (bridges.Count == 0)
+                if (!healthyOnly && bridges.Count == 0)
                 {
                     healthyFp.Clear();
                     foreach (string line in File.ReadAllLines(bf))
@@ -1348,10 +1358,10 @@ namespace StartTor
             return sb.ToString();
         }
 
-        private static bool WriteTorrc(int mode, int strategy)
+        private static bool WriteTorrc(int mode, int strategy, bool healthyOnly = false)
         {
             int bridgeCount;
-            string content = BuildTorrc(mode, strategy, out bridgeCount);
+            string content = BuildTorrc(mode, strategy, out bridgeCount, healthyOnly);
             if (content == null) return false;
             File.WriteAllText(Torrc, content, new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
@@ -2584,7 +2594,14 @@ namespace StartTor
             // the teardown and dies with "Address already in use".
             for (int i = 0; i < 30 && PreviousRunActive(); i++) Thread.Sleep(500);
             try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
-            if (!WriteTorrc(mode, strategy))
+            // Two-phase bootstrap: try ONLY the healthy (previously-proven)
+            // bridges first -- tor stops churning through hundreds of stale ones
+            // and connects in seconds. If that has NOT reached 100% in 3 minutes,
+            // kill, rebuild the torrc with EVERY bridge, and restart once. This
+            // self-heals the common case where yesterday's healthy bridge is down
+            // today and tor would otherwise be stuck on a dead set.
+            bool fallbackUsed = false;
+            if (!WriteTorrc(mode, strategy, !fallbackUsed))
             {
                 errorMessage = "failed to write torrc (bridge file missing?).";
                 return null;
@@ -2632,7 +2649,7 @@ namespace StartTor
                 Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
 
                 DateTime started = DateTime.UtcNow;
-                DateTime deadline = started.AddMinutes(10);
+                DateTime deadline = started.AddMinutes(3);   // healthy-only window
                 int lastPct = -1;
                 string lastTag = "";
                 DateTime stuckSince = DateTime.UtcNow;
@@ -2716,10 +2733,32 @@ namespace StartTor
                     try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
                     continue;
                 }
+                // Deadline hit without reaching 100%. If we were still on the
+                // healthy-only set, kill and retry with EVERY bridge (fallback).
+                if (!fallbackUsed)
+                {
+                    fallbackUsed = true;
+                    if (interactive)
+                    {
+                        ClearProgressLine();
+                        Console.WriteLine("healthy bridges did not reach 100% in 3 min - retrying with all bridges...");
+                    }
+                    else if (progress != null) progress(-1, "healthy bridges stalled - retrying with all bridges");
+                    try { proc.Kill(); proc.WaitForExit(5000); } catch { }
+                    if (!WriteTorrc(mode, strategy, false))
+                    {
+                        errorMessage = "failed to write fallback torrc (bridge file missing?).";
+                        return null;
+                    }
+                    for (int i = 0; i < 30 && PreviousRunActive(); i++)
+                        Thread.Sleep(500);
+                    try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
+                    continue;
+                }
                 if (interactive) ClearProgressLine();
                 if (!proc.HasExited)
                 {
-                    errorMessage = "bootstrap did not reach 100% in 10 minutes (last seen: " +
+                    errorMessage = "bootstrap did not reach 100% (last seen: " +
                                    lastPct + "% " + lastTag + ").\n" + ReadLogTail(1500);
                     return null;
                 }
