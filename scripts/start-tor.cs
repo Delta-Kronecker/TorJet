@@ -189,6 +189,11 @@ namespace StartTor
         private const string BridgesBaseUrl =
             "https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge";
 
+        // Bootstrap fallback: if the reported bootstrap percentage stays frozen
+        // for this long (2 minutes) the current bridge set is treated as dead
+        // and StartTorAndWait retries with EVERY bridge (the fallback set).
+        private const double StuckFallbackMinutes = 2.0;
+
         // Ports used by this program's tor (torrc.template / torrc.jet).
         // Occupied ports at startup mean a previous tor instance is still alive.
         private static readonly int[] TcpPorts = { 9050, 9051, 8118, 9052 };
@@ -647,11 +652,17 @@ namespace StartTor
             var healthy = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                if (!File.Exists(TorLog)) return healthy;
+                // In single-mode this is data\tor.log; after an auto-race the
+                // winner keeps running on its OWN racer log (data-{x}\tor.log),
+                // which AdoptRacerPorts points liveLogPath at BEFORE we run.
+                // So read liveLogPath, not the static TorLog, or the healthy
+                // bridges that actually won the race are never recorded.
+                string log = liveLogPath;
+                if (!File.Exists(log)) return healthy;
                 // Read with FileShare.ReadWrite|Delete so an in-flight tor that is
                 // still appending to its log (this runs right after a 100% connect,
                 // while tor is alive) can never block us with a share violation.
-                using (var fs = new FileStream(TorLog, FileMode.Open, FileAccess.Read,
+                using (var fs = new FileStream(log, FileMode.Open, FileAccess.Read,
                                                FileShare.ReadWrite | FileShare.Delete))
                 using (var sr = new StreamReader(fs))
                 {
@@ -1239,7 +1250,20 @@ namespace StartTor
         // Builds the torrc content for a mode/strategy (template + bridges +
         // strategy + conflux blocks). Returns null when the template or the
         // bridge file is missing (reason already printed).
-        private static string BuildTorrc(int mode, int strategy, out int bridgeCount, bool healthyOnly = false)
+        //
+        // Bridge selection has three modes:
+        //   healthyOnly=true  -> only the bridges above the
+        //                        "# === remaining (fallback) ===" header (the
+        //                        pre-sorted healthy set). Used for the first
+        //                        bootstrap attempt.
+        //   includeAll=true   -> every non-comment bridge line (healthy and
+        //                        fallback), ignoring the healthy filter. Used
+        //                        when the healthy-only attempt stalls.
+        //   default           -> only bridges whose fingerprint is in the
+        //                        previously-proven healthy list (used by the
+        //                        auto-race and CLI so cached wins are fast).
+        private static string BuildTorrc(int mode, int strategy, out int bridgeCount,
+                                         bool healthyOnly = false, bool includeAll = false)
         {
             bridgeCount = 0;
             if (!File.Exists(TorrcTemplate))
@@ -1257,10 +1281,6 @@ namespace StartTor
                     Console.WriteLine("[x] bridge file not found: " + bf);
                     return null;
                 }
-                // Prefer ONLY the bridges proven healthy in a previous successful
-                // run (listed first in *_tested.txt via RePrioritizeBridgeFile).
-                // tor then stops churning through stale bridges and connects in
-                // seconds. Fall back to every bridge only when none are healthy yet.
                 var healthyFp = LoadHealthyBridges(mode);
                 var bridges = new List<string>();
                 foreach (string line in File.ReadAllLines(bf))
@@ -1272,11 +1292,18 @@ namespace StartTor
                         // healthyOnly: stop at the fallback section so only the
                         // healthy bridges are tried first; if we never reached it
                         // (no section header) everything above is "the list".
-                        if (healthyOnly && t.IndexOf("remaining", StringComparison.OrdinalIgnoreCase) >= 0)
-                            break;
+                        // includeAll: keep going past the header to grab both sets.
+                        if ((healthyOnly || includeAll) &&
+                            t.IndexOf("remaining", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            if (healthyOnly) break;
+                        }
                         continue;
                     }
                     if (healthyOnly) { bridges.Add("Bridge " + t); continue; }
+                    // includeAll reaches here for the fallback set (plus any
+                    // healthy lines) with no fingerprint filtering.
+                    if (includeAll) { bridges.Add("Bridge " + t); continue; }
                     if (healthyFp.Count > 0)
                     {
                         string fp = BridgeFingerprint(t);
@@ -1284,7 +1311,7 @@ namespace StartTor
                     }
                     bridges.Add("Bridge " + t);
                 }
-                if (!healthyOnly && bridges.Count == 0)
+                if (!includeAll && bridges.Count == 0)
                 {
                     healthyFp.Clear();
                     foreach (string line in File.ReadAllLines(bf))
@@ -1358,10 +1385,10 @@ namespace StartTor
             return sb.ToString();
         }
 
-        private static bool WriteTorrc(int mode, int strategy, bool healthyOnly = false)
+        private static bool WriteTorrc(int mode, int strategy, bool healthyOnly = false, bool includeAll = false)
         {
             int bridgeCount;
-            string content = BuildTorrc(mode, strategy, out bridgeCount, healthyOnly);
+            string content = BuildTorrc(mode, strategy, out bridgeCount, healthyOnly, includeAll);
             if (content == null) return false;
             File.WriteAllText(Torrc, content, new UTF8Encoding(false));
             try { File.WriteAllText(ModeFile, ModeNames[mode], new UTF8Encoding(false)); }
@@ -2649,12 +2676,16 @@ namespace StartTor
                 Console.WriteLine("tor started (PID " + proc.Id + "), bootstrapping...");
 
                 DateTime started = DateTime.UtcNow;
-                DateTime deadline = started.AddMinutes(3);   // healthy-only window
+                // Stuck-based window: if the reported bootstrap percentage has
+                // not moved for StuckFallbackMinutes we assume the current
+                // bridge set is dead and trigger the fallback (or report a
+                // real failure once we are already on the fallback set).
+                TimeSpan fallbackWindow = TimeSpan.FromMinutes(StuckFallbackMinutes);
                 int lastPct = -1;
                 string lastTag = "";
                 DateTime stuckSince = DateTime.UtcNow;
                 bool retry = false;
-                while (DateTime.UtcNow < deadline)
+                while (true)
                 {
                     try { proc.Refresh(); } catch { }
                     if (proc.HasExited)
@@ -2715,15 +2746,19 @@ namespace StartTor
                             if (interactive) DrawProgress(pct, tag);
                             else if (progress != null) progress(pct, tag);
                         }
-                        else if (DateTime.UtcNow - stuckSince > TimeSpan.FromMinutes(3))
-                        {
-                            if (interactive) DrawProgress(pct, tag + "  (still waiting...)");
-                        }
                         else
                         {
                             if (interactive) DrawProgress(pct, tag);
                         }
                     }
+                    // If the percentage has not moved for the whole fallback
+                    // window WHILE STILL ON THE HEALTHY-ONLY SET, break out so
+                    // the fallback block below can try the remaining bridges.
+                    // Once we are on the fallback set there is NO timeout — we
+                    // keep waiting indefinitely until 100% (or the user aborts
+                    // or tor itself exits).
+                    if (!fallbackUsed && DateTime.UtcNow - stuckSince >= fallbackWindow)
+                        break;
                     Thread.Sleep(1500);
                 }
                 if (retry)
@@ -2733,19 +2768,21 @@ namespace StartTor
                     try { if (File.Exists(LockFile)) File.Delete(LockFile); } catch { }
                     continue;
                 }
-                // Deadline hit without reaching 100%. If we were still on the
-                // healthy-only set, kill and retry with EVERY bridge (fallback).
+                // Bootstrap stalled (percentage frozen for the fallback window).
+                // If we were still on the healthy-only set, kill and retry with
+                // EVERY bridge (fallback).
                 if (!fallbackUsed)
                 {
                     fallbackUsed = true;
                     if (interactive)
                     {
                         ClearProgressLine();
-                        Console.WriteLine("healthy bridges did not reach 100% in 3 min - retrying with all bridges...");
+                        Console.WriteLine("healthy bridges stalled at " + lastPct + "% for " +
+                                          StuckFallbackMinutes + " min - retrying with all bridges...");
                     }
-                    else if (progress != null) progress(-1, "healthy bridges stalled - retrying with all bridges");
+                    else if (progress != null) progress(-2, "healthy bridges stalled - retrying with all bridges");
                     try { proc.Kill(); proc.WaitForExit(5000); } catch { }
-                    if (!WriteTorrc(mode, strategy, false))
+                    if (!WriteTorrc(mode, strategy, false, includeAll: true))
                     {
                         errorMessage = "failed to write fallback torrc (bridge file missing?).";
                         return null;
@@ -2758,7 +2795,7 @@ namespace StartTor
                 if (interactive) ClearProgressLine();
                 if (!proc.HasExited)
                 {
-                    errorMessage = "bootstrap did not reach 100% (last seen: " +
+                    errorMessage = "bootstrap stalled even with the fallback set (last seen: " +
                                    lastPct + "% " + lastTag + ").\n" + ReadLogTail(1500);
                     return null;
                 }
@@ -3720,11 +3757,80 @@ namespace StartTor
             }
 
             AutoRacer winner = null;
+            bool raceFallbackUsed = false;
             DateTime started = DateTime.UtcNow;
             DateTime lastSnapshot = DateTime.UtcNow;
             while (winner == null)
             {
-                if (DateTime.UtcNow - started > TimeSpan.FromMinutes(10))
+                // Healthy-only phase: if nothing has crossed 100% after 120s,
+                // the previously-proven bridge set is dead. Widen the race to
+                // EVERY bridge (healthy + fallback) and restart. Once the
+                // fallback is active there is NO timeout — we keep racing
+                // forever (single-mode fallback behaviour) until a winner,
+                // a death, or the user aborts.
+                if (!raceFallbackUsed && DateTime.UtcNow - started > TimeSpan.FromSeconds(120))
+                {
+                    raceFallbackUsed = true;
+                    AutoEmit("[auto] healthy-only phase stalled (120s) - restarting race with all bridges");
+                    AutoKillAll(racers);
+                    Thread.Sleep(800);
+                    bool built = true;
+                    foreach (AutoRacer r in racers)
+                    {
+                        int bc;
+                        string content = BuildTorrc(r.Mode, strategy, out bc, includeAll: true);
+                        if (content == null) { built = false; break; }
+                        content = StripListenerLines(content);
+                        content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
+                                   "DataDirectory " + r.Dir + "\r\n" +
+                                   "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
+                                   "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
+                                   "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
+                                   "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
+                                   "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
+                                   "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
+                        File.WriteAllText(Path.Combine(DataDir, r.TorrcFile), content, new UTF8Encoding(false));
+                        Directory.CreateDirectory(Path.Combine(DataDir, r.Dir));
+                    }
+                    if (!built)
+                    {
+                        raceError = "failed to build fallback torrc for a racer";
+                        AutoKillAll(racers);
+                        autoLineSink = null;
+                        return false;
+                    }
+                    AutoEmit("[auto] racing again with all bridges");
+                    foreach (AutoRacer r in racers)
+                    {
+                        r.Alive = true;
+                        r.LastPct = -1;
+                        r.LastTag = "";
+                        ProcessStartInfo psi = new ProcessStartInfo
+                        {
+                            FileName = TorExe,
+                            Arguments = "-f \"" + r.TorrcFile + "\"",
+                            WorkingDirectory = DataDir,
+                            UseShellExecute = false,
+                            CreateNoWindow = true
+                        };
+                        try
+                        {
+                            r.Proc = Process.Start(psi);
+                            AutoEmit("[auto] " + AutoPad(r.Name) + " restarted (PID " + r.Proc.Id +
+                                              ", socks " + r.Socks + ")");
+                        }
+                        catch (Exception ex)
+                        {
+                            r.Alive = false;
+                            AutoEmit("[auto] " + AutoPad(r.Name) + " failed to restart: " + ex.Message);
+                        }
+                    }
+                    started = DateTime.UtcNow;
+                    lastSnapshot = DateTime.UtcNow;
+                    continue;
+                }
+                if (!raceFallbackUsed &&
+                    DateTime.UtcNow - started > TimeSpan.FromMinutes(10))
                 {
                     raceError = "10-minute timeout";
                     AutoKillAll(racers);

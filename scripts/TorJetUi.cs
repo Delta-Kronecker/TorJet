@@ -304,6 +304,8 @@ namespace StartTor
 
             private int bootPct;
             private string bootTag = "";
+            private DateTime bootPctSince = DateTime.MinValue;
+            private bool fallbackPending;    // set when the UI learned a fallback restart is coming
             private string errorMsg = "";
             private DateTime errorMsgUntil = DateTime.MinValue;
             private int restartAttempts;
@@ -501,7 +503,8 @@ namespace StartTor
                 switch (state)
                 {
                     case RunState.Connected: return "CONNECTED";
-                    case RunState.Connecting: return "BOOTSTRAP";
+                    case RunState.Connecting:
+                        return bootPct > 0 ? "BOOTSTRAP " + bootPct + "%" : "BOOTSTRAP";
                     case RunState.Restarting:
                         return "RESTART " + restartAttempts + "/3";
                     case RunState.Stopping: return "STOPPING";
@@ -595,6 +598,9 @@ namespace StartTor
                     Color.FromArgb(60, 0, 0, 0),
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter,
                     1, 2);
+
+                if (state == RunState.Connecting && !uiRaceActive)
+                    PaintBootstrapLine(g);
 
                 Rectangle ring = rcPower;
                 g.SmoothingMode = SmoothingMode.AntiAlias;
@@ -729,6 +735,43 @@ namespace StartTor
             }
 
             private int cx() { return rcPower.Left + rcPower.Width / 2; }
+
+            // Must match start-tor.cs StuckFallbackMinutes (2 minutes): how long a
+            // frozen bootstrap percentage is tolerated before the fallback restart.
+            private static readonly TimeSpan FallbackSpan = TimeSpan.FromMinutes(2.0);
+
+            private void PaintBootstrapLine(Graphics g)
+            {
+                int pct = bootPct;
+                string line;
+                // Timer text is drawn white so it stands out on the main screen.
+                Color col = Theme.Text;
+
+                if (fallbackPending)
+                {
+                    line = "FALLBACK - trying all bridges";
+                }
+                else if (pct <= 0)
+                {
+                    line = "starting tor...";
+                }
+                else if (pct >= 100)
+                {
+                    line = "connected";
+                }
+                else
+                {
+                    TimeSpan remaining = FallbackSpan - (DateTime.UtcNow - bootPctSince);
+                    int secs = (int)Math.Max(0, Math.Ceiling(remaining.TotalSeconds));
+                    line = "fallback in " + secs + "s" +
+                           (string.IsNullOrEmpty(bootTag) ? "" : "  " + bootTag);
+                }
+
+                TextRenderer.DrawText(g, line, Theme.Small(),
+                    new Rectangle(0, 96, ClientSize.Width, 18),
+                    col, TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
+                         TextFormatFlags.EndEllipsis);
+            }
 
             private void PaintTogglePill(Graphics g, Rectangle r, string name, bool on,
                                          bool hovered, bool pending)
@@ -1314,6 +1357,9 @@ namespace StartTor
                 sessionBusy = true;
                 restartAttempts = 0;
                 bootPct = 0;
+                bootTag = "";
+                bootPctSince = DateTime.UtcNow;
+                fallbackPending = false;
                 SetState(RunState.Connecting);
                 bool race = uiModePos >= ModeNames.Length;
                 int mode = race ? -1 : uiModePos;
@@ -1359,8 +1405,13 @@ namespace StartTor
                         delegate(string line) { LogLine(line); },
                         delegate(int p, string info)
                         {
-                            bootPct = p;
-                            bootTag = info;
+                            // Keep the single highest percentage seen so far. The
+                            // race reports the best racer each tick, but which
+                            // racer leads can fluctuate, so we never lower the
+                            // shown value — it only ratchets upward to the peak.
+                            if (p >= 0 && p > bootPct) { bootPct = p; bootTag = info; }
+                            bootPctSince = DateTime.UtcNow;
+                            fallbackPending = false;
                             UiInvokeDelegate(delegate { Invalidate(); });
                         });
                     uiRaceActive = false;
@@ -1423,8 +1474,26 @@ namespace StartTor
                     proc = StartTorAndWait(mode, strategy, false, delegate(int pct, string tag)
 
                     {
-                        bootPct = pct;
-                        bootTag = tag ?? "";
+                        if (pct >= 0)
+                        {
+                            bootPct = pct;
+                            bootTag = tag ?? "";
+                            bootPctSince = DateTime.UtcNow;
+                        }
+                        else if (pct == -2)
+                        {
+                            bootPct = 0;
+                            bootTag = "fallback";
+                            bootPctSince = DateTime.UtcNow;
+                            fallbackPending = true;
+                        }
+                        else
+                        {
+                            bootPct = 0;
+                            bootTag = tag ?? "";
+                            bootPctSince = DateTime.UtcNow;
+                            fallbackPending = false;
+                        }
                         UiInvokeDelegate(delegate { Invalidate(); });
                     }, out err, out aborted);
                     if (proc == null)
@@ -1464,6 +1533,7 @@ namespace StartTor
                 UiInvokeDelegate(delegate
                 {
                     bootPct = 100;
+                    fallbackPending = false;
                     SetState(RunState.Connected);
                 });
             }
@@ -1516,6 +1586,13 @@ namespace StartTor
             // ---- tick: death / watchdog / caret ---------------------------------
             private void UiTick(object s, EventArgs e)
             {
+                // Keep the bootstrap countdown ("fallback in Xs") live while
+                // connecting (single-mode only — races have no fallback) but
+                // not yet at 100%.
+                if (!uiRaceActive && state == RunState.Connecting &&
+                    bootPct > 0 && bootPct < 100)
+                    Invalidate();
+
                 if (editRow >= 0 && (DateTime.UtcNow - lastCaretFlip).TotalMilliseconds >= 450)
                 {
                     caretOn = !caretOn;
