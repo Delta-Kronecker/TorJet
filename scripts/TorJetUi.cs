@@ -308,6 +308,7 @@ namespace StartTor
             private bool fallbackPending;    // set when the UI learned a fallback restart is coming
             private bool uiCanFallback;      // whether this session has a healthy/fallback split to widen to
             private string errorMsg = "";
+            private bool errorMsgIsError = true;
             private DateTime errorMsgUntil = DateTime.MinValue;
             private int restartAttempts;
             private volatile bool sessionBusy;
@@ -683,7 +684,7 @@ namespace StartTor
                                      state == RunState.Stopping ? "STOPPING" : "CANCEL");
                 TextRenderer.DrawText(g, cap, Theme.Body(),
                     new Rectangle(0, rcPower.Bottom + 8, ClientSize.Width, 22),
-                    HasError() ? Theme.Red : Theme.Muted,
+                    HasError() ? (errorMsgIsError ? Theme.Red : Theme.Text) : Theme.Muted,
                     TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter |
                     TextFormatFlags.EndEllipsis);
 
@@ -784,7 +785,7 @@ namespace StartTor
             {
                 Theme.PillGradient(g, r,
                     hovered ? Theme.SurfaceLight : Theme.SurfaceAlt,
-                    Theme.Surface, pending ? Theme.Amber : (on ? Theme.Accent : Theme.Border));
+                    Theme.Surface, pending ? Theme.Amber : Theme.Border);
                 TextRenderer.DrawText(g, name, Theme.H2(),
                     new Rectangle(r.Left + 16, r.Y, r.Width - 40, r.Height),
                     pending ? Theme.Amber : (on ? Theme.Text : Theme.Muted),
@@ -1282,12 +1283,12 @@ namespace StartTor
                 if (want && !ours)
                 {
                     SetSystemProxy(true);
-                    FlashMessage("system proxy on");
+                    FlashMessage("system proxy on", false);
                 }
                 else if (!want && ours)
                 {
                     SetSystemProxy(false);
-                    FlashMessage("system proxy off");
+                    FlashMessage("system proxy off", false);
                 }
                 Invalidate();
             }
@@ -1319,9 +1320,10 @@ namespace StartTor
                 catch { }
             }
 
-            private void FlashMessage(string msg)
+            private void FlashMessage(string msg, bool asError = true)
             {
                 errorMsg = msg;
+                errorMsgIsError = asError;
                 errorMsgUntil = DateTime.UtcNow.AddSeconds(6);
                 Invalidate();
             }
