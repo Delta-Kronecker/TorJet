@@ -3594,6 +3594,14 @@ namespace StartTor
             public int LastPct = -1;
             public string LastTag = "";
             public bool Alive = true;
+            // Per-racer fallback: whether THIS mode has a healthy/fallback
+            // section (so a healthy-only phase + 120s stall restart applies to
+            // it alone) and whether its fallback has already been used. A racer
+            // whose mode has no section (first run) is FallbackUsed from the
+            // start — it already uses every bridge and never times out.
+            public bool CanFallback;
+            public bool FallbackUsed;
+            public DateTime StartedAt;
         }
 
         // SocksPort/HTTPTunnelPort/DNSPort/ControlPort/Log are cumulative torrc
@@ -3631,6 +3639,66 @@ namespace StartTor
                 }
                 catch { }
                 r.Alive = false;
+            }
+        }
+
+        // Restarts ONE racer (its own data dir, its own torrc) with EVERY
+        // bridge (healthy + fallback) — used when that racer's healthy-only
+        // phase stalls. Only the given racer is touched; the other two keep
+        // racing untouched. After a successful restart the racer has no further
+        // stall timeout (caller sets StartedAt).
+        private static void AutoRestartRacer(AutoRacer r, int strategy)
+        {
+            int bc;
+            string content = BuildTorrc(r.Mode, strategy, out bc, includeAll: true);
+            if (content == null)
+            {
+                AutoEmit("[auto] " + r.Name + " fallback: failed to build torrc - marking dead");
+                r.Alive = false;
+                return;
+            }
+            content = StripListenerLines(content);
+            content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
+                       "DataDirectory " + r.Dir + "\r\n" +
+                       "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
+                       "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
+                       "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
+                       "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
+                       "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
+                       "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
+            try
+            {
+                if (r.Proc != null && !r.Proc.HasExited)
+                {
+                    r.Proc.Kill();
+                    r.Proc.WaitForExit(3000);
+                }
+            }
+            catch { }
+            Thread.Sleep(800);
+            File.WriteAllText(Path.Combine(DataDir, r.TorrcFile), content, new UTF8Encoding(false));
+            Directory.CreateDirectory(Path.Combine(DataDir, r.Dir));
+            r.Alive = true;
+            r.LastPct = -1;
+            r.LastTag = "";
+            ProcessStartInfo psi = new ProcessStartInfo
+            {
+                FileName = TorExe,
+                Arguments = "-f \"" + r.TorrcFile + "\"",
+                WorkingDirectory = DataDir,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            try
+            {
+                r.Proc = Process.Start(psi);
+                AutoEmit("[auto] " + AutoPad(r.Name) + " restarted with all bridges (PID " +
+                                  r.Proc.Id + ", socks " + r.Socks + ")");
+            }
+            catch (Exception ex)
+            {
+                r.Alive = false;
+                AutoEmit("[auto] " + AutoPad(r.Name) + " failed to restart: " + ex.Message);
             }
         }
 
@@ -3791,93 +3859,36 @@ namespace StartTor
             }
 
             AutoRacer winner = null;
-            // Like single-mode: only race a healthy-only phase (and apply the
-            // 120s widen timeout) when at least one racer has a "# ... remaining
-            // (fallback) ..." section. On the FIRST run none do — every racer
-            // already uses every bridge and no widening/timeout applies.
-            bool canRaceFallback =
-                HasFallbackSection(racers[0].Mode) ||
-                HasFallbackSection(racers[1].Mode) ||
-                HasFallbackSection(racers[2].Mode);
-            bool raceFallbackUsed = !canRaceFallback;
-            DateTime started = DateTime.UtcNow;
+            // Per-racer fallback: each connection is independent. A racer whose
+            // OWN mode has a "# ... remaining (fallback) ..." section runs a
+            // healthy-only phase and, if IT stalls below 100% for 120s, is
+            // restarted ALONE with every bridge (healthy + fallback). A racer
+            // whose mode has no section (first run) is already using every
+            // bridge from the start — FallbackUsed=true, no stall restart, and
+            // after fallback there is NO timeout. There is no global timeout.
+            foreach (AutoRacer r in racers)
+            {
+                r.CanFallback = HasFallbackSection(r.Mode);
+                r.FallbackUsed = !r.CanFallback;
+                r.StartedAt = DateTime.UtcNow;
+            }
             DateTime lastSnapshot = DateTime.UtcNow;
             while (winner == null)
             {
-                // Healthy-only phase: if nothing has crossed 100% after 120s,
-                // the previously-proven bridge set is dead. Widen the race to
-                // EVERY bridge (healthy + fallback) and restart. Once the
-                // fallback is active there is NO timeout — we keep racing
-                // forever (single-mode fallback behaviour) until a winner,
-                // a death, or the user aborts.
-                if (!raceFallbackUsed && DateTime.UtcNow - started > TimeSpan.FromSeconds(120))
+                // Per-racer healthy-only stall: if THIS racer (not the whole
+                // race) has been stuck below 100% for 120s and hasn't fallen
+                // back yet, widen just it to every bridge and restart it alone.
+                foreach (AutoRacer r in racers)
                 {
-                    raceFallbackUsed = true;
-                    AutoEmit("[auto] healthy-only phase stalled (120s) - restarting race with all bridges");
-                    AutoKillAll(racers);
-                    Thread.Sleep(800);
-                    bool built = true;
-                    foreach (AutoRacer r in racers)
+                    if (!r.CanFallback || r.FallbackUsed || !r.Alive) continue;
+                    if (DateTime.UtcNow - r.StartedAt > TimeSpan.FromSeconds(120))
                     {
-                        int bc;
-                        string content = BuildTorrc(r.Mode, strategy, out bc, includeAll: true);
-                        if (content == null) { built = false; break; }
-                        content = StripListenerLines(content);
-                        content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
-                                   "DataDirectory " + r.Dir + "\r\n" +
-                                   "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
-                                   "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
-                                   "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
-                                   "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
-                                   "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
-                                   "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
-                        File.WriteAllText(Path.Combine(DataDir, r.TorrcFile), content, new UTF8Encoding(false));
-                        Directory.CreateDirectory(Path.Combine(DataDir, r.Dir));
+                        r.FallbackUsed = true;
+                        AutoEmit("[auto] " + r.Name +
+                                          " healthy-only phase stalled (120s) - restarting it with all bridges");
+                        AutoRestartRacer(r, strategy);
+                        r.StartedAt = DateTime.UtcNow;
                     }
-                    if (!built)
-                    {
-                        raceError = "failed to build fallback torrc for a racer";
-                        AutoKillAll(racers);
-                        autoLineSink = null;
-                        return false;
-                    }
-                    AutoEmit("[auto] racing again with all bridges");
-                    foreach (AutoRacer r in racers)
-                    {
-                        r.Alive = true;
-                        r.LastPct = -1;
-                        r.LastTag = "";
-                        ProcessStartInfo psi = new ProcessStartInfo
-                        {
-                            FileName = TorExe,
-                            Arguments = "-f \"" + r.TorrcFile + "\"",
-                            WorkingDirectory = DataDir,
-                            UseShellExecute = false,
-                            CreateNoWindow = true
-                        };
-                        try
-                        {
-                            r.Proc = Process.Start(psi);
-                            AutoEmit("[auto] " + AutoPad(r.Name) + " restarted (PID " + r.Proc.Id +
-                                              ", socks " + r.Socks + ")");
-                        }
-                        catch (Exception ex)
-                        {
-                            r.Alive = false;
-                            AutoEmit("[auto] " + AutoPad(r.Name) + " failed to restart: " + ex.Message);
-                        }
-                    }
-                    started = DateTime.UtcNow;
-                    lastSnapshot = DateTime.UtcNow;
-                    continue;
-                }
-                if (!raceFallbackUsed &&
-                    DateTime.UtcNow - started > TimeSpan.FromMinutes(10))
-                {
-                    raceError = "10-minute timeout";
-                    AutoKillAll(racers);
-                    autoLineSink = null;
-                    return false;
                 }
                 try
                 {
