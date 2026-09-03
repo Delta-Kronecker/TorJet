@@ -1426,6 +1426,30 @@ namespace StartTor
             return n;
         }
 
+        // True when the bridge file for a mode has already been prioritized
+        // into "# === healthy === / # === remaining (fallback) ===' sections
+        // (i.e. a previous run proved some bridges healthy). On a FIRST run
+        // there are no sections yet, every bridge is the whole list, and the
+        // healthy/fallback two-phase logic (and its stall timeout) must NOT be
+        // applied — there's nothing to widen to, waiting would only delay.
+        private static bool HasFallbackSection(int mode)
+        {
+            try
+            {
+                if (mode < 0 || mode >= BridgeFiles.Length || BridgeFiles[mode].Length == 0)
+                    return false;
+                string bf = Path.Combine(BridgesDir, BridgeFiles[mode]);
+                if (!File.Exists(bf)) return false;
+                foreach (string line in File.ReadAllLines(bf))
+                {
+                    if (line.IndexOf("remaining", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return true;
+                }
+            }
+            catch { }
+            return false;
+        }
+
         private static int UpdateBridges()
         {
             try
@@ -2627,7 +2651,17 @@ namespace StartTor
             // kill, rebuild the torrc with EVERY bridge, and restart once. This
             // self-heals the common case where yesterday's healthy bridge is down
             // today and tor would otherwise be stuck on a dead set.
-            bool fallbackUsed = false;
+            // Two-phase bootstrap only makes sense when a previous run actually
+            // proved some bridges healthy (the bridge file has a "# ... remaining
+            // (fallback) ..." section to widen to). On a FIRST run there is no
+            // healthy set yet — every bridge is used from the start and the
+            // stall timeout / fallback restart must NOT apply (there's nothing
+            // to fall back to; waiting 2 minutes would only delay connection).
+            bool canFallback = HasFallbackSection(mode);
+            // No fallback section yet (first run) -> treat the run as already
+            // on the fallback set: use every bridge from the start and never
+            // apply the stall timeout or the "widen" restart.
+            bool fallbackUsed = !canFallback;
             if (!WriteTorrc(mode, strategy, !fallbackUsed))
             {
                 errorMessage = "failed to write torrc (bridge file missing?).";
@@ -3757,7 +3791,15 @@ namespace StartTor
             }
 
             AutoRacer winner = null;
-            bool raceFallbackUsed = false;
+            // Like single-mode: only race a healthy-only phase (and apply the
+            // 120s widen timeout) when at least one racer has a "# ... remaining
+            // (fallback) ..." section. On the FIRST run none do — every racer
+            // already uses every bridge and no widening/timeout applies.
+            bool canRaceFallback =
+                HasFallbackSection(racers[0].Mode) ||
+                HasFallbackSection(racers[1].Mode) ||
+                HasFallbackSection(racers[2].Mode);
+            bool raceFallbackUsed = !canRaceFallback;
             DateTime started = DateTime.UtcNow;
             DateTime lastSnapshot = DateTime.UtcNow;
             while (winner == null)
