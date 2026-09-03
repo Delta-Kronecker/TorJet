@@ -306,6 +306,7 @@ namespace StartTor
             private string bootTag = "";
             private DateTime bootPctSince = DateTime.MinValue;
             private bool fallbackPending;    // set when the UI learned a fallback restart is coming
+            private bool uiCanFallback;      // whether this session has a healthy/fallback split to widen to
             private string errorMsg = "";
             private DateTime errorMsgUntil = DateTime.MinValue;
             private int restartAttempts;
@@ -759,11 +760,16 @@ namespace StartTor
                 {
                     line = "connected";
                 }
-                else
+                else if (uiCanFallback)
                 {
                     TimeSpan remaining = FallbackSpan - (DateTime.UtcNow - bootPctSince);
                     int secs = (int)Math.Max(0, Math.Ceiling(remaining.TotalSeconds));
                     line = "fallback in " + secs + "s" +
+                           (string.IsNullOrEmpty(bootTag) ? "" : "  " + bootTag);
+                }
+                else
+                {
+                    line = "bootstrap " + pct + "%" +
                            (string.IsNullOrEmpty(bootTag) ? "" : "  " + bootTag);
                 }
 
@@ -1399,6 +1405,7 @@ namespace StartTor
                 {
                     torProc = null;
                     uiRaceActive = true;
+                    uiCanFallback = false;   // races have no single healthy/fallback timer
                     int winnerMode;
                     string raceErr;
                     bool ok = AutoRace(strategy, out winnerMode, out raceErr,
@@ -1471,6 +1478,7 @@ namespace StartTor
                 }
                 else
                 {
+                    uiCanFallback = HasFallbackSection(mode);
                     proc = StartTorAndWait(mode, strategy, false, delegate(int pct, string tag)
 
                     {
