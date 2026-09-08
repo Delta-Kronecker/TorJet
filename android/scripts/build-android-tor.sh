@@ -15,14 +15,14 @@ export OUT
 # Emit a single-line annotation pointing at the first real error in a log.
 emit_error() {
   local log="$1"
-  local line
-  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown" "$log" 2>/dev/null || true)
+  local line b64
+  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown|died|Cannot" "$log" 2>/dev/null || true)
+  b64=$(base64 -w0 "$log" 2>/dev/null || true)
   if [ -n "$line" ]; then
     echo "::error::$line"
+    echo "::error::$log BASE64:$b64"
   else
-    local tail5
-    tail5=$(tail -25 "$log" 2>/dev/null | tr '\n' '|' || true)
-    echo "::error::step $log failed; last 25 lines: $tail5"
+    echo "::error::step $log failed; BASE64:$b64"
   fi
 }
 
@@ -106,7 +106,7 @@ if [ ! -f "$OUT/lib/libssl.a" ]; then
   fetch_dep "https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz" openssl.tar.gz
   tar xzf openssl.tar.gz -C "$DEPS"
   run_step openssl \
-    bash -c 'unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; export PATH="'"$TOOLCHAIN"'/bin:$PATH"; cd "$DEPS/openssl-3.3.2" && \
+    bash -c 'cd "$DEPS/openssl-3.3.2" && \
       ./Configure android-aarch64 -D__ANDROID_API__='"$API"' --prefix="$OUT" no-shared no-tests && \
       make -j"$(nproc)" && make install_sw'
 fi
