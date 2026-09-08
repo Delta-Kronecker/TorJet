@@ -16,9 +16,9 @@ export OUT
 emit_error() {
   local log="$1"
   local line b64
-  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown|died|Cannot|Error" "$log" 2>/dev/null || true)
-  # keep under the ~64KB annotation limit: base64 of the last 150 lines only
-  b64=$(tail -150 "$log" | base64 -w0 2>/dev/null || true)
+  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown|died|Cannot|Error|undefined reference|ld: " "$log" 2>/dev/null || true)
+  # keep under the ~64KB annotation limit: base64 of the last 60 lines only
+  b64=$(tail -60 "$log" | base64 -w0 2>/dev/null || true)
   if [ -n "$line" ]; then
     echo "::error::$line"
     echo "::error::$log TAIL-BASE64:$b64"
@@ -32,12 +32,14 @@ run_step() {
   local name="$1"; shift
   local log="$OUT/${name}.log"
   echo "::group::$name → $log"
-  if ! "$@" >"$log" 2>&1; then
-    echo "::endgroup::"
+  local rc=0
+  "$@" >"$log" 2>&1 || rc=$?
+  echo "::endgroup::"
+  if [ $rc -ne 0 ]; then
+    echo "::error::$name exit=$rc (137=SIGKILL/OOM)"
     emit_error "$log"
     exit 1
   fi
-  echo "::endgroup::"
 }
 
 NDK="${ANDROID_NDK_HOME:-${NDK:-}}"
