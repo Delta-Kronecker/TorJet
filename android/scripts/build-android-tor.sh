@@ -68,7 +68,7 @@ export CC CXX AR RANLIB STRIP
 export CFLAGS="--sysroot=$SYSROOT -O1 -pipe -fPIC -fno-stack-protector -fvisibility=hidden -DANDROID"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="--sysroot=$SYSROOT -I$OUT/include"
-export LDFLAGS="--sysroot=$SYSROOT -L$OUT/lib -Wl,-rpath-link=$OUT/lib"
+export LDFLAGS="--sysroot=$SYSROOT -L$OUT/lib -Wl,-rpath-link=$OUT/lib -ldl"
 export PKG_CONFIG_PATH="$OUT/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$OUT/lib/pkgconfig"
 export PATH="$TOOLCHAIN/bin:$PATH"
