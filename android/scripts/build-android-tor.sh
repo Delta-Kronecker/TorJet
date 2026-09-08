@@ -42,7 +42,7 @@ mkdir -p "$DEPS" "$OUT/include" "$OUT/lib"
 
 # Build zlib
 if [ ! -f "$OUT/lib/libz.a" ]; then
-  curl -fsSL https://zlib.net/zlib-1.3.1.tar.gz -o zlib.tar.gz
+  curl -fsSL https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz -o zlib.tar.gz
   tar xzf zlib.tar.gz -C "$DEPS"
   ( cd "$DEPS/zlib-1.3.1" && \
     CC="$CC" AR="$AR" RANLIB="$RANLIB" CFLAGS="$CFLAGS" \
