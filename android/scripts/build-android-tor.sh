@@ -134,7 +134,7 @@ if [ ! -f "$OUT/bin/tor" ]; then
         --disable-tool-name-check --disable-system-torrc --disable-nls \
         --enable-static-tor --with-zlib-dir="$OUT" --with-openssl-dir="$OUT" \
         --with-libevent-dir="$OUT" --with-zstd-dir="$OUT" && \
-      make -j"$(nproc)"'
+      make -j"$(nproc)" src/app/tor'
   mkdir -p "$OUT/bin"
   cp "$OUT/tor-build/src/app/tor" "$OUT/bin/tor"
   cp "$OUT/tor-build/src/config/geoip" "$OUT/tor-build/src/config/geoip6" "$OUT/bin/"
