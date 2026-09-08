@@ -10,6 +10,7 @@ set -euo pipefail
 
 TORS="$1"
 OUT="$2"
+export OUT
 
 # Emit a single-line annotation pointing at the first real error in a log.
 emit_error() {
@@ -55,6 +56,7 @@ export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 
 API=24
+export API
 export CFLAGS="--sysroot=$SYSROOT -O2 -fPIC -fno-stack-protector -fvisibility=hidden -DANDROID"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="--sysroot=$SYSROOT -I$OUT/include"
@@ -64,6 +66,7 @@ export PKG_CONFIG_LIBDIR="$OUT/lib/pkgconfig"
 export PATH="$TOOLCHAIN/bin:$PATH"
 
 DEPS="$OUT/deps-src"
+export DEPS
 mkdir -p "$DEPS" "$OUT/include" "$OUT/lib"
 
 fetch_dep() {
