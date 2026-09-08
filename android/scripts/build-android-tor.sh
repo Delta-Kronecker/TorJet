@@ -61,13 +61,18 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 API=24
 export API
 export CC CXX AR RANLIB STRIP
-export CFLAGS="--sysroot=$SYSROOT -O2 -fPIC -fno-stack-protector -fvisibility=hidden -DANDROID"
+# -O1 keeps clang's per-compilation memory low enough for the 7GB GitHub runner
+# (-O2 with parallel -j jobs OOMs and silently kills the compile).
+export CFLAGS="--sysroot=$SYSROOT -O1 -pipe -fPIC -fno-stack-protector -fvisibility=hidden -DANDROID"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="--sysroot=$SYSROOT -I$OUT/include"
 export LDFLAGS="--sysroot=$SYSROOT -L$OUT/lib -Wl,-rpath-link=$OUT/lib"
 export PKG_CONFIG_PATH="$OUT/lib/pkgconfig"
 export PKG_CONFIG_LIBDIR="$OUT/lib/pkgconfig"
 export PATH="$TOOLCHAIN/bin:$PATH"
+
+JOBS=2
+export MAKEFLAGS="-j$JOBS"
 
 DEPS="$OUT/deps-src"
 export DEPS
@@ -87,7 +92,7 @@ if [ ! -f "$OUT/lib/libz.a" ]; then
     bash -c 'cd "$DEPS/zlib-1.3.1" && \
       CC="$CC" AR="$AR" RANLIB="$RANLIB" CFLAGS="$CFLAGS" \
       ./configure --static --prefix="$OUT" && \
-      make -j"$(nproc)" && make install'
+      make -j"$JOBS" && make install'
 fi
 
 # Build libevent
@@ -99,7 +104,7 @@ if [ ! -f "$OUT/lib/libevent.a" ]; then
       ./configure --host=aarch64-linux-android --prefix="$OUT" \
         --disable-shared --enable-static --disable-openssl --disable-samples \
         --disable-libevent-regress --disable-debug-mode && \
-      make -j"$(nproc)" && make install'
+      make -j"$JOBS" && make install'
 fi
 
 # Build openssl
@@ -109,7 +114,7 @@ if [ ! -f "$OUT/lib/libssl.a" ]; then
   run_step openssl \
     bash -c 'cd "$DEPS/openssl-3.3.2" && \
       ./Configure android-arm64 -D__ANDROID_API__='"$API"' --prefix="$OUT" no-shared no-tests && \
-      make -j"$(nproc)" && make install_sw'
+      make -j"$JOBS" && make install_sw'
 fi
 
 # Build zstd
@@ -118,7 +123,7 @@ if [ ! -f "$OUT/lib/libzstd.a" ]; then
   tar xzf zstd.tar.gz -C "$DEPS"
   mkdir -p "$OUT/lib" "$OUT/include"
   run_step zstd \
-    bash -c 'cd "$DEPS/zstd-1.5.6" && make -C lib -j"$(nproc)" libzstd.a && \
+    bash -c 'cd "$DEPS/zstd-1.5.6" && make -C lib -j"$JOBS" libzstd.a && \
       cp lib/libzstd.a "'"$OUT"'/lib/" && cp lib/zstd.h "'"$OUT"'/include/"'
 fi
 
@@ -134,7 +139,7 @@ if [ ! -f "$OUT/bin/tor" ]; then
         --disable-tool-name-check --disable-system-torrc --disable-nls \
         --enable-static-tor --with-zlib-dir="$OUT" --with-openssl-dir="$OUT" \
         --with-libevent-dir="$OUT" --with-zstd-dir="$OUT" && \
-      make -j"$(nproc)" src/app/tor'
+      make -j"$JOBS" src/app/tor'
   mkdir -p "$OUT/bin"
   cp "$OUT/tor-build/src/app/tor" "$OUT/bin/tor"
   cp "$OUT/tor-build/src/config/geoip" "$OUT/tor-build/src/config/geoip6" "$OUT/bin/"
