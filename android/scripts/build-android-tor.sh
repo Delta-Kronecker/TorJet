@@ -107,7 +107,7 @@ if [ ! -f "$OUT/lib/libssl.a" ]; then
   tar xzf openssl.tar.gz -C "$DEPS"
   run_step openssl \
     bash -c 'cd "$DEPS/openssl-3.3.2" && \
-      ./Configure android-aarch64 -D__ANDROID_API__='"$API"' --prefix="$OUT" no-shared no-tests && \
+      ./Configure android-arm64 -D__ANDROID_API__='"$API"' --prefix="$OUT" no-shared no-tests && \
       make -j"$(nproc)" && make install_sw'
 fi
 
