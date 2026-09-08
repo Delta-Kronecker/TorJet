@@ -135,7 +135,7 @@ if [ ! -f "$OUT/bin/tor" ]; then
   cp -r "$TORS" "$OUT/tor-build"
   run_step tor \
     bash -c 'cd "$OUT/tor-build" && \
-      chmod +x configure config.status 2>/dev/null || true && \
+      chmod +x configure config.status scripts/build/combine_libs 2>/dev/null || true && \
       ./configure --host=aarch64-linux-android --prefix="$OUT" \
         --disable-asciidoc --disable-man --disable-html-docs \
         --disable-tool-name-check --disable-system-torrc --disable-nls \
