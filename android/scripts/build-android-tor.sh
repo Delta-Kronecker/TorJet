@@ -16,13 +16,14 @@ export OUT
 emit_error() {
   local log="$1"
   local line b64
-  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown|died|Cannot" "$log" 2>/dev/null || true)
-  b64=$(base64 -w0 "$log" 2>/dev/null || true)
+  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown|died|Cannot|Error" "$log" 2>/dev/null || true)
+  # keep under the ~64KB annotation limit: base64 of the last 150 lines only
+  b64=$(tail -150 "$log" | base64 -w0 2>/dev/null || true)
   if [ -n "$line" ]; then
     echo "::error::$line"
-    echo "::error::$log BASE64:$b64"
+    echo "::error::$log TAIL-BASE64:$b64"
   else
-    echo "::error::step $log failed; BASE64:$b64"
+    echo "::error::step $log failed; TAIL-BASE64:$b64"
   fi
 }
 
