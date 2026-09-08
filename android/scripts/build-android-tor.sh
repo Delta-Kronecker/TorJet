@@ -16,11 +16,13 @@ export OUT
 emit_error() {
   local log="$1"
   local line
-  line=$(grep -m1 -E "error:|Error:|fatal|No such|cannot|failed|command not found" "$log" 2>/dev/null || true)
+  line=$(grep -m1 -iE "error|fail|invalid|fatal|cannot|not found|no such|unable to|conflict|missing|unknown" "$log" 2>/dev/null || true)
   if [ -n "$line" ]; then
     echo "::error::$line"
   else
-    echo "::error::step $log failed (no error line captured)"
+    local tail5
+    tail5=$(tail -5 "$log" 2>/dev/null | tr '\n' '|' || true)
+    echo "::error::step $log failed; last lines: $tail5"
   fi
 }
 
