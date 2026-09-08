@@ -41,6 +41,14 @@ jobs:
           chmod +x android/scripts/build-android-tor.sh
           ./android/scripts/build-android-tor.sh "$GITHUB_WORKSPACE/tor-src" "$GITHUB_WORKSPACE/android/native-out"
 
+      - name: Upload native build logs (even on failure)
+        if: always()
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        with:
+          name: native-logs
+          path: android/native-out/*.log
+          retention-days: 3
+
       - name: Cross-compile transports for Android
         run: |
           mkdir -p out

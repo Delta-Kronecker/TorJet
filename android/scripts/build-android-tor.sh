@@ -59,6 +59,7 @@ export STRIP="$TOOLCHAIN/bin/llvm-strip"
 
 API=24
 export API
+export CC CXX AR RANLIB STRIP
 export CFLAGS="--sysroot=$SYSROOT -O2 -fPIC -fno-stack-protector -fvisibility=hidden -DANDROID"
 export CXXFLAGS="$CFLAGS"
 export CPPFLAGS="--sysroot=$SYSROOT -I$OUT/include"
@@ -105,7 +106,7 @@ if [ ! -f "$OUT/lib/libssl.a" ]; then
   fetch_dep "https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz" openssl.tar.gz
   tar xzf openssl.tar.gz -C "$DEPS"
   run_step openssl \
-    bash -c 'cd "$DEPS/openssl-3.3.2" && \
+    bash -c 'unset CC CXX CFLAGS CXXFLAGS CPPFLAGS LDFLAGS; export PATH="'"$TOOLCHAIN"'/bin:$PATH"; cd "$DEPS/openssl-3.3.2" && \
       ./Configure android-aarch64 -D__ANDROID_API__='"$API"' --prefix="$OUT" no-shared no-tests && \
       make -j"$(nproc)" && make install_sw'
 fi
