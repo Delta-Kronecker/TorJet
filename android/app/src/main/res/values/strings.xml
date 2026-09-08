@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">TorJet</string>
+    <string name="title_connected">CONNECTED</string>
+    <string name="title_connecting">CONNECTING</string>
+    <string name="title_restarting">RESTARTING</string>
+    <string name="title_stopping">STOPPING</string>
+    <string name="title_idle">TORJET</string>
+    <string name="proxy_label">PROXY</string>
+    <string name="settings_label">SETTINGS</string>
+</resources>

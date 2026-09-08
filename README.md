@@ -244,6 +244,35 @@ it, rebuilds the circuit monitor and keep-alive and boots tor again — up to
 3 attempts. Disable with
 `--no-watchdog`.
 
+## Android
+
+A full Android port lives in `android/` and builds in CI via
+`.github/workflows/build-android.yml` (branch `android`). It keeps the same
+Windows appearance: dark theme, the big clickable power ring (green connected /
+amber connecting / red restarting), the SOCKS/HTTP endpoint line, the PROXY
+toggle and the SETTINGS rows (Mode, Auto proxy, Strategy level, Conflux sets,
+Conflux legs, Linked-set cap, Keep-alive, Set select, Skip slow sets (RTT),
+Best % of sets, Weak legs (top %)).
+
+- `android/` — Gradle project (Kotlin, arm64-v8a)
+  - `app/src/main/java/com/torjet/app/` — Kotlin port of the core: `TorController`
+    (spawn/stop tor, torrc generation), `TorrcBuilder` (mirrors `torrc.jet` +
+    the strategy table), `SettingsStore`, control-port client, keep-alive,
+    speed test, `VpnProxyService` (the Android stand-in for the Windows system
+    proxy), and the ring-based UI (`MainActivity`, `PowerRingView`, `SettingsActivity`).
+  - `scripts/build-android-tor.sh` — NDK cross-compile of tor (headers, deps,
+    geoip) into a static aarch64 executable.
+- The tor binary, geoip files, pluggable transports and bridge lists are
+  cross-compiled/copied into `android/app/src/main/assets/native/` by CI and
+  extracted + chmod +x at first launch.
+- SOCKS5 still listens on `127.0.0.1:9050`; the **PROXY** toggle runs a
+  `VpnService` that routes the whole device over that SOCKS port (each stream
+  gets its own circuit via unique SOCKS auth username).
+- Build the APK locally with:
+  ```
+  cd android && ./gradlew assembleRelease
+  ```
+
 ## Building
 
 `.github/workflows/build.yml` builds tor + transports and publishes the

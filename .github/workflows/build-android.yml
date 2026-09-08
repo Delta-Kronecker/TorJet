@@ -1,0 +1,169 @@
+name: Build TorJet for Android
+
+on:
+  push:
+    branches: [android]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    name: Cross-compile tor + transports (Android ARM64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (node24)
+        with:
+          fetch-depth: 0
+
+      - name: Locate NDK
+        id: ndk
+        run: |
+          for cand in "$ANDROID_NDK_HOME" "$ANDROID_NDK_ROOT" \
+                      "$HOME/Android/Sdk/ndk/latest" \
+                      "$ANDROID_HOME/ndk/latest" \
+                      "$ANDROID_HOME/ndk-bundle"; do
+            if [ -n "$cand" ] && [ -d "$cand" ]; then echo "ndk=$cand" >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          # versioned ndk dir under ANDROID_HOME (preinstalled on ubuntu runners)
+          for d in "$ANDROID_HOME"/ndk/*/; do
+            if [ -d "$d" ]; then echo "ndk=${d%/}" >> "$GITHUB_OUTPUT"; exit 0; fi
+          done
+          echo "::error::No Android NDK found"; exit 1
+
+      - name: Cross-compile tor for Android
+        env:
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.ndk }}
+          NDK: ${{ steps.ndk.outputs.ndk }}
+        run: |
+          chmod +x android/scripts/build-android-tor.sh
+          ./android/scripts/build-android-tor.sh "$GITHUB_WORKSPACE/tor-src" "$GITHUB_WORKSPACE/android/native-out"
+
+      - name: Cross-compile transports for Android
+        run: |
+          mkdir -p out
+          # obfs4 (best-effort; cgo-based builds may need CGO_ENABLED=0)
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go install gitlab.com/yawning/obfs4.git/obfs4proxy@v0.0.0-20231012084234-c3e2d44b1033 || true
+          cp "$(go env GOPATH)/bin/android_arm64/obfs4proxy" out/obfs4proxy 2>/dev/null || true
+          # snowflake client
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1 || true
+          cp "$(go env GOPATH)/bin/android_arm64/client" out/snowflake-client 2>/dev/null || true
+          # webtunnel client
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/webtunnel/main/client@v0.0.6 || true
+          cp "$(go env GOPATH)/bin/android_arm64/client" out/webtunnel 2>/dev/null || true
+          echo "transports done:"; ls -la out/ || true
+
+      - name: Copy runtime into app assets
+        shell: bash
+        run: |
+          set -e
+          mkdir -p android/app/src/main/assets/native
+          cp android/native-out/bin/tor android/app/src/main/assets/native/tor
+          cp android/native-out/bin/geoip android/app/src/main/assets/native/geoip
+          cp android/native-out/bin/geoip6 android/app/src/main/assets/native/geoip6
+          [ -f out/obfs4proxy ] && cp out/obfs4proxy android/app/src/main/assets/native/obfs4proxy
+          [ -f out/snowflake-client ] && cp out/snowflake-client android/app/src/main/assets/native/snowflake-client
+          [ -f out/webtunnel ] && cp out/webtunnel android/app/src/main/assets/native/webtunnel
+          # bridge lists (download + combine IPv4/IPv6 like the Windows build.yml)
+          mkdir -p tmp-bridges
+          base="https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge"
+          for pair in "obfs4_tested.txt obfs4_tested.txt obfs4_ipv6_tested.txt" \
+                      "webtunnel_tested.txt webtunnel_tested.txt webtunnel_ipv6_tested.txt" \
+                      "vanilla_tested.txt vanilla_tested.txt vanilla_ipv6_tested.txt"; do
+            set -- $pair
+            dest="$1"; v4="$2"; v6="$3"
+            curl -fsSL --max-time 30 "$base/$v4" > "tmp-bridges/$dest" 2>/dev/null || { echo "skip $dest"; continue; }
+            curl -fsSL --max-time 30 "$base/$v6" >> "tmp-bridges/$dest" 2>/dev/null || true
+            sed -i '/^[[:space:]]*#/d; /2001:db8/d; /^[[:space:]]*$/d' "tmp-bridges/$dest" || true
+            sort -u "tmp-bridges/$dest" -o "tmp-bridges/$dest"
+          done
+          for f in vanilla_tested.txt obfs4_tested.txt webtunnel_tested.txt; do
+            [ -f "tmp-bridges/$f" ] && cp "tmp-bridges/$f" "android/app/src/main/assets/native/$f"
+          done
+          cp bridges/snowflake_tested.txt android/app/src/main/assets/native/snowflake_tested.txt
+          printf 'built=%s\nref=%s\n' "$(date -u +%s)" "$GITHUB_SHA" \
+            > android/app/src/main/assets/native/stamp.txt
+          echo "assets/native:"; ls -la android/app/src/main/assets/native
+
+      - name: Upload native artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        with:
+          name: android-native
+          path: android/app/src/main/assets/native
+          retention-days: 1
+
+  apk:
+    name: Build APK/AAB
+    runs-on: ubuntu-latest
+    needs: native
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0 (node24)
+
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
+        with:
+          name: android-native
+          path: android/app/src/main/assets/native
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4 # temurin-17, used by the Android Gradle plugin
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Accept SDK licenses and install SDK components
+        run: |
+          SDK="$ANDROID_HOME"
+          CM="$SDK/cmdline-tools/latest/bin"
+          if [ ! -x "$CM/sdkmanager" ]; then CM="$SDK/cmdline-tools/bin"; fi
+          yes | "$CM/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$CM/sdkmanager" --install "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+          echo "SDK ready at $SDK"
+
+      - name: Write local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_HOME" > android/local.properties
+
+      - name: Decode release keystore
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > android/release-key.jks
+            echo "keystore ready"
+          else
+            echo "::warning::No keystore secret; APK will be unsigned"
+          fi
+
+      - name: Build debug + release APK
+        working-directory: android
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -f release-key.jks ]; then
+            echo "Signing release build with keystore"
+            export KEYSTORE_FILE=release-key.jks
+          fi
+          ./gradlew assembleRelease --no-daemon
+
+      - name: Build AAB
+        working-directory: android
+        run: ./gradlew bundleRelease --no-daemon
+
+      - name: Upload APK
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        with:
+          name: torjet-android-apk
+          path: android/app/build/outputs/apk/release/*.apk
+
+      - name: Upload AAB
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
+        with:
+          name: torjet-android-aab
+          path: android/app/build/outputs/bundle/release/*.aab
