@@ -21,8 +21,8 @@ emit_error() {
     echo "::error::$line"
   else
     local tail5
-    tail5=$(tail -5 "$log" 2>/dev/null | tr '\n' '|' || true)
-    echo "::error::step $log failed; last lines: $tail5"
+    tail5=$(tail -25 "$log" 2>/dev/null | tr '\n' '|' || true)
+    echo "::error::step $log failed; last 25 lines: $tail5"
   fi
 }
 
