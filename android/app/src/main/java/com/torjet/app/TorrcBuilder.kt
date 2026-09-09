@@ -75,15 +75,16 @@ object TorrcBuilder {
     val SET_SELECTION_NAMES = arrayOf("first", "round-robin", "least-streams", "fastest")
 
     /**
-     * Transport plugin lines for the modes that need them. The runtime only
-     * writes the lines for plugins whose binary actually exists in filesDir,
-     * so a missing optional transport doesn't break tor startup.
+     * Transport plugin lines for the modes that need them (with an absolute
+     * {bindir} placeholder resolving to nativeLibraryDir). The runtime only
+     * writes the lines for plugins whose binary actually exists, so a
+     * missing optional transport doesn't break tor startup.
      */
     val PLUGIN_LINES = arrayOf(
         "",                                                             // vanilla
-        "ClientTransportPlugin obfs4 exec obfs4proxy",                  // obfs4
-        "ClientTransportPlugin webtunnel exec webtunnel",               // webtunnel
-        "ClientTransportPlugin snowflake exec snowflake-client"         // snowflake
+        "ClientTransportPlugin obfs4 exec {bindir}/libobfs4proxy.so",   // obfs4
+        "ClientTransportPlugin webtunnel exec {bindir}/libwebtunnel.so",// webtunnel
+        "ClientTransportPlugin snowflake exec {bindir}/libsnowflake_client.so" // snowflake
     )
 
     /** Mirrors configs/torrc.jet. Placeholders: {socksport}, {keepport}, {httpport}, {dnsport}, {ctrlport}, {datadir}. */
@@ -123,9 +124,6 @@ ClientBootstrapConsensusMaxInProgressTries 6
 FetchDirInfoEarly 1
 FetchDirInfoExtraEarly 1
 PathsNeededToBuildCircuits 0.25
-
-ClientTransportPlugin webtunnel exec webtunnel
-ClientTransportPlugin obfs4 exec obfs4proxy
 
 DataDirectory {datadir}
 Log notice file tor.log

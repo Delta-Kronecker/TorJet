@@ -77,13 +77,19 @@ jobs:
         shell: bash
         run: |
           set -e
+          # Executables go to jniLibs (lib*.so) -> installed into the read-only
+          # nativeLibraryDir, the ONLY exec-allowed location on Android 10+
+          # (W^X forbids execve() under filesDir: "error=13, Permission denied").
+          mkdir -p android/app/src/main/jniLibs/arm64-v8a
+          cp android/native-out/bin/tor android/app/src/main/jniLibs/arm64-v8a/libtor.so
+          [ -f out/obfs4proxy ] && cp out/obfs4proxy android/app/src/main/jniLibs/arm64-v8a/libobfs4proxy.so
+          [ -f out/snowflake-client ] && cp out/snowflake-client android/app/src/main/jniLibs/arm64-v8a/libsnowflake_client.so
+          [ -f out/webtunnel ] && cp out/webtunnel android/app/src/main/jniLibs/arm64-v8a/libwebtunnel.so
+          # Data-only files (geoip, bridge lists) stay in assets/native and are
+          # copied into filesDir at runtime - they are never exec'd.
           mkdir -p android/app/src/main/assets/native
-          cp android/native-out/bin/tor android/app/src/main/assets/native/tor
           cp android/native-out/bin/geoip android/app/src/main/assets/native/geoip
           cp android/native-out/bin/geoip6 android/app/src/main/assets/native/geoip6
-          [ -f out/obfs4proxy ] && cp out/obfs4proxy android/app/src/main/assets/native/obfs4proxy
-          [ -f out/snowflake-client ] && cp out/snowflake-client android/app/src/main/assets/native/snowflake-client
-          [ -f out/webtunnel ] && cp out/webtunnel android/app/src/main/assets/native/webtunnel
           # bridge lists (download + combine IPv4/IPv6 like the Windows build.yml)
           # retry each download; a 0-byte file would just disable that mode, so we
           # delete empties to make buildTorrc fail fast and auto-race skip them.
@@ -119,18 +125,21 @@ jobs:
           else
             echo "::warning::snowflake bridge list empty (snowflake mode disabled)"
           fi
-          if [ ! -f android/app/src/main/assets/native/snowflake-client ]; then
+          if [ ! -f android/app/src/main/jniLibs/arm64-v8a/libsnowflake_client.so ]; then
             echo "::warning::snowflake-client binary missing (snowflake mode disabled)"
           fi
           printf 'built=%s\nref=%s\n' "$(date -u +%s)" "$GITHUB_SHA" \
             > android/app/src/main/assets/native/stamp.txt
           echo "assets/native:"; ls -la android/app/src/main/assets/native
+          echo "jniLibs/arm64-v8a:"; ls -la android/app/src/main/jniLibs/arm64-v8a
 
       - name: Upload native artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
         with:
           name: android-native
-          path: android/app/src/main/assets/native
+          path: |
+            android/app/src/main/assets/native
+            android/app/src/main/jniLibs
           retention-days: 1
 
   apk:
@@ -143,7 +152,7 @@ jobs:
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0 (node24)
         with:
           name: android-native
-          path: android/app/src/main/assets/native
+          path: android/app/src/main
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4 # temurin-17, used by the Android Gradle plugin

@@ -41,8 +41,12 @@ class TorController(context: Context) {
     }
 
     private val appContext = context.applicationContext
+    // Writable app home (data files only - Android 10+ forbids execve() here).
     private val dataDir = File(appContext.filesDir, "tor")
-    private val torExe = File(dataDir, "tor")
+    // Executables MUST live in nativeLibraryDir (installed from jniLibs/lib*.so):
+    // app-private storage is W^X and execve() on it -> EACCES (error=13).
+    private val binDir = appContext.applicationInfo.nativeLibraryDir
+    private val torExe = File(binDir, "libtor.so")
     private val torrcFile = File(dataDir, "torrc")
     private val torLog = File(dataDir, "tor.log")
     private val geoip = File(dataDir, "geoip")
@@ -250,8 +254,12 @@ class TorController(context: Context) {
             // transport plugin line only if the binary exists (optional binaries
             // like snowflake-client may be absent, tor must still start)
             val plugin = TorrcBuilder.PLUGIN_LINES.getOrNull(mode)
-            if (!plugin.isNullOrEmpty() && File(dataDir, plugin.substringAfter("exec ").trim()).exists()) {
-                sb += "\n$plugin"
+            if (!plugin.isNullOrEmpty()) {
+                // plugins are absolute {bindir}/lib*.so paths -> resolve + keep only if present
+                val resolved = plugin.replace("{bindir}", binDir)
+                if (resolved.substringAfter("exec ").trim().let { File(it).exists() }) {
+                    sb += "\n$resolved"
+                }
             }
         }
         if (strategy >= 0 && strategy < TorrcBuilder.STRATEGY_TORRC.size &&
@@ -410,49 +418,30 @@ class TorController(context: Context) {
         File(dataDir, "bridges").mkdirs()
     }
 
-    /** Copies the bundled native tor + runtime bits from assets/jniLibs into filesDir and chmod +x. */
+    /**
+     * Verifies the tor binary (pre-installed into nativeLibraryDir from
+     * jniLibs/lib*.so) and copies data-only runtime files (geoip, bridges)
+     * into the writable data dir. Executables are never written to filesDir
+     * on Android 10+ (W^X forbids execve() there).
+     */
     private fun extractRuntimeFiles(): Boolean {
-        if (torExe.exists() && torExe.length() > 100000) return true
+        if (!torExe.exists()) return false
         return try {
-            // tor binary is bundled as a raw asset "native/tor" (see workflow)
-            val assetName = "native/tor"
-            appContext.assets.open(assetName).use { ins ->
-                FileOutputStream(torExe).use { ins.copyTo(it) }
-            }
-            torExe.setExecutable(true, true)
-            (geoip.exists() || copyAsset("native/geoip", geoip))
-            (geoip6.exists() || copyAsset("native/geoip6", geoip6))
+            copyAssetIfMissing("native/geoip", geoip)
+            copyAssetIfMissing("native/geoip6", geoip6)
             copyAssetIfMissing("native/vanilla_tested.txt", File(dataDir, "bridges/vanilla_tested.txt"))
             copyAssetIfMissing("native/obfs4_tested.txt", File(dataDir, "bridges/obfs4_tested.txt"))
             copyAssetIfMissing("native/webtunnel_tested.txt", File(dataDir, "bridges/webtunnel_tested.txt"))
             copyAssetIfMissing("native/snowflake_tested.txt", File(dataDir, "bridges/snowflake_tested.txt"))
-            // pluggable transports (chmod +x so tor can exec them)
-            extractExec("native/obfs4proxy", File(dataDir, "obfs4proxy"))
-            extractExec("native/webtunnel", File(dataDir, "webtunnel"))
-            extractExec("native/snowflake-client", File(dataDir, "snowflake-client"))
             true
         } catch (e: Exception) {
             false
         }
     }
 
-    private fun extractExec(name: String, dest: File) {
-        try {
-            if (dest.exists()) return
-            appContext.assets.open(name).use { ins ->
-                FileOutputStream(dest).use { ins.copyTo(it) }
-            }
-            dest.setExecutable(true, true)
-        } catch (e: Exception) {
-            // transport optional; a missing one only disables that bridge mode
-        }
-    }
-
     private fun copyAssetIfMissing(name: String, dest: File) {
         if (!dest.exists()) copyAssetSafely(name, dest)
     }
-
-    private fun copyAsset(name: String, dest: File): Boolean = copyAssetSafely(name, dest)
 
     private fun copyAssetSafely(name: String, dest: File): Boolean {
         return try {
