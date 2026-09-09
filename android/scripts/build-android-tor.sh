@@ -50,7 +50,15 @@ fi
 export ANDROID_NDK_ROOT="${ANDROID_NDK_ROOT:-$NDK}"
 export ANDROID_NDK_HOME="$NDK"
 
-TRIPLE="aarch64-linux-android24"
+# API >= 29: since the Android 10 loader, ARM64 Bionic requires the
+# executable's ELF TLS segment to be 64-byte aligned ("alignment is 8 (skew 0),
+# needs to be at least 64 for ARM64 Bionic" -> SIGABRT at exec). Bumping the
+# p_align field post-link is NOT enough: Bionic also requires p_vaddr % p_align
+# == 0 (skew 0), which is fixed at link time. Targeting API 29 makes the NDK
+# clang driver enable native ELF TLS and link crtbegin_tls.o, whose 64-byte
+# aligned placeholder forces the linker to emit a correctly aligned segment.
+# (With NDK r26+, clang auto-enables ELF TLS for minSdkVersion >= 29.)
+TRIPLE="aarch64-linux-android29"
 TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
 SYSROOT="$TOOLCHAIN/sysroot"
 export SYSROOT
@@ -60,7 +68,7 @@ export AR="$TOOLCHAIN/bin/llvm-ar"
 export RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 export STRIP="$TOOLCHAIN/bin/llvm-strip"
 
-API=24
+API=29
 export API
 export CC CXX AR RANLIB STRIP
 # -O1 keeps clang's per-compilation memory low enough for the 7GB GitHub runner

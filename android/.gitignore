@@ -21,6 +21,10 @@ app/src/main/assets/native/snowflake-client
 app/src/main/assets/native/*.txt
 native-out/
 
+# Python
+__pycache__/
+*.pyc
+
 # Signing (keystore lives in GitHub secrets)
 release-key.jks
 release-key.jks.b64
