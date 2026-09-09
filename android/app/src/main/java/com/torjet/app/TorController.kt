@@ -268,8 +268,10 @@ class TorController(context: Context) {
                 if (!rw.readLine().startsWith("250")) return null
                 rw.writeLine(cmd)
                 val out = mutableListOf<String>()
+                // Multi-line replies (e.g. GETINFO) come as "250-status/..." lines and
+                // terminate with "250 OK". Match on the terminator, not on any "250".
                 var ln = rw.readLine()
-                while (ln != null && !ln.startsWith("250")) {
+                while (ln != null && !ln.startsWith("250 OK")) {
                     out.add(ln)
                     ln = rw.readLine()
                 }
@@ -296,7 +298,7 @@ class TorController(context: Context) {
                 rw.writeLine(cmd)
                 val out = mutableListOf<String>()
                 var ln = rw.readLine()
-                while (ln != null && !ln.startsWith("250")) {
+                while (ln != null && !ln.startsWith("250 OK")) {
                     out.add(ln)
                     ln = rw.readLine()
                 }

@@ -82,19 +82,30 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onProxyToggled(checked: Boolean) {
-        val svc = service ?: return
         if (checked) {
+            val svc = service ?: return
+            if (svc.controller.ui.value.state != TorController.State.CONNECTED) {
+                Toast.makeText(this, "Connect Tor first", Toast.LENGTH_SHORT).show()
+                proxySwitch.isChecked = false
+                return
+            }
             val intent = VpnService.prepare(this)
             if (intent != null) vpnPermission.launch(intent)
             else startVpn()
         } else {
-            stopService(Intent(this, VpnProxyService::class.java))
+            stopVpn()
         }
     }
 
     private fun startVpn() {
         startService(Intent(this, VpnProxyService::class.java).setAction("start"))
         Toast.makeText(this, "Proxy on - all traffic via Tor", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun stopVpn() {
+        Toast.makeText(this, "Proxy off", Toast.LENGTH_SHORT).show()
+        startService(Intent(this, VpnProxyService::class.java).setAction("stop"))
+        proxySwitch.isChecked = false
     }
 
     private fun observeController() {
@@ -118,7 +129,10 @@ class MainActivity : AppCompatActivity() {
 
         val state = when (ui.state) {
             TorController.State.CONNECTED -> getString(R.string.title_connected)
-            TorController.State.CONNECTING -> getString(R.string.title_connecting)
+            TorController.State.CONNECTING -> {
+                if (ui.bootPct > 0) "BOOTSTRAP ${ui.bootPct}%${if (ui.bootTag.isNotEmpty()) " (${ui.bootTag})" else ""}"
+                else getString(R.string.title_connecting)
+            }
             TorController.State.RESTARTING -> getString(R.string.title_restarting)
             TorController.State.STOPPING -> getString(R.string.title_stopping)
             else -> getString(R.string.title_idle)
@@ -132,20 +146,22 @@ class MainActivity : AppCompatActivity() {
                 else -> getColor(R.color.muted)
             }
         )
-        if (ui.state == TorController.State.CONNECTED || ui.state == TorController.State.CONNECTING) {
+        // Jenkins/Windows UI shows the port line only once connected.
+        if (ui.state == TorController.State.CONNECTED) {
             socksLine.visibility = android.view.View.VISIBLE
             socksLine.text = "SOCKS 127.0.0.1:${ui.socksPort} | HTTP 127.0.0.1:${ui.httpPort}"
+        } else {
+            socksLine.visibility = android.view.View.INVISIBLE
         }
         bootProgress(ui)
     }
 
     private fun bootProgress(ui: TorController.UiState) {
-        val line = if (ui.state == TorController.State.CONNECTING || ui.state == TorController.State.CONNECTED) {
-            val tag = if (ui.bootTag.isNotEmpty()) " (${ui.bootTag})" else ""
-            if (ui.bootPct >= 100) "connected$tag"
-            else "Bootstrapped ${ui.bootPct}%$tag"
-        } else {
-            ""
+        val line = when {
+            ui.state == TorController.State.CONNECTING && ui.bootPct > 0 -> "Bootstrapped ${ui.bootPct}%"
+            ui.state == TorController.State.CONNECTING -> "starting tor..."
+            ui.state == TorController.State.CONNECTED -> "connected"
+            else -> ""
         }
         bootstrapLine.text = line
     }

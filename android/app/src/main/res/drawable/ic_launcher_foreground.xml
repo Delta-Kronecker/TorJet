@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- outer badge ring -->
+    <path
+        android:pathData="M54,20 m0,0 a34,34 0 1,0 0.01,0"
+        android:strokeColor="#8A5CF6"
+        android:strokeWidth="7"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round" />
+    <!-- power glyph arc (open at the bottom-left, like the app ring) -->
+    <path
+        android:pathData="M39,48 a21,21 0 1,1 30,0"
+        android:strokeColor="#F5F7FC"
+        android:strokeWidth="5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round" />
+    <!-- power glyph stem -->
+    <path
+        android:pathData="M54,25 L54,48"
+        android:strokeColor="#F5F7FC"
+        android:strokeWidth="5"
+        android:fillColor="#00000000"
+        android:strokeLineCap="round" />
+</vector>

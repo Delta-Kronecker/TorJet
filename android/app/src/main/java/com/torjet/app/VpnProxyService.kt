@@ -44,10 +44,11 @@ class VpnProxyService : VpnService() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == "stop") {
+            teardown()
             stopSelf()
             return START_NOT_STICKY
         }
-        startVpn()
+        if (intent?.action == "start" || intent?.action == null) startVpn()
         return START_STICKY
     }
 
@@ -76,6 +77,14 @@ class VpnProxyService : VpnService() {
                 routeIPv4(buf, tunOut)
             }
         }
+    }
+
+    private fun teardown() {
+        job?.cancel()
+        tunnels.values.forEach { runCatching { it.socket.close() } }
+        tunnels.clear()
+        runCatching { vpnInterface?.close() }
+        vpnInterface = null
     }
 
     private fun routeIPv4(buffer: ByteBuffer, tunOut: FileOutputStream) {
@@ -208,11 +217,7 @@ class VpnProxyService : VpnService() {
     private fun ipToString(b: ByteArray) = InetAddress.getByAddress(b).hostAddress
 
     override fun onDestroy() {
-        job?.cancel()
-        tunnels.values.forEach { runCatching { it.socket.close() } }
-        tunnels.clear()
-        runCatching { vpnInterface?.close() }
-        vpnInterface = null
+        teardown()
         scope.cancel()
         super.onDestroy()
     }
