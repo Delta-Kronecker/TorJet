@@ -15,7 +15,16 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Manages the embedded tor process on Android: copies the native binary + data
  * into the app's private dir, generates torrc, spawns tor, tracks bootstrap
- * via the control port and log tail. Mirrors StartTorAndWait in the C# core.
+ * via the control port and log tail.
+ *
+ * Mirrors the Windows core (scripts/start-tor.cs: StartTorAndWait + AutoRace):
+ *  - There is NO absolute timeout. On the healthy-only set tor may be restarted
+ *    once with EVERY bridge (fallback) if the reported bootstrap percentage
+ *    stays frozen for StuckFallbackMinutes; once on the fallback set (or on a
+ *    first run, which has no healthy/fallback split yet) we keep waiting
+ *    indefinitely until 100%, tor exits, or the user stops.
+ *  - auto mode races vanilla / obfs4 / webtunnel side by side; the first to
+ *    reach 100% wins and its data directory is adopted as the primary one.
  */
 class TorController(context: Context) {
 
@@ -38,6 +47,15 @@ class TorController(context: Context) {
         const val DEFAULT_DNS = 53530
         const val DEFAULT_CTRL = 9051
         private const val STUCK_FALLBACK_MINUTES = 2.0
+        private const val STUCK_FALLBACK_MS = (STUCK_FALLBACK_MINUTES * 60_000).toLong()
+        private const val POLL_MS = 1500L
+        // Auto-race racer ports mirror start-tor.cs RacerSocksPorts/RacerHttpPorts/RacerDnsPorts.
+        private val RACER_SOCKS = intArrayOf(9150, 9250, 9350)
+        private val RACER_HTTP = intArrayOf(8150, 8250, 8350)
+        private val RACER_DNS = intArrayOf(61530, 62530, 63530)
+        private val RACER_DIRS = arrayOf("data-v", "data-o", "data-w")
+        private val RACER_NAMES = arrayOf("vanilla", "obfs4", "webtunnel")
+        private const val RACER_STALL_SECS = 120L
     }
 
     private val appContext = context.applicationContext
@@ -83,13 +101,19 @@ class TorController(context: Context) {
             return@withContext false
         }
 
-        // The buffered bootstrap waiter drives a bounded wait via the control
-        // port instead of blocking on stdout, so sequential auto trials work.
         val ready = if (mode == TorrcBuilder.MODE_AUTO) {
-            autoRace(strategy)
+            val winnerMode = autoRace(strategy)
+            if (winnerMode >= 0) {
+                // Winner's warm data dir is now the primary one. Restart on the
+                // standard primary ports reusing the cached directory, so the
+                // final bootstrap takes seconds (mirrors start-tor.cs).
+                bootTor(winnerMode, strategy)
+            } else {
+                false
+            }
         } else {
             val resolved = resolveMode(mode, strategy)
-            bootTor(resolved.first, resolved.second, maxWaitMs = 120_000L)
+            bootTor(resolved.first, resolved.second)
         }
 
         if (!ready) {
@@ -106,9 +130,10 @@ class TorController(context: Context) {
         true
     }
 
-    /** Sequential auto: try vanilla, obfs4, webtunnel; keep the first to reach 100%. */
-    private fun bootTor(mode: Int, strategy: Int, maxWaitMs: Long): Boolean {
-        val torrc = buildTorrc(mode, strategy)
+    /** Healthy/fallback two-phase single-mode boot. NO absolute timeout. */
+    private fun bootTor(mode: Int, strategy: Int): Boolean {
+        var fallbackUsed = !hasFallbackSection(mode)
+        var torrc = buildTorrc(mode, strategy, healthyOnly = !fallbackUsed)
         if (torrc == null) {
             _ui.value = _ui.value.copy(
                 state = State.ERROR,
@@ -116,67 +141,321 @@ class TorController(context: Context) {
             )
             return false
         }
-        torrcFile.writeText(torrc)
-        if (torLog.exists()) torLog.delete()
-        _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, error = null)
 
-        val pb = ProcessBuilder(torExe.absolutePath, "-f", "torrc")
-        pb.directory(dataDir)
-        pb.redirectErrorStream(true)
-        val proc = try {
-            pb.start()
-        } catch (e: Exception) {
-            val exists = torExe.exists()
-            val exec = torExe.canExecute()
-            _ui.value = _ui.value.copy(
-                state = State.ERROR,
-                error = "failed to start tor (exists=$exists exec=$exec): ${e.message}"
-            )
-            return false
-        }
-        process = proc
+        while (!stopRequested.get()) {
+            // Two-phase: first healthy-only; if it stalls, retry with EVERY bridge.
+            torrc = buildTorrc(mode, strategy, healthyOnly = !fallbackUsed) ?: torrc
+            torrcFile.writeText(torrc)
+            if (torLog.exists()) torLog.delete()
+            _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, error = null)
 
-        // pump stdout on a background thread (keeps stderr/stdout drained and
-        // parses bootstrap lines into the UI; keeps a recent tail for errors)
-        synchronized(pumpBuffer) { pumpBuffer.clear() }
-        val pump = Thread {
-            try {
-                proc.inputStream.bufferedReader().forEachLine { line ->
-                    synchronized(pumpBuffer) {
-                        pumpBuffer.addLast(line)
-                        while (pumpBuffer.size > 30) pumpBuffer.removeFirst()
-                    }
-                    parseProgressLine(line)
-                }
-            } catch (_: Exception) {
+            val pb = ProcessBuilder(torExe.absolutePath, "-f", "torrc")
+            pb.directory(dataDir)
+            pb.redirectErrorStream(true)
+            val proc = try {
+                pb.start()
+            } catch (e: Exception) {
+                val exists = torExe.exists()
+                val exec = torExe.canExecute()
+                _ui.value = _ui.value.copy(
+                    state = State.ERROR,
+                    error = "failed to start tor (exists=$exists exec=$exec): ${e.message}"
+                )
+                return false
             }
-        }
-        pump.isDaemon = true
-        pump.start()
+            process = proc
 
-        // bounded wait, polling the control port
-        val deadline = System.currentTimeMillis() + maxWaitMs
-        while (System.currentTimeMillis() < deadline && !stopRequested.get()) {
-            if (!proc.isAlive) {
-                // tor died on its own before bootstrap -> surface the reason
-                val msg = processDiedReason(proc)
-                _ui.value = _ui.value.copy(state = State.ERROR, error = msg)
+            // pump stdout on a background thread (drains output, feeds progress)
+            synchronized(pumpBuffer) { pumpBuffer.clear() }
+            val pump = Thread {
+                try {
+                    proc.inputStream.bufferedReader().forEachLine { line ->
+                        synchronized(pumpBuffer) {
+                            pumpBuffer.addLast(line)
+                            while (pumpBuffer.size > 30) pumpBuffer.removeFirst()
+                        }
+                        parseProgressLine(line)
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            pump.isDaemon = true
+            pump.start()
+
+            var lastPct = -1
+            var lastTag = ""
+            var stuckSince = System.currentTimeMillis()
+            var restartForFallback = false
+
+            // Wait until 100%, tor exits, or the user stops. Only the frozen
+            // percentage triggers the healthy->fallback restart (once).
+            while (!stopRequested.get()) {
+                if (!proc.isAlive) {
+                    val msg = processDiedReason(proc)
+                    _ui.value = _ui.value.copy(state = State.ERROR, error = msg)
+                    killProcess()
+                    return false
+                }
+                val pct = controlBootstrapPercent()
+                if (pct >= 100) {
+                    _ui.value = _ui.value.copy(state = State.CONNECTED, bootPct = 100, bootTag = lastTag)
+                    return true
+                }
+                if (pct != lastPct) {
+                    lastPct = pct
+                    lastTag = lastTagFromPump() ?: lastTag
+                    if (pct > 0) stuckSince = System.currentTimeMillis()
+                }
+                if (!fallbackUsed &&
+                    System.currentTimeMillis() - stuckSince >= STUCK_FALLBACK_MS
+                ) {
+                    // frozen long enough on the healthy-only set -> widen to all bridges
+                    restartForFallback = true
+                    break
+                }
+                Thread.sleep(POLL_MS)
+            }
+
+            if (restartForFallback) {
+                fallbackUsed = true
+                killProcess()
+                _ui.value = _ui.value.copy(
+                    state = State.CONNECTING, bootPct = 0,
+                    bootTag = "healthy bridges stalled - retrying with all bridges"
+                )
+                continue // outer loop rebuilds torrc with all bridges
+            }
+            if (stopRequested.get()) {
                 killProcess()
                 return false
             }
-            val pct = controlBootstrapPercent()
-            if (pct >= 100) {
-                _ui.value = _ui.value.copy(state = State.CONNECTED, bootPct = 100)
-                return true
-            }
-            if (pct > _ui.value.bootPct) {
-                _ui.value = _ui.value.copy(bootPct = pct)
-            }
-            Thread.sleep(1000)
         }
-        // tor did not reach 100% in time; tear it down for the caller to fallback
-        killProcess()
         return false
+    }
+
+    private fun lastTagFromPump(): String? {
+        synchronized(pumpBuffer) {
+            for (line in pumpBuffer) {
+                val m = Regex("Bootstrapped\\s+(\\d+)%\\s*\\(([^)]+)\\)").find(line) ?: continue
+                return m.groupValues[2]
+            }
+            return null
+        }
+    }
+
+    /** One racer leg of the auto race. */
+    private data class Racer(
+        val name: String,
+        val mode: Int,
+        val dir: String,
+        val socks: Int,
+        val keep: Int,
+        val http: Int,
+        val dns: Int,
+        val ctrl: Int,
+        var proc: Process? = null,
+        var alive: Boolean = true,
+        var lastPct: Int = -1,
+        var fallbackUsed: Boolean = true,
+        var startedAt: Long = 0,
+        var lastProgressAt: Long = 0
+    )
+
+    /**
+     * Auto mode: race vanilla / obfs4 / webtunnel side by side, each with its
+     * own ports + data dir + control cookie (mirrors start-tor.cs AutoRace).
+     * First to reach 100% wins; losers are killed; the winner's data directory
+     * becomes the primary one and the caller reboots on standard ports with the
+     * warm cache. There is NO global timeout.
+     * @return the winning mode, or -1 on failure/abort.
+     */
+    private fun autoRace(strategy: Int): Int {
+        val racers = ArrayList<Racer>()
+        for (i in RACER_SOCKS.indices) {
+            val r = Racer(
+                name = RACER_NAMES[i],
+                mode = i,
+                dir = RACER_DIRS[i],
+                socks = RACER_SOCKS[i],
+                keep = RACER_SOCKS[i] + 2,
+                http = RACER_HTTP[i],
+                dns = RACER_DNS[i],
+                ctrl = RACER_SOCKS[i] + 1,
+                fallbackUsed = !hasFallbackSection(i)
+            )
+            r.startedAt = System.currentTimeMillis()
+            racers.add(r)
+        }
+
+        _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, error = null)
+
+        // spawn every racer
+        for (r in racers) {
+            val torrc = buildTorrc(r.mode, strategy, healthyOnly = !r.fallbackUsed,
+                socks = r.socks, keep = r.keep, http = r.http, dns = r.dns, ctrl = r.ctrl,
+                datadir = r.dir, torlog = "${r.dir}/tor.log")
+            if (torrc == null) {
+                r.alive = false
+                r.proc = null
+                continue
+            }
+            val rcFile = File(dataDir, "torrc-${r.name}")
+            rcFile.writeText(torrc)
+            File(dataDir, r.dir).mkdirs()
+            r.startedAt = System.currentTimeMillis()
+            r.lastProgressAt = r.startedAt
+            val pb = ProcessBuilder(torExe.absolutePath, "-f", "torrc-${r.name}")
+            pb.directory(dataDir)
+            pb.redirectErrorStream(true)
+            val proc = try { pb.start() } catch (e: Exception) { null }
+            r.proc = proc
+            r.alive = proc != null
+            if (proc == null) {
+                _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0,
+                    bootTag = "${r.name} failed to start")
+            } else {
+                // drain so a dead/lost racer's output never fills the pipe
+                drainRacer(proc)
+            }
+        }
+
+        val allDead = racers.all { !it.alive }
+        if (allDead) {
+            _ui.value = _ui.value.copy(state = State.ERROR, error = "all racers failed to start")
+            return -1
+        }
+
+        // Single monitoring loop; first racer to 100% wins. No deadlines.
+        while (!stopRequested.get()) {
+            // Per-racer healthy-only stall: if the race began on the healthy-only set
+            // and bootstrap % stays frozen, widen THIS racer alone to every bridge
+            // (mirror AutoRestartRacer's 120 s stall). Non-fallback (first-run)
+            // racers wait indefinitely like the C# core.
+            for (r in racers) {
+                if (!r.alive || r.fallbackUsed) continue
+                if (System.currentTimeMillis() - r.lastProgressAt >= RACER_STALL_SECS * 1000) {
+                    restartRacerWithAllBridges(r, strategy)
+                    r.startedAt = System.currentTimeMillis()
+                    r.lastProgressAt = r.startedAt
+                }
+            }
+
+            var aliveCount = 0
+            var bestPct = -1
+            var bestDesc = ""
+            for (r in racers) {
+                if (!r.alive) continue
+                if (r.proc == null || !r.proc!!.isAlive) {
+                    r.alive = false
+                    val tail = racerLogTail(r)
+                    if (tail != "(no log)") {
+                        _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0,
+                            bootTag = "${r.name} died: ${tail.lines().firstOrNull()?.trim().orEmpty()}")
+                    }
+                    continue
+                }
+                aliveCount++
+                val pct = controlBootstrapPercent(r.ctrl, cookieFor(r.dir))
+                if (pct >= 100) {
+                    return finalizeRace(racers, r, strategy)
+                }
+                if (pct > r.lastPct) {
+                    r.lastPct = pct
+                    r.lastProgressAt = System.currentTimeMillis()
+                    if (pct > bestPct) {
+                        bestPct = pct
+                        bestDesc = "${r.name} ${pct}%"
+                    }
+                }
+            }
+
+            if (bestDesc.isNotEmpty()) {
+                _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = bestPct, bootTag = bestDesc)
+            }
+
+            if (aliveCount == 0) {
+                _ui.value = _ui.value.copy(state = State.ERROR, error = "all transports died")
+                killRacers(racers)
+                return -1
+            }
+            Thread.sleep(POLL_MS)
+        }
+
+        killRacers(racers)
+        return -1
+    }
+
+    /**
+     * Stops every racer (the winner too), adopts the winner's data directory
+     * as the warm primary cache, records the mode, and returns it. The caller
+     * then reboots on the standard primary ports so consumers (VPN, keep-alive)
+     * keep their fixed ports. Mirrors start-tor.cs: the winner "restarts on the
+     * primary ports reusing its cached directory, so the final bootstrap takes
+     * seconds".
+     */
+    private fun finalizeRace(racers: List<Racer>, winner: Racer, strategy: Int): Int {
+        killRacers(racers)
+        // adopt the winner's data directory as the primary one (warm cache)
+        try {
+            val src = File(dataDir, winner.dir)
+            val dst = File(dataDir, "data")
+            if (dst.exists()) dst.deleteRecursively()
+            src.copyRecursively(dst)
+            File(dst, "lock").delete()
+        } catch (_: Exception) {}
+        settings.lastSuccessMode = winner.mode
+        settings.lastSuccessStrategy = strategy
+        return winner.mode
+    }
+
+    private fun restartRacerWithAllBridges(r: Racer, strategy: Int) {
+        try { r.proc?.destroy(); r.proc?.waitFor(3, java.util.concurrent.TimeUnit.SECONDS) } catch (_: Exception) {}
+        val torrc = buildTorrc(r.mode, strategy, healthyOnly = false,
+            socks = r.socks, keep = r.keep, http = r.http, dns = r.dns, ctrl = r.ctrl,
+            datadir = r.dir, torlog = "${r.dir}/tor.log")
+        if (torrc == null) {
+            r.alive = false
+            return
+        }
+        File(dataDir, "torrc-${r.name}").writeText(torrc)
+        r.fallbackUsed = true
+        r.lastPct = -1
+        r.lastProgressAt = System.currentTimeMillis()
+        val pb = ProcessBuilder(torExe.absolutePath, "-f", "torrc-${r.name}")
+        pb.directory(dataDir)
+        pb.redirectErrorStream(true)
+        val proc = try { pb.start() } catch (e: Exception) { null }
+        r.proc = proc
+        r.alive = proc != null
+        if (proc != null) drainRacer(proc)
+        _ui.value = _ui.value.copy(bootPct = 0, bootTag = "${r.name} fallback: all bridges")
+    }
+
+    private fun drainRacer(proc: Process) {
+        Thread {
+            try {
+                proc.inputStream.bufferedReader().forEachLine { }
+            } catch (_: Exception) {
+            }
+        }.apply { isDaemon = true }.start()
+    }
+
+    private fun racerLogTail(r: Racer, maxLines: Int = 15): String {
+        return try {
+            val f = File(dataDir, "${r.dir}/tor.log")
+            val lines = f.readLines()
+            val tail = if (lines.size > maxLines) lines.takeLast(maxLines) else lines
+            tail.dropLastWhile { it.isBlank() }.joinToString("\n")
+        } catch (e: Exception) {
+            "(no log)"
+        }
+    }
+
+    private fun killRacers(racers: List<Racer>) {
+        for (r in racers) {
+            try { r.proc?.destroy() } catch (_: Exception) {}
+        }
+        process = null
     }
 
     private fun processDiedReason(proc: Process): String {
@@ -220,16 +499,6 @@ class TorController(context: Context) {
         process = null
     }
 
-    private fun autoRace(strategy: Int): Boolean {
-        // try modes in order; memory/healthy-bridge prioritization omitted for brevity
-        for (m in intArrayOf(0, 1, 2)) {
-            if (stopRequested.get()) return false
-            _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, bootTag = TorrcBuilder.MODE_NAMES[m])
-            if (bootTor(m, strategy, maxWaitMs = 60_000L)) return true
-        }
-        return false
-    }
-
     private fun resolveMode(mode: Int, strategy: Int): Pair<Int, Int> {
         var m = mode
         var s = strategy
@@ -242,28 +511,62 @@ class TorController(context: Context) {
         return m to s
     }
 
-    private fun buildTorrc(mode: Int, strategy: Int): String? {
+    /**
+     * True when the bridge file for a mode has already been prioritized into
+     * "# === healthy === / # === remaining (fallback) ===" sections. On a
+     * FIRST run there are none: every bridge is the whole list and the
+     * two-phase stall timeout must not apply (mirrors HasFallbackSection).
+     */
+    private fun hasFallbackSection(mode: Int): Boolean {
+        val bridgeFile = TorrcBuilder.BRIDGE_FILES.getOrNull(mode) ?: return false
+        if (bridgeFile.isEmpty()) return false
+        val bf = File(dataDir, "bridges/$bridgeFile")
+        if (!bf.exists()) return false
+        return try {
+            bf.readLines().any { it.contains("remaining", ignoreCase = true) }
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun buildTorrc(
+        mode: Int,
+        strategy: Int,
+        healthyOnly: Boolean = false,
+        socks: Int = socksPort,
+        keep: Int = keepPort,
+        http: Int = httpPort,
+        dns: Int = dnsPort,
+        ctrl: Int = ctrlPort,
+        datadir: String = "data",
+        torlog: String = "tor.log"
+    ): String? {
         var sb = TorrcBuilder.TEMPLATE
-            .replace("{socksport}", socksPort.toString())
-            .replace("{keepport}", keepPort.toString())
-            .replace("{httpport}", httpPort.toString())
-            .replace("{dnsport}", dnsPort.toString())
-            .replace("{ctrlport}", ctrlPort.toString())
-            .replace("{datadir}", "data")
+            .replace("{socksport}", socks.toString())
+            .replace("{keepport}", keep.toString())
+            .replace("{httpport}", http.toString())
+            .replace("{dnsport}", dns.toString())
+            .replace("{ctrlport}", ctrl.toString())
+            .replace("{datadir}", datadir)
+            .replace("{torlog}", torlog)
 
         val bridgeFile = TorrcBuilder.BRIDGE_FILES.getOrNull(mode)
         if (!bridgeFile.isNullOrEmpty()) {
             val bf = File(dataDir, "bridges/$bridgeFile")
             if (!bf.exists()) return null
-            val lines = bf.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+            // healthyOnly: stop at the "# ... remaining (fallback) ..." header
+            var lines = bf.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+            if (healthyOnly) {
+                lines = lines.takeWhile { !it.contains("remaining", ignoreCase = true) }
+            }
+            lines = lines.filter { !it.startsWith("#") }
             if (lines.isEmpty()) return null
             sb += "\n\n# --- bridges: ${TorrcBuilder.MODE_NAMES[mode]} ---\nUseBridges 1\n"
-            sb += lines.filter { !it.startsWith("#") }.joinToString("\n") { "Bridge $it" }
+            sb += lines.joinToString("\n") { "Bridge $it" }
             // transport plugin line only if the binary exists (optional binaries
             // like snowflake-client may be absent, tor must still start)
             val plugin = TorrcBuilder.PLUGIN_LINES.getOrNull(mode)
             if (!plugin.isNullOrEmpty()) {
-                // plugins are absolute {bindir}/lib*.so paths -> resolve + keep only if present
                 val resolved = plugin.replace("{bindir}", binDir)
                 if (resolved.substringAfter("exec ").trim().let { File(it).exists() }) {
                     sb += "\n$resolved"
@@ -318,8 +621,8 @@ class TorController(context: Context) {
         }
     }
 
-    private fun controlBootstrapPercent(): Int {
-        val lines = controlCommand("GETINFO status/bootstrap-phase") ?: return -1
+    private fun controlBootstrapPercent(port: Int = ctrlPort, cookie: File? = null): Int {
+        val lines = controlCommand("GETINFO status/bootstrap-phase", port, cookie) ?: return -1
         for (l in lines) {
             val m = Regex("PROGRESS=(\\d+)").find(l) ?: continue
             return m.groupValues[1].toIntOrNull() ?: -1
@@ -328,12 +631,12 @@ class TorController(context: Context) {
     }
 
     @Synchronized
-    private fun controlCommand(cmd: String): List<String>? {
-        val cookieHex = cookieHex()
+    private fun controlCommand(cmd: String, port: Int = ctrlPort, cookieFile: File? = null): List<String>? {
+        val cookieHex = cookieHex(cookieFile)
         if (cookieHex == null) return null
         return try {
             Socket().use { s ->
-                s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
+                s.connect(InetSocketAddress("127.0.0.1", port), 5000)
                 s.soTimeout = 5000
                 val rw = SocketIO(s)
                 rw.writeLine("AUTHENTICATE $cookieHex")
@@ -341,9 +644,10 @@ class TorController(context: Context) {
                 rw.writeLine(cmd)
                 val out = mutableListOf<String>()
                 // Multi-line replies (e.g. GETINFO) come as "250-status/..." lines and
-                // terminate with "250 OK". Match on the terminator, not on any "250".
+                // terminate with "250 OK". Bound the read so a peer that closes the
+                // connection mid-reply can never hang the caller forever.
                 var ln = rw.readLine()
-                while (ln != null && !ln.startsWith("250 OK")) {
+                while (ln != null && !ln.startsWith("250 OK") && out.size < 200) {
                     out.add(ln)
                     ln = rw.readLine()
                 }
@@ -359,7 +663,7 @@ class TorController(context: Context) {
     /** Non-synchronized variant for background thread consumers. */
     fun sendCommandBlocking(cmd: String): List<String>? {
         return try {
-            val cookieHex = cookieHex() ?: return null
+            val cookieHex = cookieHex(null) ?: return null
             Socket().use { s ->
                 s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
                 s.soTimeout = 5000
@@ -369,7 +673,7 @@ class TorController(context: Context) {
                 rw.writeLine(cmd)
                 val out = mutableListOf<String>()
                 var ln = rw.readLine()
-                while (ln != null && !ln.startsWith("250 OK")) {
+                while (ln != null && !ln.startsWith("250 OK") && out.size < 200) {
                     out.add(ln)
                     ln = rw.readLine()
                 }
@@ -382,13 +686,17 @@ class TorController(context: Context) {
 
     fun newIdentity(): Boolean = sendCommand("SIGNAL NEWNYM")
 
-    private fun cookieHex(): String? {
-        // ControlAuthenticationCookie 1 writes the cookie to DataDirectory
-        // ("data" relative to the process cwd"), i.e. filesDir/tor/data/.
-        val candidates = listOf(
-            File(dataDir, "data/control_auth_cookie"),
-            dataDir.run { File(this, "control_auth_cookie") }
-        )
+    private fun cookieHex(cookieFile: File? = null): String? {
+        val candidates = if (cookieFile != null) {
+            listOf(cookieFile)
+        } else {
+            // ControlAuthenticationCookie 1 writes the cookie to DataDirectory
+            // ("data" relative to the process cwd), i.e. filesDir/tor/data/.
+            listOf(
+                File(dataDir, "data/control_auth_cookie"),
+                dataDir.run { File(this, "control_auth_cookie") }
+            )
+        }
         for (f in candidates) {
             if (!f.exists()) continue
             return try {
@@ -399,6 +707,8 @@ class TorController(context: Context) {
         }
         return null
     }
+
+    private fun cookieFor(racerDir: String): File = File(dataDir, "$racerDir/control_auth_cookie")
 
     private fun cleanupInternal() {
         try {

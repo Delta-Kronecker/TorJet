@@ -87,7 +87,7 @@ object TorrcBuilder {
         "ClientTransportPlugin snowflake exec {bindir}/libsnowflake_client.so" // snowflake
     )
 
-    /** Mirrors configs/torrc.jet. Placeholders: {socksport}, {keepport}, {httpport}, {dnsport}, {ctrlport}, {datadir}. */
+    /** Mirrors configs/torrc.jet. Placeholders: {socksport}, {keepport}, {httpport}, {dnsport}, {ctrlport}, {datadir}, {torlog}. */
     val TEMPLATE: String = """
 # TorJet - Android portable Tor client config (tor 0.4.9.11)
 SocksPort 127.0.0.1:{socksport} IsolateSOCKSAuth
@@ -126,7 +126,7 @@ FetchDirInfoExtraEarly 1
 PathsNeededToBuildCircuits 0.25
 
 DataDirectory {datadir}
-Log notice file tor.log
+Log notice file {torlog}
 DisableDebuggerAttachment 1
 AvoidDiskWrites 1
 SafeLogging 1
