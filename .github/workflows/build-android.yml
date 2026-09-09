@@ -132,6 +132,22 @@ jobs:
           if [ ! -f android/app/src/main/jniLibs/arm64-v8a/libsnowflake_client.so ]; then
             echo "::warning::snowflake-client binary missing (snowflake mode disabled)"
           fi
+          # Bionic on ARM64 aborts executables whose PT_TLS alignment is < 64:
+          # "executable's TLS segment is underaligned: alignment is 8". Clang/Go
+          # often emit tiny TLS sections aligned to 8, so bump PT_TLS p_align to
+          # 64 (this is what termux-elf-cleaner does on Android).
+          if [ -x /usr/bin/python3 ]; then
+            PY=/usr/bin/python3
+          elif command -v python3 >/dev/null 2>&1; then
+            PY=python3
+          else
+            PY=python
+          fi
+          "$PY" android/scripts/fix_android_tls_align.py \
+            android/app/src/main/jniLibs/arm64-v8a/libtor.so \
+            android/app/src/main/jniLibs/arm64-v8a/libobfs4proxy.so \
+            android/app/src/main/jniLibs/arm64-v8a/libwebtunnel.so \
+            android/app/src/main/jniLibs/arm64-v8a/libsnowflake_client.so || true
           printf 'built=%s\nref=%s\n' "$(date -u +%s)" "$GITHUB_SHA" \
             > android/app/src/main/assets/native/stamp.txt
           echo "assets/native:"; ls -la android/app/src/main/assets/native
