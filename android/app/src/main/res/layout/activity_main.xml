@@ -118,5 +118,27 @@
             android:text=""
             android:textColor="@color/muted"
             android:textSize="11sp" />
+
+        <ScrollView
+            android:id="@+id/logScroll"
+            android:layout_width="match_parent"
+            android:layout_height="0dp"
+            android:layout_weight="1"
+            android:layout_marginTop="8dp"
+            android:fillViewport="true"
+            android:visibility="gone">
+
+            <TextView
+                android:id="@+id/logView"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:fontFamily="monospace"
+                android:paddingStart="12dp"
+                android:paddingEnd="12dp"
+                android:paddingBottom="12dp"
+                android:textColor="@color/muted"
+                android:textIsSelectable="true"
+                android:textSize="11sp" />
+        </ScrollView>
     </LinearLayout>
 </FrameLayout>

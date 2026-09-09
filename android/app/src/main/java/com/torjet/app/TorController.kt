@@ -186,18 +186,26 @@ class TorController(context: Context) {
             "?"
         }
         val out = synchronized(pumpBuffer) {
-            if (pumpBuffer.isEmpty()) "(no output)" else pumpBuffer.joinToString(" | ")
+            if (pumpBuffer.isEmpty()) "(no output)" else pumpBuffer.joinToString("\n")
         }
         val log = torLogTail()
-        val msg = if (log == "(no log)") out else "$out | $log"
-        return "tor exited ($code): $msg"
+        val msg = buildString {
+            append("tor exited ($code)")
+            if (log != "(no log)") {
+                append("\n--- tor.log ---\n")
+                append(log)
+            }
+            append("\n--- stdout/stderr ---\n")
+            append(out)
+        }
+        return msg
     }
 
     private fun torLogTail(maxLines: Int = 12): String {
         return try {
             val lines = torLog.readLines()
             val tail = if (lines.size > maxLines) lines.takeLast(maxLines) else lines
-            tail.joinToString(" | ")
+            tail.dropLastWhile { it.isBlank() }.joinToString("\n")
         } catch (e: Exception) {
             "(no log)"
         }

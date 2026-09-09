@@ -25,6 +25,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var stateText: TextView
     private lateinit var socksLine: TextView
     private lateinit var bootstrapLine: TextView
+    private lateinit var logScroll: android.view.View
+    private lateinit var logView: TextView
     private lateinit var proxySwitch: Switch
 
     private val vpnPermission =
@@ -57,6 +59,8 @@ class MainActivity : AppCompatActivity() {
         stateText = findViewById(R.id.stateText)
         socksLine = findViewById(R.id.socksLine)
         bootstrapLine = findViewById(R.id.bootstrapLine)
+        logScroll = findViewById(R.id.logScroll)
+        logView = findViewById(R.id.logView)
         proxySwitch = findViewById(R.id.proxySwitch)
 
         ring.setOnClickListener {
@@ -131,7 +135,11 @@ class MainActivity : AppCompatActivity() {
         if (failed) {
             stateText.text = ui.error ?: getString(R.string.title_idle)
             stateText.setTextColor(getColor(R.color.red))
+            val msg = ui.error ?: ""
+            logView.text = msg
+            logScroll.visibility = if (msg.isNotEmpty()) android.view.View.VISIBLE else android.view.View.GONE
         } else {
+            logScroll.visibility = android.view.View.GONE
             val state = when (ui.state) {
                 TorController.State.CONNECTED -> getString(R.string.title_connected)
                 TorController.State.CONNECTING -> {
