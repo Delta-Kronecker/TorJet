@@ -169,12 +169,16 @@ jobs:
           if [ -z "$APK" ] || [ ! -f "$APK" ]; then
             echo "::error::No release APK produced"; exit 1
           fi
-          if [ -f android/release-key.jks ]; then
-            "${ANDROID_HOME}/build-tools/34.0.0/apksigner" verify --print-certs "$APK"
-          else
-            echo "::error::APK built without keystore (unsigned)"; exit 1
+          echo "APK=$APK ($(stat -c%s "$APK") bytes)"
+          if [ ! -f android/release-key.jks ]; then
+            echo "::error::release-key.jks missing -> unsigned build"; exit 1
           fi
-          echo "::notice::Verified signed installable APK: $APK"
+          SIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1)
+          if [ -z "$SIGNER" ]; then
+            echo "::error::apksigner not found under $ANDROID_HOME/build-tools"; find "$ANDROID_HOME" -name apksigner 2>/dev/null | head; exit 1
+          fi
+          "$SIGNER" verify --print-certs "$APK"
+          "$SIGNER" verify "$APK" && echo "::notice::Verified signed installable APK"
 
       - name: Build AAB
         working-directory: android
