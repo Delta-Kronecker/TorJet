@@ -133,18 +133,19 @@ class TorController(context: Context) {
     /** Healthy/fallback two-phase single-mode boot. NO absolute timeout. */
     private fun bootTor(mode: Int, strategy: Int): Boolean {
         var fallbackUsed = !hasFallbackSection(mode)
-        var torrc = buildTorrc(mode, strategy, healthyOnly = !fallbackUsed)
-        if (torrc == null) {
+        val firstTorrc = buildTorrc(mode, strategy, healthyOnly = !fallbackUsed)
+        if (firstTorrc == null) {
             _ui.value = _ui.value.copy(
                 state = State.ERROR,
                 error = "mode ${TorrcBuilder.MODE_NAMES.getOrElse(mode) { "?" }} skipped: no bridges available"
             )
             return false
         }
+        var torrc = firstTorrc
 
         while (!stopRequested.get()) {
             // Two-phase: first healthy-only; if it stalls, retry with EVERY bridge.
-            torrc = buildTorrc(mode, strategy, healthyOnly = !fallbackUsed) ?: torrc
+            buildTorrc(mode, strategy, healthyOnly = !fallbackUsed)?.let { torrc = it }
             torrcFile.writeText(torrc)
             if (torLog.exists()) torLog.delete()
             _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, error = null)
