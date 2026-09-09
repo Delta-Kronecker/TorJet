@@ -154,6 +154,7 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          chmod +x gradlew 2>/dev/null || true
           if [ -f release-key.jks ]; then
             echo "Signing release build with keystore"
             export KEYSTORE_FILE=release-key.jks
