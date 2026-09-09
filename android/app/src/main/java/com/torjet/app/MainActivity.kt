@@ -116,6 +116,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun render(ui: TorController.UiState) {
+        val failed = ui.state == TorController.State.ERROR
         val ringState = when (ui.state) {
             TorController.State.IDLE -> PowerRingView.RingState.IDLE
             TorController.State.CONNECTING -> PowerRingView.RingState.CONNECTING
@@ -127,25 +128,30 @@ class MainActivity : AppCompatActivity() {
         ring.ringState = ringState
         ring.progress = ui.bootPct
 
-        val state = when (ui.state) {
-            TorController.State.CONNECTED -> getString(R.string.title_connected)
-            TorController.State.CONNECTING -> {
-                if (ui.bootPct > 0) "BOOTSTRAP ${ui.bootPct}%${if (ui.bootTag.isNotEmpty()) " (${ui.bootTag})" else ""}"
-                else getString(R.string.title_connecting)
+        if (failed) {
+            stateText.text = ui.error ?: getString(R.string.title_idle)
+            stateText.setTextColor(getColor(R.color.red))
+        } else {
+            val state = when (ui.state) {
+                TorController.State.CONNECTED -> getString(R.string.title_connected)
+                TorController.State.CONNECTING -> {
+                    if (ui.bootPct > 0) "BOOTSTRAP ${ui.bootPct}%${if (ui.bootTag.isNotEmpty()) " (${ui.bootTag})" else ""}"
+                    else "Connecting...${if (ui.bootTag.isNotEmpty()) " (${ui.bootTag})" else ""}"
+                }
+                TorController.State.RESTARTING -> getString(R.string.title_restarting)
+                TorController.State.STOPPING -> getString(R.string.title_stopping)
+                else -> getString(R.string.title_idle)
             }
-            TorController.State.RESTARTING -> getString(R.string.title_restarting)
-            TorController.State.STOPPING -> getString(R.string.title_stopping)
-            else -> getString(R.string.title_idle)
+            stateText.text = state
+            stateText.setTextColor(
+                when (ui.state) {
+                    TorController.State.CONNECTED -> getColor(R.color.green)
+                    TorController.State.CONNECTING, TorController.State.STOPPING -> getColor(R.color.amber)
+                    TorController.State.RESTARTING -> getColor(R.color.red)
+                    else -> getColor(R.color.muted)
+                }
+            )
         }
-        stateText.text = state
-        stateText.setTextColor(
-            when (ui.state) {
-                TorController.State.CONNECTED -> getColor(R.color.green)
-                TorController.State.CONNECTING, TorController.State.STOPPING -> getColor(R.color.amber)
-                TorController.State.RESTARTING -> getColor(R.color.red)
-                else -> getColor(R.color.muted)
-            }
-        )
         // Jenkins/Windows UI shows the port line only once connected.
         if (ui.state == TorController.State.CONNECTED) {
             socksLine.visibility = android.view.View.VISIBLE
@@ -158,6 +164,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun bootProgress(ui: TorController.UiState) {
         val line = when {
+            ui.state == TorController.State.ERROR -> ""
             ui.state == TorController.State.CONNECTING && ui.bootPct > 0 -> "Bootstrapped ${ui.bootPct}%"
             ui.state == TorController.State.CONNECTING -> "starting tor..."
             ui.state == TorController.State.CONNECTED -> "connected"

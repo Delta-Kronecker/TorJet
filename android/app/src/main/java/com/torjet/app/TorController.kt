@@ -47,11 +47,11 @@ class TorController(context: Context) {
     private val torLog = File(dataDir, "tor.log")
     private val geoip = File(dataDir, "geoip")
     private val geoip6 = File(dataDir, "geoip6")
-    private val cookie = File(dataDir, "control_auth_cookie")
 
     private var process: Process? = null
     private val running = AtomicBoolean(false)
     private val stopRequested = AtomicBoolean(false)
+    private val pumpBuffer = java.util.ArrayDeque<String>()
 
     private val _ui = MutableStateFlow(UiState())
     val ui: StateFlow<UiState> = _ui.asStateFlow()
@@ -91,7 +91,10 @@ class TorController(context: Context) {
         if (!ready) {
             running.set(false)
             if (!stopRequested.get()) {
-                _ui.value = _ui.value.copy(state = State.ERROR, error = "tor failed to connect")
+                _ui.value = _ui.value.copy(
+                    state = State.ERROR,
+                    error = _ui.value.error ?: "tor failed to connect"
+                )
             }
             return@withContext false
         }
@@ -102,7 +105,13 @@ class TorController(context: Context) {
     /** Sequential auto: try vanilla, obfs4, webtunnel; keep the first to reach 100%. */
     private fun bootTor(mode: Int, strategy: Int, maxWaitMs: Long): Boolean {
         val torrc = buildTorrc(mode, strategy)
-        if (torrc == null) return false
+        if (torrc == null) {
+            _ui.value = _ui.value.copy(
+                state = State.ERROR,
+                error = "mode ${TorrcBuilder.MODE_NAMES.getOrElse(mode) { "?" }} skipped: no bridges available"
+            )
+            return false
+        }
         torrcFile.writeText(torrc)
         if (torLog.exists()) torLog.delete()
         _ui.value = _ui.value.copy(state = State.CONNECTING, bootPct = 0, error = null)
@@ -113,16 +122,26 @@ class TorController(context: Context) {
         val proc = try {
             pb.start()
         } catch (e: Exception) {
-            _ui.value = _ui.value.copy(state = State.ERROR, error = "failed to start tor: ${e.message}")
+            val exists = torExe.exists()
+            val exec = torExe.canExecute()
+            _ui.value = _ui.value.copy(
+                state = State.ERROR,
+                error = "failed to start tor (exists=$exists exec=$exec): ${e.message}"
+            )
             return false
         }
         process = proc
 
         // pump stdout on a background thread (keeps stderr/stdout drained and
-        // parses bootstrap lines into the UI)
+        // parses bootstrap lines into the UI; keeps a recent tail for errors)
+        synchronized(pumpBuffer) { pumpBuffer.clear() }
         val pump = Thread {
             try {
                 proc.inputStream.bufferedReader().forEachLine { line ->
+                    synchronized(pumpBuffer) {
+                        pumpBuffer.addLast(line)
+                        while (pumpBuffer.size > 30) pumpBuffer.removeFirst()
+                    }
                     parseProgressLine(line)
                 }
             } catch (_: Exception) {
@@ -134,6 +153,13 @@ class TorController(context: Context) {
         // bounded wait, polling the control port
         val deadline = System.currentTimeMillis() + maxWaitMs
         while (System.currentTimeMillis() < deadline && !stopRequested.get()) {
+            if (!proc.isAlive) {
+                // tor died on its own before bootstrap -> surface the reason
+                val msg = processDiedReason(proc)
+                _ui.value = _ui.value.copy(state = State.ERROR, error = msg)
+                killProcess()
+                return false
+            }
             val pct = controlBootstrapPercent()
             if (pct >= 100) {
                 _ui.value = _ui.value.copy(state = State.CONNECTED, bootPct = 100)
@@ -147,6 +173,30 @@ class TorController(context: Context) {
         // tor did not reach 100% in time; tear it down for the caller to fallback
         killProcess()
         return false
+    }
+
+    private fun processDiedReason(proc: Process): String {
+        val code = try {
+            proc.exitValue().toString()
+        } catch (e: Exception) {
+            "?"
+        }
+        val out = synchronized(pumpBuffer) {
+            if (pumpBuffer.isEmpty()) "(no output)" else pumpBuffer.joinToString(" | ")
+        }
+        val log = torLogTail()
+        val msg = if (log == "(no log)") out else "$out | $log"
+        return "tor exited ($code): $msg"
+    }
+
+    private fun torLogTail(maxLines: Int = 12): String {
+        return try {
+            val lines = torLog.readLines()
+            val tail = if (lines.size > maxLines) lines.takeLast(maxLines) else lines
+            tail.joinToString(" | ")
+        } catch (e: Exception) {
+            "(no log)"
+        }
     }
 
     private fun killProcess() {
@@ -197,6 +247,12 @@ class TorController(context: Context) {
             if (lines.isEmpty()) return null
             sb += "\n\n# --- bridges: ${TorrcBuilder.MODE_NAMES[mode]} ---\nUseBridges 1\n"
             sb += lines.filter { !it.startsWith("#") }.joinToString("\n") { "Bridge $it" }
+            // transport plugin line only if the binary exists (optional binaries
+            // like snowflake-client may be absent, tor must still start)
+            val plugin = TorrcBuilder.PLUGIN_LINES.getOrNull(mode)
+            if (!plugin.isNullOrEmpty() && File(dataDir, plugin.substringAfter("exec ").trim()).exists()) {
+                sb += "\n$plugin"
+            }
         }
         if (strategy >= 0 && strategy < TorrcBuilder.STRATEGY_TORRC.size &&
             TorrcBuilder.STRATEGY_TORRC[strategy].isNotEmpty()
@@ -258,7 +314,7 @@ class TorController(context: Context) {
     @Synchronized
     private fun controlCommand(cmd: String): List<String>? {
         val cookieHex = cookieHex()
-        if (cookieHex == null || !cookie.exists()) return null
+        if (cookieHex == null) return null
         return try {
             Socket().use { s ->
                 s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
@@ -288,7 +344,6 @@ class TorController(context: Context) {
     fun sendCommandBlocking(cmd: String): List<String>? {
         return try {
             val cookieHex = cookieHex() ?: return null
-            if (!cookie.exists()) return null
             Socket().use { s ->
                 s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
                 s.soTimeout = 5000
@@ -312,11 +367,21 @@ class TorController(context: Context) {
     fun newIdentity(): Boolean = sendCommand("SIGNAL NEWNYM")
 
     private fun cookieHex(): String? {
-        return try {
-            cookie.readBytes().joinToString("") { "%02x".format(it) }
-        } catch (e: Exception) {
-            null
+        // ControlAuthenticationCookie 1 writes the cookie to DataDirectory
+        // ("data" relative to the process cwd"), i.e. filesDir/tor/data/.
+        val candidates = listOf(
+            File(dataDir, "data/control_auth_cookie"),
+            dataDir.run { File(this, "control_auth_cookie") }
+        )
+        for (f in candidates) {
+            if (!f.exists()) continue
+            return try {
+                f.readBytes().joinToString("") { "%02x".format(it) }
+            } catch (e: Exception) {
+                null
+            }
         }
+        return null
     }
 
     private fun cleanupInternal() {

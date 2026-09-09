@@ -78,6 +78,8 @@ jobs:
           [ -f out/snowflake-client ] && cp out/snowflake-client android/app/src/main/assets/native/snowflake-client
           [ -f out/webtunnel ] && cp out/webtunnel android/app/src/main/assets/native/webtunnel
           # bridge lists (download + combine IPv4/IPv6 like the Windows build.yml)
+          # retry each download; a 0-byte file would just disable that mode, so we
+          # delete empties to make buildTorrc fail fast and auto-race skip them.
           mkdir -p tmp-bridges
           base="https://raw.githubusercontent.com/Delta-Kronecker/Tor-Bridges-Collector/refs/heads/main/bridge"
           for pair in "obfs4_tested.txt obfs4_tested.txt obfs4_ipv6_tested.txt" \
@@ -85,15 +87,29 @@ jobs:
                       "vanilla_tested.txt vanilla_tested.txt vanilla_ipv6_tested.txt"; do
             set -- $pair
             dest="$1"; v4="$2"; v6="$3"
-            curl -fsSL --max-time 30 "$base/$v4" > "tmp-bridges/$dest" 2>/dev/null || { echo "skip $dest"; continue; }
-            curl -fsSL --max-time 30 "$base/$v6" >> "tmp-bridges/$dest" 2>/dev/null || true
+            ok=0
+            for attempt in 1 2 3; do
+              if curl -fsSL --retry 2 --max-time 45 "$base/$v4" -o "tmp-bridges/$dest" 2>/dev/null \
+                 && [ -s "tmp-bridges/$dest" ]; then ok=1; break; fi
+              sleep 2
+            done
+            [ "$ok" = 1 ] || { echo "::warning::bridge download failed for $dest (mode will be skipped)"; rm -f "tmp-bridges/$dest"; continue; }
+            curl -fsSL --retry 2 --max-time 45 "$base/$v6" >> "tmp-bridges/$dest" 2>/dev/null || true
             sed -i '/^[[:space:]]*#/d; /2001:db8/d; /^[[:space:]]*$/d' "tmp-bridges/$dest" || true
             sort -u "tmp-bridges/$dest" -o "tmp-bridges/$dest"
+            [ -s "tmp-bridges/$dest" ] || { echo "::warning::$dest empty after cleanup (mode will be skipped)"; rm -f "tmp-bridges/$dest"; }
           done
           for f in vanilla_tested.txt obfs4_tested.txt webtunnel_tested.txt; do
-            [ -f "tmp-bridges/$f" ] && cp "tmp-bridges/$f" "android/app/src/main/assets/native/$f"
+            [ -f "tmp-bridges/$f" ] && cp "tmp-bridges/$f" "android/app/src/main/assets/native/$f" || true
           done
-          cp bridges/snowflake_tested.txt android/app/src/main/assets/native/snowflake_tested.txt
+          if [ -s bridges/snowflake_tested.txt ]; then
+            cp bridges/snowflake_tested.txt android/app/src/main/assets/native/snowflake_tested.txt
+          else
+            echo "::warning::snowflake bridge list empty (snowflake mode disabled)"
+          fi
+          if [ ! -f android/app/src/main/assets/native/snowflake-client ]; then
+            echo "::warning::snowflake-client binary missing (snowflake mode disabled)"
+          fi
           printf 'built=%s\nref=%s\n' "$(date -u +%s)" "$GITHUB_SHA" \
             > android/app/src/main/assets/native/stamp.txt
           echo "assets/native:"; ls -la android/app/src/main/assets/native

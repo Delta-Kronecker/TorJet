@@ -74,6 +74,18 @@ object TorrcBuilder {
 
     val SET_SELECTION_NAMES = arrayOf("first", "round-robin", "least-streams", "fastest")
 
+    /**
+     * Transport plugin lines for the modes that need them. The runtime only
+     * writes the lines for plugins whose binary actually exists in filesDir,
+     * so a missing optional transport doesn't break tor startup.
+     */
+    val PLUGIN_LINES = arrayOf(
+        "",                                                             // vanilla
+        "ClientTransportPlugin obfs4 exec obfs4proxy",                  // obfs4
+        "ClientTransportPlugin webtunnel exec webtunnel",               // webtunnel
+        "ClientTransportPlugin snowflake exec snowflake-client"         // snowflake
+    )
+
     /** Mirrors configs/torrc.jet. Placeholders: {socksport}, {keepport}, {httpport}, {dnsport}, {ctrlport}, {datadir}. */
     val TEMPLATE: String = """
 # TorJet - Android portable Tor client config (tor 0.4.9.11)
@@ -114,7 +126,6 @@ PathsNeededToBuildCircuits 0.25
 
 ClientTransportPlugin webtunnel exec webtunnel
 ClientTransportPlugin obfs4 exec obfs4proxy
-ClientTransportPlugin snowflake exec snowflake-client
 
 DataDirectory {datadir}
 Log notice file tor.log
