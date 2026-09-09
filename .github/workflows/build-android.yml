@@ -56,7 +56,7 @@ jobs:
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
             go install gitlab.com/yawning/obfs4.git/obfs4proxy@v0.0.0-20231012084234-c3e2d44b1033 || true
           cp "$(go env GOPATH)/bin/android_arm64/obfs4proxy" out/obfs4proxy 2>/dev/null || true
-# snowflake client (best-effort; gitlab.torproject.org may be flaky,
+          # snowflake client (best-effort; gitlab.torproject.org may be flaky,
             # so retry and also try the Go module proxy which mirrors it)
             # -checklinkname=0: snowflake's pion/ice uses wlynxg/anet which
             # linknames internal net.zoneCache; Go 1.23+ rejects that link from
