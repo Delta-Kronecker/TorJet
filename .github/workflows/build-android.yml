@@ -56,13 +56,17 @@ jobs:
           CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
             go install gitlab.com/yawning/obfs4.git/obfs4proxy@v0.0.0-20231012084234-c3e2d44b1033 || true
           cp "$(go env GOPATH)/bin/android_arm64/obfs4proxy" out/obfs4proxy 2>/dev/null || true
-          # snowflake client (best-effort; gitlab.torproject.org may be flaky,
-          # so retry and also try the Go module proxy which mirrors it)
-          if ! (CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+# snowflake client (best-effort; gitlab.torproject.org may be flaky,
+            # so retry and also try the Go module proxy which mirrors it)
+            # -checklinkname=0: snowflake's pion/ice uses wlynxg/anet which
+            # linknames internal net.zoneCache; Go 1.23+ rejects that link from
+            # third-party packages, so disable the check ("invalid reference
+            # to net.zoneCache").
+            if ! (CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
             GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org,direct \
-            go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1 \
+            go install -ldflags=-checklinkname=0 gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1 \
             || CGO_ENABLED=0 GOOS=android GOARCH=arm64 GOPROXY=direct \
-               go install gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1); then
+               go install -ldflags=-checklinkname=0 gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/snowflake/v2/client@v2.14.1); then
             echo "::warning::snowflake client build failed (snowflake mode disabled)"
           fi
           cp "$(go env GOPATH)/bin/android_arm64/client" out/snowflake-client 2>/dev/null || true
