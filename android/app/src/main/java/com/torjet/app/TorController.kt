@@ -146,7 +146,7 @@ class TorController(context: Context) {
         }
         // tor did not reach 100% in time; tear it down for the caller to fallback
         killProcess()
-        false
+        return false
     }
 
     private fun killProcess() {
@@ -283,26 +283,28 @@ class TorController(context: Context) {
     fun sendCommand(cmd: String): Boolean = controlCommand(cmd) != null
 
     /** Non-synchronized variant for background thread consumers. */
-    fun sendCommandBlocking(cmd: String): List<String>? = try {
-        val cookieHex = cookieHex()
-        if (cookieHex == null || !cookie.exists()) return null
-        Socket().use { s ->
-            s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
-            s.soTimeout = 5000
-            val rw = SocketIO(s)
-            rw.writeLine("AUTHENTICATE $cookieHex")
-            if (!rw.readLine().startsWith("250")) return null
-            rw.writeLine(cmd)
-            val out = mutableListOf<String>()
-            var ln = rw.readLine()
-            while (ln != null && !ln.startsWith("250")) {
-                out.add(ln)
-                ln = rw.readLine()
+    fun sendCommandBlocking(cmd: String): List<String>? {
+        return try {
+            val cookieHex = cookieHex() ?: return null
+            if (!cookie.exists()) return null
+            Socket().use { s ->
+                s.connect(InetSocketAddress("127.0.0.1", ctrlPort), 5000)
+                s.soTimeout = 5000
+                val rw = SocketIO(s)
+                rw.writeLine("AUTHENTICATE $cookieHex")
+                if (!rw.readLine().startsWith("250")) return null
+                rw.writeLine(cmd)
+                val out = mutableListOf<String>()
+                var ln = rw.readLine()
+                while (ln != null && !ln.startsWith("250")) {
+                    out.add(ln)
+                    ln = rw.readLine()
+                }
+                out
             }
-            out
+        } catch (e: Exception) {
+            null
         }
-    } catch (e: Exception) {
-        null
     }
 
     fun newIdentity(): Boolean = sendCommand("SIGNAL NEWNYM")

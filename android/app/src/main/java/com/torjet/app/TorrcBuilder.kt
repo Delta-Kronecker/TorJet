@@ -9,7 +9,7 @@ object TorrcBuilder {
 
     val MODE_NAMES = arrayOf("vanilla", "obfs4", "webtunnel", "snowflake", "direct", "memory")
     val STRATEGY_NAMES = arrayOf("standard", "balanced", "aggressive", "ultimate", "lowlatency")
-    const val MODE_AUTO = MODE_NAMES.size // pseudo-mode for the auto race
+    val MODE_AUTO = MODE_NAMES.size // pseudo-mode for the auto race
     const val DEFAULT_STRATEGY = 3        // "ultimate"
 
     val STRATEGY_DESC = arrayOf(
