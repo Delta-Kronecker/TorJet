@@ -18,8 +18,9 @@ android {
     signingConfigs {
         create("release") {
             val ksFile = System.getenv("KEYSTORE_FILE")
-            if (ksFile != null && file(ksFile).exists()) {
-                storeFile = file(ksFile)
+            val ks = ksFile?.let { rootProject.file(it) }
+            if (ks != null && ks.exists()) {
+                storeFile = ks
                 storePassword = System.getenv("STORE_PASSWORD") ?: ""
                 keyAlias = System.getenv("KEY_ALIAS") ?: "torjet"
                 keyPassword = System.getenv("KEY_PASSWORD") ?: ""
@@ -32,7 +33,8 @@ android {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             val ksFile = System.getenv("KEYSTORE_FILE")
-            if (ksFile != null && file(ksFile).exists()) {
+            val ks = ksFile?.let { rootProject.file(it) }
+            if (ks != null && ks.exists()) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }

@@ -182,7 +182,16 @@ jobs:
 
       - name: Build AAB
         working-directory: android
-        run: ./gradlew bundleRelease --no-daemon
+        env:
+          STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -f release-key.jks ]; then
+            echo "Signing AAB with keystore"
+            export KEYSTORE_FILE=release-key.jks
+          fi
+          ./gradlew bundleRelease --no-daemon
 
       - name: Upload APK
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0 (node24)
