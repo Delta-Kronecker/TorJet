@@ -332,17 +332,17 @@ namespace StartTor
 
             private Rectangle rcClose, rcMin,
                               rcProxy, rcSettings, rcPower, rcBack, rcUpdateBtn;
-            private readonly Rectangle[] rcRowVal = new Rectangle[11];
-            private readonly Rectangle[] rcRowPrev = new Rectangle[11];
-            private readonly Rectangle[] rcRowNext = new Rectangle[11];
-            private readonly Rectangle[] rcRowBody = new Rectangle[11];
+            private readonly Rectangle[] rcRowVal = new Rectangle[12];
+            private readonly Rectangle[] rcRowPrev = new Rectangle[12];
+            private readonly Rectangle[] rcRowNext = new Rectangle[12];
+            private readonly Rectangle[] rcRowBody = new Rectangle[12];
 
             private static readonly string[] SettingLabels =
             {
                 "Mode", "Auto proxy",
                 "Strategy level", "Conflux sets", "Conflux legs", "Linked-set cap",
                 "Keep-alive", "Set select", "Skip slow sets (RTT)", "Best % of sets",
-                "Weak legs (top %)"
+                "Weak legs (top %)", "Isolate SOCKS"
             };
 
             public MainForm()
@@ -896,9 +896,9 @@ namespace StartTor
             private void PaintSettingValue(Graphics g, int i)
             {
                 Rectangle v = rcRowVal[i];
-                if (i == 1 || i == 6)
+                if (i == 1 || i == 6 || i == 11)
                 {
-                    bool on = i == 1 ? autoProxyEnabled : keepAliveEnabled;
+                    bool on = i == 1 ? autoProxyEnabled : (i == 6 ? keepAliveEnabled : isolateSocksAuth);
                     int swW = 44, swH = 22, swX = v.Right - 52, swY = v.Y + (v.Height - swH) / 2;
                     Rectangle sw = new Rectangle(swX, swY, swW, swH);
                     Color bg = on ? Theme.Green : Theme.SurfaceLight;
@@ -1125,6 +1125,12 @@ namespace StartTor
                                 else if (state == RunState.Connected) StartKeepAlive();
                                 Invalidate();
                             }
+                            else if (row == 11)
+                            {
+                                isolateSocksAuth = !isolateSocksAuth;
+                                WriteIsolateSocksFile(isolateSocksAuth);
+                                Invalidate();
+                            }
                         }
                         else
                         {
@@ -1212,7 +1218,7 @@ namespace StartTor
                     int rowCount = SettingLabels.Length;
                     for (int i = 0; i < rowCount; i++)
                     {
-                        if (i == 1 || i == 6)
+                        if (i == 1 || i == 6 || i == 11)
                         {
                             if (rcRowVal[i].Contains(p)) return 200 + i;
                             continue;

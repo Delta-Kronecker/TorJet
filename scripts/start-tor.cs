@@ -83,6 +83,7 @@ namespace StartTor
         private static readonly string WatchRttPctFile = Path.Combine(DataDir, "circuit-watch-pct.txt");
         private static readonly string KeepAliveFile = Path.Combine(DataDir, "keepalive.txt");
         private static readonly string AutoProxyFile = Path.Combine(DataDir, "auto-proxy.txt");
+        private static readonly string IsolateSOCKSFile = Path.Combine(DataDir, "isolate-socks.txt");
         private const int KeepAliveSocksPort = 9052;
         private const string KeepAliveUsername = "torjet-keepalive";
         private const int MaxSpeedTestStreams = 4;
@@ -97,12 +98,18 @@ namespace StartTor
         private static int confluxLegs = ReadConfluxSetting(ConfluxLegsFile, 1);
         private static int confluxLinkedSets = ReadConfluxSetting(ConfluxLinkedSetsFile, DefaultConfluxSets);
         private static int confluxSelection = ReadConfluxSetting(ConfluxSelectionFile, 1);
-        // Deliberate product default (v1.5.5+): ping-first tuning — RTT filters
-        // ship ON (400 ms skip / best 20%). The 2026-08 bench showed this costs
-        // sustained download; throughput-focused users can pick the ultimate
-        // preset, which switches the filters off again.
-        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 400);
-        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 20);
+        // Deliberate product default (v1.5.19+): ping-first tuning relaxed — the
+        // skip-slow-sets filter ships OFF (0 ms) and best-% of sets at 15% so the
+        // RTT filters don't steal sustained-download throughput out of the box.
+        // The lowlatency preset re-enables them (400 ms skip / best 20%) for
+        // latency-sensitive users.
+        private static int confluxRttMax = ReadConfluxSetting(ConfluxRttMaxFile, 0);
+        private static int confluxRttPct = ReadConfluxSetting(ConfluxRttPctFile, 15);
+        // IsolateSOCKSAuth: when ON (default) every SOCKS stream gets its own
+        // circuit for maximum privacy separation; the keep-alive port stays
+        // NoIsolateSOCKSAuth so its pings spread across all conflux sets. When
+        // OFF both ports drop the isolation markers (streams share circuits).
+        private static bool isolateSocksAuth = ReadIsolateSocksSetting();
         private static readonly string[] SetSelectionNames = { "first", "round-robin", "least-streams", "fastest" };
         private static readonly string[] StrategyNames = { "standard", "balanced", "aggressive", "ultimate", "lowlatency" };
         // The shipped default when no data\strategy.txt exists yet. Looked up by
@@ -909,6 +916,23 @@ namespace StartTor
             catch { }
         }
 
+        private static bool ReadIsolateSocksSetting()
+        {
+            try
+            {
+                if (File.Exists(IsolateSOCKSFile))
+                    return File.ReadAllText(IsolateSOCKSFile).Trim().Equals("on", StringComparison.OrdinalIgnoreCase);
+            }
+            catch { }
+            return true;
+        }
+
+        private static void WriteIsolateSocksFile(bool on)
+        {
+            try { File.WriteAllText(IsolateSOCKSFile, on ? "on" : "off", new UTF8Encoding(false)); }
+            catch { }
+        }
+
         private static void PromptConfluxSets()
         {
             Console.WriteLine("  ConfluxNumSets = how many conflux sets to keep alive");
@@ -1213,9 +1237,10 @@ namespace StartTor
                 Console.WriteLine("       7)  Skip slow sets (RTT): " + (confluxRttMax == 0 ? "off" : confluxRttMax + " ms"));
                 Console.WriteLine("       8)  Best % of sets (RTT): " + (confluxRttPct == 0 ? "off" : confluxRttPct + "%"));
                 Console.WriteLine("       9)  Weak legs (top %)   : " + (watchRttPct == 0 ? "off" : watchRttPct + "%"));
-                Console.WriteLine("      10)  Back");
+                Console.WriteLine("      10)  Isolate SOCKS      : " + (isolateSocksAuth ? "on" : "off"));
+                Console.WriteLine("      11)  Back");
                 Console.WriteLine();
-                Console.Write("  Enter 1-10 (Enter = Back): ");
+                Console.Write("  Enter 1-11 (Enter = Back): ");
                 string input;
                 try { input = Console.ReadLine(); }
                 catch { return; }
@@ -1240,7 +1265,14 @@ namespace StartTor
                     else if (n == 7) { PromptConfluxRttMax(); }
                     else if (n == 8) { PromptConfluxRttPct(); }
                     else if (n == 9) { PromptWatchRttPct(); }
-                    else if (n == 10) return;
+                    else if (n == 10)
+                    {
+                        isolateSocksAuth = !isolateSocksAuth;
+                        WriteIsolateSocksFile(isolateSocksAuth);
+                        Console.WriteLine("  SOCKS stream isolation set to " +
+                                          (isolateSocksAuth ? "on (per-stream circuits)" : "off (shared circuits)") + ".");
+                    }
+                    else if (n == 11) return;
                     else Console.WriteLine("  Invalid choice, try again.");
                 }
                 else Console.WriteLine("  Invalid choice, try again.");
@@ -1272,7 +1304,16 @@ namespace StartTor
                 return null;
             }
             string tmpl = File.ReadAllText(TorrcTemplate);
+            // SocksPort lines are cumulative in tor (later lines ADD listeners,
+            // they don't replace), so pull every SocksPort out of the template
+            // and re-emit it according to the IsolateSOCKSAuth toggle.
+            tmpl = StripSocksPortLines(tmpl);
             StringBuilder sb = new StringBuilder(tmpl.TrimEnd());
+            sb.AppendLine();
+            sb.AppendLine();
+            sb.AppendLine("# --- socks listeners ---");
+            sb.AppendLine("SocksPort 127.0.0.1:9050" + (isolateSocksAuth ? " IsolateSOCKSAuth" : ""));
+            sb.AppendLine("SocksPort 127.0.0.1:9052" + (isolateSocksAuth ? " NoIsolateSOCKSAuth" : ""));
             if (BridgeFiles[mode].Length > 0)
             {
                 string bf = Path.Combine(BridgesDir, BridgeFiles[mode]);
@@ -3625,6 +3666,18 @@ namespace StartTor
             return string.Join("\n", keep);
         }
 
+        private static string StripSocksPortLines(string content)
+        {
+            var keep = new List<string>();
+            foreach (string raw in content.Split('\n'))
+            {
+                string t = raw.Trim();
+                bool drop = t.StartsWith("SocksPort ", StringComparison.OrdinalIgnoreCase);
+                if (!drop) keep.Add(raw.TrimEnd('\r'));
+            }
+            return string.Join("\n", keep);
+        }
+
         private static void AutoKillAll(List<AutoRacer> racers)
         {
             foreach (AutoRacer r in racers)
@@ -3661,8 +3714,8 @@ namespace StartTor
             content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
                        "DataDirectory " + r.Dir + "\r\n" +
                        "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
-                       "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
-                       "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
+                       "SocksPort 127.0.0.1:" + r.Socks + (isolateSocksAuth ? " IsolateSOCKSAuth" : "") + "\r\n" +
+                       "SocksPort 127.0.0.1:" + r.Keep + (isolateSocksAuth ? " NoIsolateSOCKSAuth" : "") + "\r\n" +
                        "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
                        "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
                        "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
@@ -3826,8 +3879,8 @@ namespace StartTor
                 content += "\r\n\r\n# --- auto race overrides: " + r.Name + " ---\r\n" +
                            "DataDirectory " + r.Dir + "\r\n" +
                            "Log notice file " + r.Dir + @"\tor.log" + "\r\n" +
-                           "SocksPort 127.0.0.1:" + r.Socks + " IsolateSOCKSAuth\r\n" +
-                           "SocksPort 127.0.0.1:" + r.Keep + " NoIsolateSOCKSAuth\r\n" +
+"SocksPort 127.0.0.1:" + r.Socks + (isolateSocksAuth ? " IsolateSOCKSAuth" : "") + "\r\n" +
+                           "SocksPort 127.0.0.1:" + r.Keep + (isolateSocksAuth ? " NoIsolateSOCKSAuth" : "") + "\r\n" +
                            "HTTPTunnelPort 127.0.0.1:" + r.Http + "\r\n" +
                            "DNSPort 127.0.0.1:" + r.Dns + "\r\n" +
                            "ControlPort 127.0.0.1:" + r.Ctrl + "\r\n";
